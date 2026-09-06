@@ -115,10 +115,12 @@ function log_action(?int $profileId, string $action, ?string $detail = null): vo
 
 /**
  * Scan MOT LAN toan bo process chrome.exe dang chay (1 luot PowerShell duy nhat),
- * tra ve map user_data_dir => true (lowercase). Cache theo request.
- * Truoc day moi profile goi 1 lan PowerShell -> vai chuc giay cho 20+ kenh.
+ * tra ve map user_data_dir (lowercase) => false|true|cmdline:
+ *   - neu co process chinh (khong co --type=): cmdline cua process do
+ *   - nguoc lai: true (dang chay, chua thay process chinh)
+ * Cache theo request. Gom ca is_chrome_running lan chrome_main_cmdline de chi 1 luot PS.
  */
-function running_chrome_dirs(): array
+function chrome_running_info(): array
 {
     static $cache = null;
     if ($cache !== null) return $cache;
@@ -131,10 +133,30 @@ function running_chrome_dirs(): array
     foreach ($out as $line) {
         if (stripos($line, '--user-data-dir=') === false) continue;
         if (preg_match('/--user-data-dir=([^\s"]+)/', $line, $m)) {
-            $cache[strtolower(rtrim($m[1], '"'))] = true;
+            $dir = strtolower(rtrim($m[1], '"'));
+            $isMain = stripos($line, '--type=') === false;
+            if (!isset($cache[$dir])) {
+                $cache[$dir] = $isMain ? $line : true;
+            } elseif (!is_string($cache[$dir]) && $isMain) {
+                $cache[$dir] = $line;
+            }
         }
     }
     return $cache;
+}
+
+function running_chrome_dirs(): array
+{
+    $out = [];
+    foreach (chrome_running_info() as $dir => $_v) $out[$dir] = true;
+    return $out;
+}
+
+/** Lay command line cua process Chrome CHINH (khong phai renderer/gpu...) cua 1 user_data_dir. null neu khong chay. */
+function chrome_main_cmdline(string $dir): ?string
+{
+    $v = chrome_running_info()[strtolower(trim($dir))] ?? null;
+    return is_string($v) ? $v : null;
 }
 
 function is_chrome_running(array $p): bool
@@ -151,17 +173,6 @@ function profile_live(array $p): bool
     $dir = trim((string)($p['user_data_dir'] ?? ''));
     if ($dir === '') return false;
     return isset(running_chrome_dirs()[strtolower($dir)]);
-}
-
-/** Lay toan bo command line cua process Chrome CHINH (khong phai renderer/gpu...) cua 1 user_data_dir. null neu khong chay. */
-function chrome_main_cmdline(string $dir): ?string
-{
-    $ps = 'powershell -NoProfile -Command '
-        . '"Get-CimInstance Win32_Process -Filter \"Name=' . "'" . 'chrome.exe' . "'" . '\" '
-        . '| Where-Object { $_.CommandLine -like ' . "'" . '*' . $dir . '*' . "'" . ' -and $_.CommandLine -notlike ' . "'" . '*--type=*' . "'" . ' } '
-        . '| Select-Object -First 1 -ExpandProperty CommandLine"';
-    $out = shell_exec($ps . ' 2>NUL');
-    return $out ? trim($out) : null;
 }
 
 /** Chrome dang chay co dung config proxy/ua nhu trong DB khong? (dung de biet co can restart khi config doi) */
@@ -311,12 +322,12 @@ function stop_proxy_relay_if_unused(array $p): void
     stop_proxy_relay($port);
 }
 
-/** Kiem tra CDP endpoint cua 1 debug port co phan hoi khong (timeout 1s) */
+/** Kiem tra CDP endpoint cua 1 debug port co lang nghe khong (TCP connect 0.5s, khong lay du lieu) */
 function cdp_reachable(int $port): bool
 {
-    $ctx = stream_context_create(['http' => ['timeout' => 1, 'method' => 'GET', 'ignore_errors' => true]]);
-    $res = @file_get_contents('http://127.0.0.1:' . $port . '/json/version', false, $ctx);
-    return $res !== false;
+    $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.5);
+    if ($fp) { fclose($fp); return true; }
+    return false;
 }
 
 /** CDP: lay danh sach page targets cua debug port (/json/list) */
@@ -399,7 +410,7 @@ function chrome_tab_title_prefix(int $port, string $name): void
     $nJs = json_encode($name, JSON_UNESCAPED_UNICODE);
     $src = "(()=>{const N=$nJs;const P=N+' | ';const A=()=>{const t=document.title;const n=P+t.split(P).join('').trim();if(t!==n)document.title=n;};try{A();new MutationObserver(A).observe(document.documentElement,{subtree:true,childList:true,characterData:true});}catch(e){}setInterval(A,300);})();";
     $expr = "(()=>{const N=$nJs;const P=N+' | ';const t=document.title;const n=P+t.split(P).join('').trim();if(t!==n)document.title=n;})()";
-    $deadline = microtime(true) + 3;
+    $deadline = microtime(true) + 1.5;
     while (microtime(true) < $deadline) {
         $targets = cdp_page_targets($port);
         foreach ($targets as $t) {
@@ -454,19 +465,29 @@ function build_chrome_command(array $p, string $url = 'https://www.youtube.com',
     return $cmd;
 }
 
-/** Fire-and-forget launch Chrome (khong cho thoat), dung chung browser.php + sync.php */
+/** Fire-and-forget launch Chrome (khong cho thoat), dung chung browser.php + sync.php.
+ * Voi proxy co credential: start_proxy_relay BEEN LA guard song/chet cua proxy
+ * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep). */
 function launch_chrome(array $p, string $url, ?int $port): void
 {
     $relayPort = start_proxy_relay($p);
+    // proxy co credential nhung relay khong len duoc (proxy chet/hong) -> dung mo Chrome,
+    // tra loi loi de UI bao ngay (tranh mo ra "no internet").
+    if ($relayPort === null && expected_relay_port($p) !== null) {
+        db()->prepare('UPDATE proxies SET status=?, last_check=NOW() WHERE id=?')
+            ->execute(['dead', (int)($p['proxy_id'] ?? 0)]);
+        throw new RuntimeException(
+            'Proxy cua kenh khong phan hoi nen khong mo duoc Chrome. Gan proxy khac hoac thu lai.'
+        );
+    }
     $cmd = build_chrome_command($p, $url, $port, $relayPort);
     $quoted = array_map(function ($arg) {
         return '"' . $arg . '"';
     }, $cmd);
     $shell = 'start "" /B ' . implode(' ', $quoted) . ' > NUL 2>&1';
     pclose(popen($shell, 'r'));
-    // gan ten kenh len tieu de tab dau tien (CDP, best-effort ~3s) + theo doi de tab moi cung co ten kenh
+    // ten kenh tren tab do tabtitle_keeper lo (khong cha de title xong moi tra loi -> mo nhanh)
     if ($port) {
-        chrome_tab_title_prefix($port, (string)($p['name'] ?? ''));
         start_tab_title_keeper($port, (int)($p['id'] ?? 0));
     }
 }
@@ -578,7 +599,8 @@ function test_proxy(array $p): bool
 {
     $host = $p['host'];
     $port = (int)$p['port'];
-    $timeout = proxy_timeout();
+    // cap 3s cho kiem tra trong luong open kenh (deadline du nho de khong lam UI to mau)
+    $timeout = min(proxy_timeout(), 3);
 
     $ch = curl_init('http://www.google.com/generate_204');
     curl_setopt_array($ch, [

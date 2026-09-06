@@ -239,8 +239,10 @@ function renderProfiles() {
           ${tabInfo}
         </div>
         <div class="card-actions">
-          <button class="btn btn-sm btn-primary" onclick="openProfile(${p.id})">▶ Mở</button>
-          ${p.status === 'running' ? `<button class="btn btn-sm btn-danger" onclick="closeProfile(${p.id})">■ Đóng</button>` : ''}
+          ${st.state === 'busy'
+            ? `<button class="btn btn-sm" disabled>⏳</button>`
+            : `<button class="btn btn-sm btn-primary" onclick="openProfile(${p.id})">▶ Mở</button>`}
+          ${st.state === 'running' ? `<button class="btn btn-sm btn-danger" onclick="closeProfile(${p.id})">■ Đóng</button>` : ''}
           <button class="btn btn-sm" title="Mở kênh để xác nhận không phải bot (sign in)" onclick="openProfile(${p.id})">🛡 Xác nhận</button>
           <button class="btn btn-sm" onclick="openProfileModalEdit(${p.id})">⚙</button>
           <button class="btn btn-sm btn-danger" onclick="deleteProfile(${p.id})">🗑</button>
@@ -424,6 +426,9 @@ function buildProxyRow(p) {
 }
 
 function liveProfileStatus(p) {
+  const op = pendingOps.get(p.id);
+  if (op === 'opening') return { state: 'busy', label: 'Đang mở…' };
+  if (op === 'closing') return { state: 'busy', label: 'Đang đóng…' };
   const st = p.status || 'stopped';
   if (st === 'running') return { state: 'running', label: 'Đang chạy' };
   if (st === 'error') return { state: 'error', label: 'Lỗi' };
@@ -435,11 +440,24 @@ function platLabel(p) {
 }
 
 // ============ PROFILE ACTIONS ============
+// Trạng thái đang xử lý (mở/đóng) để card đổi trạng thái NGAY khi bấm, không chờ server.
+const pendingOps = new Map(); // id -> 'opening' | 'closing'
 async function openProfile(id) {
-  const res = await getJson(api + `browser.php?action=open&id=${id}`);
-  toast(res.message || 'Đã mở', res.ok ? 'success' : 'error');
-  if (res.proxy_dead) loadProxies();
-  if (res.ok) refreshAll();
+  if (pendingOps.has(id)) return;
+  pendingOps.set(id, 'opening');
+  renderProfiles();
+  let res;
+  try {
+    res = await getJson(api + `browser.php?action=open&id=${id}`);
+    toast(res.message || 'Đã mở', res.ok ? 'success' : 'error');
+    if (res.proxy_dead) loadProxies();
+    if (res.ok) refreshAll();
+  } catch (e) {
+    toast('Lỗi khi mở kênh', 'error');
+  } finally {
+    pendingOps.delete(id);
+    renderProfiles();
+  }
 }
 async function deleteProfile(id) {
   const p = profiles.find(x => x.id === id);
@@ -451,9 +469,20 @@ async function deleteProfile(id) {
   });
 }
 async function closeProfile(id) {
-  const res = await getJson(api + `browser.php?action=close&id=${id}`);
-  toast(res.message || 'Đã đóng', res.ok ? 'success' : 'error');
-  refreshAll();
+  if (pendingOps.has(id)) return;
+  pendingOps.set(id, 'closing');
+  renderProfiles();
+  let res;
+  try {
+    res = await getJson(api + `browser.php?action=close&id=${id}`);
+    toast(res.message || 'Đã đóng', res.ok ? 'success' : 'error');
+    refreshAll();
+  } catch (e) {
+    toast('Lỗi khi đóng kênh', 'error');
+  } finally {
+    pendingOps.delete(id);
+    renderProfiles();
+  }
 }
 async function openAllProfiles() {
   for (const p of profiles) {

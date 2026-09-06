@@ -384,9 +384,12 @@ body {
 .status-running i { background: var(--green); box-shadow: 0 0 10px rgba(52,209,123,.8); }
 .status-stopped i { background: #4d5670; }
 .status-error i { background: var(--red); box-shadow: 0 0 8px rgba(255,82,82,.7); }
+.status-busy i { background: #ffb86b; box-shadow: 0 0 8px rgba(255,184,107,.7); animation: busyPulse 1.1s ease-in-out infinite; }
+@keyframes busyPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .status-dot.status-running { color: var(--green); }
 .status-dot.status-stopped { color: var(--muted); }
 .status-dot.status-error { color: var(--red); }
+.status-dot.status-busy { color: #ffb86b; }
 
 .platform-chip {
   font-size: 10.5px; padding: 3px 9px; border-radius: 7px; font-weight: 700;

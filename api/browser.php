@@ -95,8 +95,11 @@ function open_chrome(array $p, string $url = 'https://www.youtube.com'): void
         }
     }
 
-    // Chi mo khi proxy con song
-    if (!empty($p['proxy_host'])) {
+    // Chi mo khi proxy con song.
+    // Proxy CO credential dung relay local -> kiem tra song/chet nam trong launch_chrome
+    // (start_proxy_relay), khong test_proxy rieng de mo nhanh (1 lan noi len proxy la du).
+    // Proxy KHONG credential (khong can relay) -> van test_proxy nhu cu.
+    if (!empty($p['proxy_host']) && expected_relay_port($p) === null) {
         $proxyTest = [
             'host'     => $p['proxy_host'],
             'port'     => (int)$p['proxy_port'],
@@ -125,7 +128,11 @@ function open_chrome(array $p, string $url = 'https://www.youtube.com'): void
     }
 
     // Fire-and-forget: dung popen + start /B de khong cho Chrome thoat
-    launch_chrome($p, $url, $port);
+    try {
+        launch_chrome($p, $url, $port);
+    } catch (RuntimeException $e) {
+        json_out(['ok' => false, 'proxy_dead' => true, 'message' => $e->getMessage()], 409);
+    }
 
     db()->prepare('UPDATE profiles SET status=?, last_opened=NOW(), debug_port=? WHERE id=?')
         ->execute(['running', $port, (int)$p['id']]);
