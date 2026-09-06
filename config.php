@@ -465,6 +465,49 @@ function build_chrome_command(array $p, string $url = 'https://www.youtube.com',
     return $cmd;
 }
 
+/**
+ * Set ten profile Chrome (file Default/Preferences) cho kenh = "Kenh<id>" (ASCII, khong space)
+ * truoc khi launch. Chrome dung ten profile de tao AppUserModelID cua cua so
+ * ("Chrome.<hash>.<profile_name>") -> moi kenh duoc Windows tach rieng tren taskbar.
+ * Chi ghi khi Chrome chua chay (goi tu launch_chrome truoc start /B).
+ */
+function ensure_chrome_profile_name(array $p): void
+{
+    $dir = trim((string)($p['user_data_dir'] ?? ''));
+    $id = (int)($p['id'] ?? 0);
+    if ($dir === '' || $id <= 0) return;
+    $name = 'Kenh' . $id;
+    $base = rtrim($dir, '/\\');
+
+    // 1) Preferences cua profile Default
+    $prefPath = $base . DIRECTORY_SEPARATOR . 'Default' . DIRECTORY_SEPARATOR . 'Preferences';
+    $data = ['account_info' => [], 'profile' => ['name' => $name]];
+    if (is_file($prefPath)) {
+        $cur = json_decode((string)@file_get_contents($prefPath), true);
+        if (is_array($cur)) $data = $cur;
+    } else {
+        @mkdir($base . DIRECTORY_SEPARATOR . 'Default', 0777, true);
+    }
+    $data['profile']['name'] = $name;
+    @file_put_contents($prefPath, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+
+    // 2) Local State -> profile.info_cache.<dir profile>.name (Chrome dung cai nay de tao AUMI)
+    $lsPath = $base . DIRECTORY_SEPARATOR . 'Local State';
+    $ls = is_file($lsPath) ? json_decode((string)@file_get_contents($lsPath), true) : [];
+    if (!is_array($ls)) $ls = [];
+    if (!isset($ls['profile']['info_cache']) || !is_array($ls['profile']['info_cache'])) {
+        $ls['profile']['info_cache'] = [];
+    }
+    // tim key profile Default trong info_cache; neu khong co thi tao
+    $defaultKey = 'Default';
+    if (isset($ls['profile']['info_cache'][$defaultKey]) && is_array($ls['profile']['info_cache'][$defaultKey])) {
+        $ls['profile']['info_cache'][$defaultKey]['name'] = $name;
+    } else {
+        $ls['profile']['info_cache'] = array_merge([$defaultKey => ['name' => $name, 'user_name' => $name]], $ls['profile']['info_cache']);
+    }
+    @file_put_contents($lsPath, json_encode($ls, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+}
+
 /** Fire-and-forget launch Chrome (khong cho thoat), dung chung browser.php + sync.php.
  * Voi proxy co credential: start_proxy_relay BEEN LA guard song/chet cua proxy
  * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep). */
@@ -484,6 +527,10 @@ function launch_chrome(array $p, string $url, ?int $port): void
     $quoted = array_map(function ($arg) {
         return '"' . $arg . '"';
     }, $cmd);
+    // Dinh danh taskbar rieng cho kenh: set ten profile Chrome truoc khi launch
+    // (AUMI cua so Chrome theo ten profile -> moi kenh 1 nut rieng tren taskbar,
+    // khong gom chung vo nut "Google Chrome" cua nhung kenh khac).
+    ensure_chrome_profile_name($p);
     $shell = 'start "" /B ' . implode(' ', $quoted) . ' > NUL 2>&1';
     pclose(popen($shell, 'r'));
     // ten kenh tren tab do tabtitle_keeper lo (khong cha de title xong moi tra loi -> mo nhanh)

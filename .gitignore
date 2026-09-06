@@ -14,3 +14,5 @@ Desktop.ini
 
 # System
 .DS_Store
+# Shortcut taskbar sinh tu bin/build_shortcuts.php - rieng tung may
+shortcuts/
