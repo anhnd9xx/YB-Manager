@@ -8,6 +8,9 @@ profiles/
 Thumbs.db
 Desktop.ini
 
+# Khoa chong trung lap overlay keeper
+bin/overlay_keeper.lock
+
 # IDE
 .idea/
 .vscode/

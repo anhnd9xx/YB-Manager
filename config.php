@@ -291,6 +291,8 @@ function start_tab_title_keeper(int $port, int $profileId): void
     $ps = "Start-Process -FilePath '" . str_replace("'", "''", $php) . "' -ArgumentList @($args) -WindowStyle Hidden";
     $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' . str_replace('"', '\\"', $ps) . '"';
     @shell_exec($cmd);
+    // badge ten kenh tren taskbar cho tat ca kenh dang mo (tien trinh overlay_keeper danh rieng)
+    start_overlay_keeper();
 }
 
 /** Dong tabtitle_keeper cua 1 CDP port (goi khi dong Chrome kenh do) */
@@ -301,6 +303,17 @@ function kill_tab_title_keeper(int $port): void
         . '| Where-Object { $_.CommandLine -like ' . "'" . '*tabtitle_keeper.php ' . (int)$port . '*' . "'" . ' } '
         . '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
     @shell_exec($ps);
+}
+
+/** Khoi dong overlay_keeper.ps1 (badge ten kenh goc duoi nút taskbar cho MOI cua so kenh).
+ *  Trung lap duoc chinh overlay_keeper.ps1 tu loai tru bang file-lock (FileShare.None giu toi khi thoat). */
+function start_overlay_keeper(): void
+{
+    $keeper = __DIR__ . '/bin/overlay_keeper.ps1';
+    $ps = "Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile','-Sta','-ExecutionPolicy','Bypass','-File','"
+        . str_replace("'", "''", $keeper) . "') -WindowStyle Hidden";
+    $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' . str_replace('"', '\\"', $ps) . '"';
+    @shell_exec($cmd);
 }
 
 /** Dong relay tre port (chi kill process dang LISTENING tren port reserved 9400+) */
