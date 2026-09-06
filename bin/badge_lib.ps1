@@ -64,17 +64,11 @@ function New-BadgeIcon([string]$text) {
     $brushBg = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 225, 57, 53))
     $penBg   = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 255, 255, 255)), 1
 
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $r = 4
-    $path.AddArc(0, 0, $r*2, $r*2, 180, 90)
-    $path.AddArc(16-$r*2, 0, $r*2, $r*2, 270, 90)
-    $path.AddArc(16-$r*2, 16-$r*2, $r*2, $r*2, 0, 90)
-    $path.AddArc(0, 16-$r*2, $r*2, $r*2, 90, 90)
-    $path.CloseFigure()
-    $g.FillPath($brushBg, $path)
-    $g.DrawPath($penBg, $path)
+    $ellipse = New-Object System.Drawing.RectangleF 0.5,0.5,15,15
+    $g.FillEllipse($brushBg, $ellipse)
+    $g.DrawEllipse($penBg, $ellipse)
 
-    $font  = New-Object System.Drawing.Font("Segoe UI", 7, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+    $font  = New-Object System.Drawing.Font("Segoe UI", 6.5, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
     $sf = New-Object System.Drawing.StringFormat
     $sf.Alignment = [System.Drawing.StringAlignment]::Center
     $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
@@ -82,7 +76,7 @@ function New-BadgeIcon([string]$text) {
     $g.DrawString($text, $font, [System.Drawing.Brushes]::White, $rectF, $sf)
 
     $hicon = $bmp.GetHicon()
-    $g.Dispose(); $bmp.Dispose(); $path.Dispose()
+    $g.Dispose(); $bmp.Dispose()
     $brushBg.Dispose(); $penBg.Dispose(); $font.Dispose(); $sf.Dispose()
     return $hicon
 }
