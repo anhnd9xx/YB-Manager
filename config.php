@@ -292,6 +292,93 @@ function cdp_reachable(int $port): bool
     return $res !== false;
 }
 
+/** CDP: lay danh sach page targets cua debug port (/json/list) */
+function cdp_page_targets(int $port): array
+{
+    $ctx = stream_context_create(['http' => ['timeout' => 1, 'ignore_errors' => true]]);
+    $json = @file_get_contents('http://127.0.0.1:' . $port . '/json/list', false, $ctx);
+    if ($json === false) return [];
+    $arr = json_decode($json, true);
+    if (!is_array($arr)) return [];
+    $out = [];
+    foreach ($arr as $t) {
+        if (($t['type'] ?? '') === 'page' && !empty($t['id']) && !empty($t['webSocketDebuggerUrl'])) {
+            $out[] = $t;
+        }
+    }
+    return $out;
+}
+
+/** Gui 1 lenh CDP qua WebSocket raw (RFC 6455, khong can thu vien). Tra ve true neu ket noi OK. */
+function cdp_ws_send(int $port, string $wsUrl, string $payload): bool
+{
+    $u = parse_url($wsUrl);
+    if (!$u || ($u['scheme'] ?? '') !== 'ws' || empty($u['path'])) return false;
+    $port = (int)($u['port'] ?? $port);
+    $fp = @stream_socket_client('tcp://127.0.0.1:' . $port, $errno, $errstr, 2);
+    if (!$fp) return false;
+    $key = base64_encode(random_bytes(16));
+    $path = $u['path'];
+    if (!empty($u['query'])) $path .= '?' . $u['query'];
+    fwrite($fp, "GET $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    stream_set_timeout($fp, 2);
+    $hdr = '';
+    while (strpos($hdr, "\r\n\r\n") === false) {
+        $c = fread($fp, 4096);
+        if ($c === false || $c === '') break;
+        $hdr .= $c;
+    }
+    if (strpos($hdr, ' 101 ') === false) { fclose($fp); return false; }
+    $len = strlen($payload);
+    if ($len < 126) {
+        $h = chr(0x81) . chr(0x80 | $len);
+    } elseif ($len < 65536) {
+        $h = chr(0x81) . chr(0x80 | 126) . pack('n', $len);
+    } else {
+        $h = chr(0x81) . chr(0x80 | 127) . pack('J', $len);
+    }
+    $mask = random_bytes(4);
+    $masked = '';
+    for ($i = 0; $i < $len; $i++) $masked .= $payload[$i] ^ $mask[$i % 4];
+    fwrite($fp, $h . $mask . $masked);
+    // doc phan hoi best-effort (gioi han 2s), co the bo qua
+    $dl = microtime(true) + 2;
+    $buf = '';
+    while (microtime(true) < $dl) {
+        $r = [$fp];
+        $w = null;
+        $e = null;
+        if (@stream_select($r, $w, $e, 0, 300000) === 1) {
+            $d = fread($fp, 65536);
+            if ($d === false || $d === '') break;
+            $buf .= $d;
+            if (strpos($buf, '"error"') !== false) break;
+        }
+    }
+    fclose($fp);
+    return true;
+}
+
+/** Gan/bam ten kenh len tieu de tab: "Ten kenh | <tieu de trang>", dung cho moi lan tai trang sau (CDP). */
+function chrome_tab_title_prefix(int $port, string $name): void
+{
+    $name = trim($name);
+    if ($name === '' || !$port) return;
+    $nJs = json_encode($name, JSON_UNESCAPED_UNICODE);
+    $src = "(()=>{const N=$nJs;const A=()=>{if(document.title.indexOf(N+' | ')!==0)document.title=N+' | '+document.title;};try{A();new MutationObserver(A).observe(document.documentElement,{subtree:true,childList:true,characterData:true});}catch(e){}setInterval(A,900);})();";
+    $expr = "(()=>{const N=$nJs;document.title=N+' | '+document.title;})()";
+    $deadline = microtime(true) + 3;
+    while (microtime(true) < $deadline) {
+        $targets = cdp_page_targets($port);
+        foreach ($targets as $t) {
+            cdp_ws_send($port, $t['webSocketDebuggerUrl'], json_encode(['id' => 1, 'method' => 'Page.addScriptToEvaluateOnNewDocument', 'params' => ['source' => $src]]));
+            cdp_ws_send($port, $t['webSocketDebuggerUrl'], json_encode(['id' => 2, 'method' => 'Runtime.evaluate', 'params' => ['expression' => $expr]]));
+        }
+        if ($targets) return;
+        usleep(250000);
+    }
+}
+
 /**
  * Dung chung de launch Chrome (browser.php va sync.php).
  * Gom cac cuoc goi chung: user-agent, WebRTC, remote-debugging, proxy.
@@ -345,6 +432,10 @@ function launch_chrome(array $p, string $url, ?int $port): void
     }, $cmd);
     $shell = 'start "" /B ' . implode(' ', $quoted) . ' > NUL 2>&1';
     pclose(popen($shell, 'r'));
+    // gan ten kenh len cac tab cua Chrome vua mo (CDP, best-effort, toi da ~3s)
+    if ($port) {
+        chrome_tab_title_prefix($port, (string)($p['name'] ?? ''));
+    }
 }
 
 /** Dong toan bo process Chrome cua 1 profile (theo user_data_dir) */
