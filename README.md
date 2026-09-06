@@ -6,6 +6,8 @@ bảng điều khiển web, kiểm tra trạng thái và CLI/chế độ Console
 ## Tính năng
 
 - Quản lý kênh: mỗi kênh = 1 Chrome profile riêng (`profiles/`), user-data-dir duy nhất.
+- Tên kênh hiện trên **tiêu đề mọi tab** của Chrome kênh đó (`Kênh 5 | YouTube`) — kể cả tab
+  mở mới (Ctrl+T, click link), qua `tabtitle_keeper.php` chạy nền bám CDP.
 - Gán proxy cho từng kênh, kiểm tra proxy alive / xem kênh đang chạy cổng debug nào.
 - Mở / đóng / mở lại kênh qua web (`api/browser.php`) dùng chung code với `api/sync.php`.
 - Cơ chế **proxy relay** để Chrome gắn proxy có username/password hoạt động đầy đủ (xem bên dưới).

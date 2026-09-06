@@ -236,6 +236,16 @@ function relay_healthy(int $port): bool
     return stripos($buf, ' 200') !== false;
 }
 
+/** Tim php CLI (duoi Apache PHP_BINARY co the la httpd.exe - can fallback ve php.exe) */
+function php_cli_binary(): string
+{
+    if (stripos(basename((string)PHP_BINARY), 'php') === 0 && is_file((string)PHP_BINARY)) {
+        return (string)PHP_BINARY;
+    }
+    $cand = 'C:/xampp/php/php.exe';
+    return is_file($cand) ? $cand : '';
+}
+
 /** Khoi dong relay local (proxy_relay.php) de Chrome goi khong credential; relay them Authorization ra proxy that. Tra ve port hoac null. */
 function start_proxy_relay(array $p): ?int
 {
@@ -244,14 +254,8 @@ function start_proxy_relay(array $p): ?int
     if (relay_healthy($port)) return $port;
     // relay cu song port nhung hong (vi du proc_open duoi Apache) -> dong truoc khi spawn lai
     stop_proxy_relay($port);
-    $php = '';
-    if (stripos(basename((string)PHP_BINARY), 'php') === 0 && is_file((string)PHP_BINARY)) {
-        $php = (string)PHP_BINARY;
-    } else {
-        $cand = 'C:/xampp/php/php.exe';
-        if (is_file($cand)) { $php = $cand; }
-    }
-    if ($php === '' || !is_file($php)) return null;
+    $php = php_cli_binary();
+    if ($php === '') return null;
     $relay = __DIR__ . '/proxy_relay.php';
     // Spawn bang PowerShell Start-Process (dam bao relay doc lap voi process cha - proc_open duoi Apache khong phuc vu duoc socket)
     $args = "'-f','" . str_replace("'", "''", $relay) . "','$port','" . str_replace("'", "''", (string)$p['proxy_host']) . "'," . (int)$p['proxy_port'] . ",'" . str_replace("'", "''", (string)($p['proxy_user'] ?? '')) . "','" . str_replace("'", "''", (string)($p['proxy_pass'] ?? '')) . "'";
@@ -263,6 +267,29 @@ function start_proxy_relay(array $p): ?int
         if (relay_healthy($port)) return $port;
     }
     return null;
+}
+
+/** Khoi dong tabtitle_keeper.php de tab moi cung gan duoc ten kenh (CDP watcher); keeper tu doc ten tu DB theo profile id */
+function start_tab_title_keeper(int $port, int $profileId): void
+{
+    if ($port < 1 || $profileId < 1) return;
+    $php = php_cli_binary();
+    if ($php === '') return;
+    $keeper = __DIR__ . '/tabtitle_keeper.php';
+    $args = "'-f','" . str_replace("'", "''", $keeper) . "','$port','$profileId'";
+    $ps = "Start-Process -FilePath '" . str_replace("'", "''", $php) . "' -ArgumentList @($args) -WindowStyle Hidden";
+    $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' . str_replace('"', '\\"', $ps) . '"';
+    @shell_exec($cmd);
+}
+
+/** Dong tabtitle_keeper cua 1 CDP port (goi khi dong Chrome kenh do) */
+function kill_tab_title_keeper(int $port): void
+{
+    if ($port < 1) return;
+    $ps = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process '
+        . '| Where-Object { $_.CommandLine -like ' . "'" . '*tabtitle_keeper.php ' . (int)$port . '*' . "'" . ' } '
+        . '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
+    @shell_exec($ps);
 }
 
 /** Dong relay tre port (chi kill process dang LISTENING tren port reserved 9400+) */
@@ -303,7 +330,12 @@ function cdp_page_targets(int $port): array
     $out = [];
     foreach ($arr as $t) {
         if (($t['type'] ?? '') === 'page' && !empty($t['id']) && !empty($t['webSocketDebuggerUrl'])) {
-            $out[] = $t;
+            $out[] = [
+                'id'    => $t['id'],
+                'url'   => $t['url'] ?? '',
+                'title' => $t['title'] ?? '',
+                'webSocketDebuggerUrl' => $t['webSocketDebuggerUrl'],
+            ];
         }
     }
     return $out;
@@ -365,8 +397,8 @@ function chrome_tab_title_prefix(int $port, string $name): void
     $name = trim($name);
     if ($name === '' || !$port) return;
     $nJs = json_encode($name, JSON_UNESCAPED_UNICODE);
-    $src = "(()=>{const N=$nJs;const A=()=>{if(document.title.indexOf(N+' | ')!==0)document.title=N+' | '+document.title;};try{A();new MutationObserver(A).observe(document.documentElement,{subtree:true,childList:true,characterData:true});}catch(e){}setInterval(A,900);})();";
-    $expr = "(()=>{const N=$nJs;document.title=N+' | '+document.title;})()";
+    $src = "(()=>{const N=$nJs;const P=N+' | ';const A=()=>{const t=document.title;const n=P+t.split(P).join('').trim();if(t!==n)document.title=n;};try{A();new MutationObserver(A).observe(document.documentElement,{subtree:true,childList:true,characterData:true});}catch(e){}setInterval(A,300);})();";
+    $expr = "(()=>{const N=$nJs;const P=N+' | ';const t=document.title;const n=P+t.split(P).join('').trim();if(t!==n)document.title=n;})()";
     $deadline = microtime(true) + 3;
     while (microtime(true) < $deadline) {
         $targets = cdp_page_targets($port);
@@ -432,9 +464,10 @@ function launch_chrome(array $p, string $url, ?int $port): void
     }, $cmd);
     $shell = 'start "" /B ' . implode(' ', $quoted) . ' > NUL 2>&1';
     pclose(popen($shell, 'r'));
-    // gan ten kenh len cac tab cua Chrome vua mo (CDP, best-effort, toi da ~3s)
+    // gan ten kenh len tieu de tab dau tien (CDP, best-effort ~3s) + theo doi de tab moi cung co ten kenh
     if ($port) {
         chrome_tab_title_prefix($port, (string)($p['name'] ?? ''));
+        start_tab_title_keeper($port, (int)($p['id'] ?? 0));
     }
 }
 
@@ -449,6 +482,8 @@ function kill_chrome_processes(array $p): void
     exec($ps);
     // cho process thoat het truoc khi launch instance moi
     usleep(700000);
+    // don tab title keeper cua kenh nay (tab moi khong con can gan ten)
+    kill_tab_title_keeper((int)($p['debug_port'] ?? 0));
     // don relay neu khong con profile nao dung proxy nay
     stop_proxy_relay_if_unused($p);
 }
