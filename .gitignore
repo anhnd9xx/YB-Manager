@@ -1,0 +1,16 @@
+# Chrome profile cho tung kenh (cookie, dang nhap, cache) - rieng tung may
+profiles/
+
+# Temp / log
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+
+# System
+.DS_Store
