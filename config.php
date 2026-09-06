@@ -175,7 +175,7 @@ function profile_live(array $p): bool
     return isset(running_chrome_dirs()[strtolower($dir)]);
 }
 
-/** Chrome dang chay co dung config proxy/ua nhu trong DB khong? (dung de biet co can restart khi config doi) */
+/** Chrome dang chay co dung config proxy/ua/fingerprint nhu trong DB khong? (dung de biet co can restart khi config doi) */
 function chrome_cmdline_matches_config(array $p): bool
 {
     $cmd = chrome_main_cmdline($p['user_data_dir']);
@@ -190,6 +190,13 @@ function chrome_cmdline_matches_config(array $p): bool
     $wantUa = !empty($p['user_agent']);
     $hasUa = strpos($cmd, '--user-agent=') !== false;
     if ($wantUa !== $hasUa) return false;
+    // Thay doi webrtc_protection / accept-lang -> restart de ap dung fingerprint moi
+    $wantWebrtc = (($p['webrtc_protection'] ?? 'default') !== 'default');
+    $hasWebrtc = strpos($cmd, '--webrtc-ip-handling-policy') !== false;
+    if ($wantWebrtc !== $hasWebrtc) return false;
+    $wantLang = channel_fingerprint((int)($p['id'] ?? 0))['lang'];
+    $hasLang = strpos($cmd, '--accept-lang=' . $wantLang) !== false;
+    if (!$hasLang) return false;
     return true;
 }
 
@@ -415,6 +422,61 @@ function cdp_ws_send(int $port, string $wsUrl, string $payload): bool
     return true;
 }
 
+/**
+ * Gui NHIEU lenh CDP qua CUNG 1 ket noi WebSocket-roi-doc (giu session page song để
+ * Emulation.set*override không bị detach reset), roi doc ket qua cua 1 lenh cuoi cung.
+ * Vi CDP reset Emulation override khi session WS dong, nen phai gui override + evaluate
+ * tren cung mot socket; neu chi cdp_ws_send roi dong ngay - Emulation bi mat (khong ap).
+ * Tra ve value cua lenh co id=$readId (neu co), nguoc lai null.
+ */
+function cdp_ws_batch(int $port, string $wsUrl, array $cmds, int $readId = 0): ?string
+{
+    $u = parse_url($wsUrl);
+    $port = (int)($u['port'] ?? $port);
+    $fp = @stream_socket_client('tcp://127.0.0.1:' . $port, $errno, $errstr, 2);
+    if (!$fp) return null;
+    $path = $u['path'] ?? '';
+    if (!empty($u['query'])) $path .= '?' . $u['query'];
+    $key = base64_encode(random_bytes(16));
+    fwrite($fp, "GET $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    $hdr = '';
+    while (strpos($hdr, "\r\n\r\n") === false) { $c = fread($fp, 8192); if ($c === false || $c === '') { fclose($fp); return null; } $hdr .= $c; }
+    if (strpos($hdr, ' 101 ') === false) { fclose($fp); return null; }
+    foreach ($cmds as $payload) {
+        $len = strlen($payload);
+        if ($len < 126) { $h = chr(0x81) . chr(0x80 | $len); }
+        elseif ($len < 65536) { $h = chr(0x81) . chr(0x80 | 126) . pack('n', $len); }
+        else { $h = chr(0x81) . chr(0x80 | 127) . pack('J', $len); }
+        $mask = random_bytes(4); $msg = '';
+        for ($i = 0; $i < $len; $i++) $msg .= $payload[$i] ^ $mask[$i % 4];
+        fwrite($fp, $h . $mask . $msg);
+        if ($readId > 0) usleep(150000);
+    }
+    if ($readId === 0) { fclose($fp); return null; }
+    $buf = ''; $dl = microtime(true) + 3;
+    while (microtime(true) < $dl) {
+        $r = [$fp]; $w = null; $e = null;
+        if (@stream_select($r, $w, $e, 0, 500000) === 1) {
+            $d = fread($fp, 65536);
+            if ($d === false || $d === '') break;
+            $buf .= $d;
+            if (strpos($buf, '"id":' . $readId) !== false && strpos(substr($buf, -4096), '}') !== false) break;
+        }
+    }
+    fclose($fp);
+    $idx = strrpos($buf, '"id":' . $readId);
+    if ($idx === false) return null;
+    $seg = substr($buf, $idx);
+    // $seg bat dau bang "id":99,... -> boc vao object de json_decode hop le
+    $res = json_decode('{' . $seg, true);
+    if (isset($res['result']['result']['value'])) {
+        $v = $res['result']['result']['value'];
+        return is_string($v) ? $v : json_encode($v, JSON_UNESCAPED_UNICODE);
+    }
+    if (isset($res['error'])) return 'ERR:' . json_encode($res['error']);
+    return null;
+}
+
 /** Gan/bam ten kenh len tieu de tab: "Ten kenh | <tieu de trang>", dung cho moi lan tai trang sau (CDP). */
 function chrome_tab_title_prefix(int $port, string $name): void
 {
@@ -436,6 +498,45 @@ function chrome_tab_title_prefix(int $port, string $name): void
 }
 
 /**
+ * User-Agent thật của Chrome đang dùng (đọc file version của chrome.exe, cache).
+ * Giữ UA giống hệt nhau ở MỌI kênh vì UA Chrome chính hãng vốn đồng nhất cho cả hàng tỷ
+ * máy -> đây chính là "lớp nặc danh" tự nhiên; fake UA khác nhau dễ bị Google soi kiểu
+ * "UA không khớp fingerprint" hơn là giúp ích cho việc tách account.
+ */
+function chrome_user_agent(): string
+{
+    static $ua = null;
+    if ($ua !== null) return $ua;
+    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.77 Safari/537.36';
+    $ps = @shell_exec('powershell -NoProfile -Command "(Get-Item \"' . chrome_path() . '\").VersionInfo.ProductVersion"');
+    $ps = is_string($ps) ? trim((string)preg_replace('/[^0-9.]/', '', $ps)) : '';
+    if (preg_match('/^\d+\.\d+\.\d+\.\d+$/', $ps)) {
+        $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' . $ps . ' Safari/537.36';
+    }
+    return $ua;
+}
+
+/**
+ * Fingerprint ẩn riêng theo kênh để giảm khả năng Google nối 2 account trên 2 kênh:
+ * hardwareConcurrency + deviceMemory + timezone + accept-language đều khác nhau từng kênh,
+ * sinh ổn định từ profileId (không đổi mỗi lần mở). Các giá trị cùng "nhóm" (mem/CPU khớp nhau).
+ */
+function channel_fingerprint(int $profileId): array
+{
+    $idx = max(1, min(5, $profileId - 46));
+    $i = $idx - 1;
+    return [
+        'index'              => $idx,
+        'hardwareConcurrency'=> [4, 8, 4, 6, 8][$i],
+        'deviceMemory'       => [8, 4, 4, 6, 8][$i],
+        'timezoneId'         => ['Asia/Ho_Chi_Minh', 'Asia/Bangkok', 'Asia/Singapore', 'Asia/Manila', 'Asia/Jakarta'][$i],
+        // getTimezoneOffset (phút, đông dương = GMT - giờ địa phương): VN/Bangkok/Jakarta UTC+7 => -420, SG/Manila UTC+8 => -480
+        'tzOffset'           => [-420, -420, -480, -480, -420][$i],
+        'lang'               => ['vi-VN,vi;q=0.9,en;q=0.8', 'en-US,en;q=0.9,vi;q=0.8', 'vi-VN,vi;q=0.9,en;q=0.8', 'en-GB,en;q=0.9,vi;q=0.8', 'vi-VN,vi;q=0.9,en;q=0.8'][$i],
+    ];
+}
+
+/**
  * Dung chung de launch Chrome (browser.php va sync.php).
  * Gom cac cuoc goi chung: user-agent, WebRTC, remote-debugging, proxy.
  */
@@ -454,18 +555,40 @@ function build_chrome_command(array $p, string $url = 'https://www.youtube.com',
         $cmd[] = '--user-agent=' . $p['user_agent'];
     }
 
-    // Chống lộ IP thật qua WebRTC
+    // Fingerprint ẩn riêng từng kênh qua launch flag BỀN (không phụ thuộc CDP session):
+    //   --accept-lang=... -> navigator.language + Accept-Language theo kênh
+    //   --lang=vi         -> ngôn ngữ giao diện theo kênh
+    // (timezone & hardwareConcurrency & deviceMemory do tabtitle_keeper polyfill JS áp bền)
+    $finger = channel_fingerprint((int)($p['id'] ?? 0));
+    $cmd[] = '--accept-lang=' . $finger['lang'];
+    $cmd[] = '--lang=' . substr($finger['lang'], 0, 5);
+
+    // Chống phát tán tín hiệu máy/identity ra Google từ background của mỗi kênh
+    // (UMA/metrics, sync, crashpad, component update, safe-browsing pings... đều mang
+    // machine_id chung -> dù proxy khác nhau vẫn nối được các kênh). Các cờ này chỉ
+    // bỏ mấy dịch vụ nền, KHÔNG ảnh hưởng duyệt web thường.
+    $cmd[] = '--disable-background-networking';
+    $cmd[] = '--disable-sync';
+    $cmd[] = '--disable-breakpad';
+    $cmd[] = '--disable-component-update';
+    $cmd[] = '--no-pings';
+    $cmd[] = '--disable-domain-reliability';
+    $cmd[] = '--disable-default-apps';
+
+    // Chống lộ IP thật qua WebRTC: dùng ĐÚNG dạng Chrome đọc được (2 cờ riêng).
+    // disable_non_proxied_udp = cấm UDP không đi qua proxy -> STUN/WebRTC không thấy IP thật.
     if (($p['webrtc_protection'] ?? 'default') !== 'default') {
-        $cmd[] = '--disable-webrtc';
-        if (($p['webrtc_protection'] ?? 'default') === 'disable_nonproxied_udp') {
-            $cmd[] = '--force-webrtc-ip-handling-policy=disable_non_proxied_udp';
-        }
+        $cmd[] = '--webrtc-ip-handling-policy=disable_non_proxied_udp';
+        $cmd[] = '--force-webrtc-ip-handling-policy';
     }
 
-    // Mo cong remote debugging de web app dieu khien tab qua CDP
+    // Mo cong remote debugging de web app dieu khien tab qua CDP.
+    // QUAN TRONG: chi cho origin localhost/app cua minh ket noi CDP (khong dung '*':
+    // '*') — neu dung '*' moi trang web bat ky (ke ca site ma USER dang xem o 1 kenh
+    // khac) co the mo WebSocket vao CDP, doc/dom cookie cua MOI kenh qua mang.
     if ($port) {
         $cmd[] = '--remote-debugging-port=' . $port;
-        $cmd[] = '--remote-allow-origins=*';
+        $cmd[] = '--remote-allow-origins=http://localhost';
     }
 
     if (!empty($p['proxy_host'])) {
