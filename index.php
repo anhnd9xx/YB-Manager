@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260917o">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260917p">
 </head>
 <body>
 
@@ -793,6 +793,6 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260917o"></script>
+<script src="assets/js/app.js?v=20260917p"></script>
 </body>
 </html>
