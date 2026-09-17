@@ -2,7 +2,6 @@
 let profiles = [];
 let proxies = [];
 let logs = [];
-let syncData = [];
 let settings = {};
 let pendingProxyAssignProfileId = null;
 let pendingProxyAssignProfileIds = null;
@@ -18,7 +17,7 @@ const $ = (id) => document.getElementById(id);
 const api = 'api/';
 const VIEW_TITLES = {
   dashboard: 'Tổng quan', profiles: 'Kênh', proxies: 'Proxy',
-  sync: 'Đồng bộ tab', logs: 'Nhật ký', settings: 'Cài đặt'
+  synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt'
 };
 
 // ============ INIT ============
@@ -36,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function applyAutoRefresh() {
   if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
   if (settings && settings.auto_refresh !== false) {
-    autoRefreshTimer = setInterval(() => { loadProfiles(); loadSync(); }, 15000);
+    autoRefreshTimer = setInterval(() => { loadProfiles(); if (document.getElementById('view-synchronize').classList.contains('active')) { loadSyn(false); synLoadDebug(); } }, 15000);
   }
 }
 
@@ -59,7 +58,7 @@ async function refreshAll(showToast) {
   const btn = $('btn-refresh');
   if (btn) btn.classList.add('loading');
   try {
-    await Promise.allSettled([loadProfiles(), loadProxies(), loadLogs(), loadSync()]);
+    await Promise.allSettled([loadProfiles(), loadProxies(), loadLogs()]);
     if (showToast) toast('Đã làm mới', 'success');
   } catch (e) {
     if (showToast) toast('Lỗi khi làm mới', 'error');
@@ -103,7 +102,7 @@ function switchView(view) {
   $('view-title').textContent = VIEW_TITLES[view] || view;
   if (view === 'dashboard') renderDashboard();
   if (view === 'logs') loadLogs();
-  if (view === 'sync') loadSync();
+  if (view === 'synchronize') { loadSyn(true); synLoadDebug(); synLoadLogs(); }
   if (view === 'settings') loadSettings();
   if (view === 'proxies') loadProxies();
   // đóng sidebar trên mobile nếu đang mở
@@ -163,16 +162,85 @@ async function loadProfiles() {
         profiles = res.data;
         renderProfiles();
         renderDashboard();
+        trackReflow(); // Phase 12: theo doi thay doi so luong running
       }
     })
     .catch(() => {});
 }
 
+// ============ PHASE 12: Smart Reflow (spec muc 29-30) ============
+// Theo doi so Chrome running; doi on dinh qua 2 lan quan sat (~15-30s, debounce)
+// roi OFF: thoi | ASK: hoi dialog | AUTO: arrange ngay.
+// Khong reflow khi: bulk launch, arrange dang chay, modal mo, sync RUNNING,
+// vua arrange <60s (tranh arrange chong).
+let reflowBaseline = null;
+let reflowPending = null; // {count, ticks}
+function markProfileChanged() {
+  // Mo/dong/xoa trong app: tu dong nhan so luong moi, KHONG hoi reflow (tranh popup vo duyen)
+  window.__ytmLastProfileChange = Date.now();
+  reflowPending = null;
+}
+function trackReflow() {
+  try {
+    const n = profiles.filter(p => p.status === 'running').length;
+    if (!settings || settings.layout_reflow === 'off') {
+      reflowBaseline = n;
+      reflowPending = null;
+      return;
+    }
+    if (reflowBaseline === null) { reflowBaseline = n; return; } // baseline lan dau, khong hoi
+    // Thao tac mo/dong trong app <60s: nhan baseline moi im lang (Phase 9 da lo arrange)
+    if (Date.now() - (window.__ytmLastProfileChange || 0) < 60000) {
+      reflowBaseline = n;
+      reflowPending = null;
+      return;
+    }
+    if (n === reflowBaseline) { reflowPending = null; return; }
+    if (!reflowPending || reflowPending.count !== n) { reflowPending = { count: n, ticks: 1 }; return; }
+    reflowPending.ticks++;
+    if (reflowPending.ticks < 2) return; // debounce: cho on dinh
+    const target = reflowPending.count;
+    reflowPending = null;
+    if (target === 0) { reflowBaseline = target; return; } // dong het -> chi cap nhat baseline
+    if (window.__ytmBulkOp || window.__ytmArranging) return; // giu baseline cu, thu lai vong sau
+    if (Date.now() - (window.__ytmLastArrange || 0) < 60000) { reflowBaseline = target; return; }
+    if (document.querySelector('.modal-overlay:not(.hidden)')) return;
+    const syncing = document.getElementById('view-synchronize')
+      && document.getElementById('view-synchronize').classList.contains('active')
+      && synSession && synSession.state === 'RUNNING';
+    if (syncing) return;
+    reflowBaseline = target;
+    if (settings.layout_reflow === 'auto') {
+      arrangeCall({});
+    } else { // ask (default)
+      const okBtn = $('confirm-ok-btn');
+      if (okBtn) okBtn.textContent = 'Xếp ngay';
+      confirmDelete(`Đang chạy ${target} cửa sổ Chrome.<br><small>Xếp lại cửa sổ ngay?</small>`, async () => {
+        await arrangeCall({});
+      });
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 function renderProfiles() {
   const q = ($('profile-search').value || '').toLowerCase();
   const platform = $('profile-filter-platform').value;
+  const fstage = $('profile-filter-stage') ? $('profile-filter-stage').value : '';
+  const fchannel = $('profile-filter-channel') ? $('profile-filter-channel').value : '';
+  const fdays = $('profile-filter-days') && $('profile-filter-days').value !== '' ? parseInt($('profile-filter-days').value, 10) : 0;
+  const fstab = $('profile-filter-stab') ? parseInt($('profile-filter-stab').value || '0', 10) : 0;
+  const fconf = $('profile-filter-conf') ? parseInt($('profile-filter-conf').value || '0', 10) : 0;
   profilesFiltered = profiles.filter(p => {
     if (platform && p.platform !== platform) return false;
+    if (fstage && (p.acc_stage || 'NEW') !== fstage) return false;
+    if (fchannel === 'exists' && p.acc_channel !== 'exists') return false;
+    if (fchannel === 'none' && p.acc_channel !== 'none') return false;
+    if (fchannel === 'unknown' && (p.acc_channel === 'exists' || p.acc_channel === 'none')) return false;
+    if (fdays > 0 && (p.acc_days == null || p.acc_days < fdays)) return false;
+    if (fstab > 0 && (p.acc_stability == null || p.acc_stability < fstab)) return false;
+    if (fconf > 0 && (p.acc_confidence == null || p.acc_confidence < fconf)) return false;
     if (!q) return true;
     return (p.name || '').toLowerCase().includes(q) || (p.channel_handle || '').toLowerCase().includes(q);
   });
@@ -219,11 +287,12 @@ function renderProfiles() {
     const tabInfo = p.debug_port
       ? `<div class="meta-row"><span class="meta-label">Debug port</span><span class="meta-value mono">${p.debug_port}</span></div>`
       : '';
-    const checked = selectedProfileIds.has(p.id) ? 'checked' : '';
+    const accInfo = buildAccountRow(p);
+    const checked = selectedProfileIds.has(p.id);
     return `
-      <div class="profile-card ${selectedProfileIds.has(p.id) ? 'card-selected' : ''}">
+      <div class="profile-card ${checked ? 'card-selected' : ''}">
         <div class="card-check">
-          <input type="checkbox" ${checked} onchange="toggleProfileSelect(${p.id}, this.checked)">
+          ${ckHtml(checked, `onchange="toggleProfileSelect(${p.id}, this.checked)"`, true)}
         </div>
         <div class="card-top">
           <div class="avatar platform-${plat}">${avatar}</div>
@@ -237,13 +306,14 @@ function renderProfiles() {
         <div class="card-meta">
           ${proxyInfo}
           ${tabInfo}
+          ${accInfo}
         </div>
         <div class="card-actions">
           ${st.state === 'busy'
             ? `<button class="btn btn-sm" disabled>⏳</button>`
             : `<button class="btn btn-sm btn-primary" onclick="openProfile(${p.id})">▶ Mở</button>`}
           ${st.state === 'running' ? `<button class="btn btn-sm btn-danger" onclick="closeProfile(${p.id})">■ Đóng</button>` : ''}
-          <button class="btn btn-sm" title="Mở kênh để xác nhận không phải bot (sign in)" onclick="openProfile(${p.id})">🛡 Xác nhận</button>
+          <button class="btn btn-sm" title="Chạy đánh giá account cho kênh này" onclick="evaluateOneProfile(${p.id})">✓ Kiểm tra</button>
           <button class="btn btn-sm" onclick="openProfileModalEdit(${p.id})">⚙</button>
           <button class="btn btn-sm btn-danger" onclick="deleteProfile(${p.id})">🗑</button>
         </div>
@@ -308,17 +378,210 @@ function getSelectedIds() {
 }
 function updateSelectedCount() {
   const ids = $('selected-count');
-  if (ids) ids.textContent = selectedProfileIds.size ? `Đã chọn ${selectedProfileIds.size}` : '';
+  if (!ids) return;
+  if (!selectedProfileIds.size) { ids.innerHTML = ''; return; }
+  ids.innerHTML = `<span class="sel-pill">Đã chọn ${selectedProfileIds.size}<button class="sel-clear" title="Bỏ chọn hết" onclick="clearProfileSelection()">×</button></span>`;
+}
+function clearProfileSelection() {
+  selectedProfileIds.clear();
+  renderProfiles();
+}
+// Checkbox custom dung chung (dep + dong nhat Kênh/Proxy/Synchronize)
+function ckHtml(checked, extra = '', lg = false) {
+  return `<label class="ck${lg ? ' lg' : ''}"><input type="checkbox" ${checked ? 'checked' : ''} ${extra}><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></label>`;
+}
+
+// ============ ARRANGE (Smart Auto Arrange) ============
+function toggleArrangeMenu(e) {
+  if (e) e.stopPropagation();
+  const m = $('arrange-menu');
+  if (m) m.classList.toggle('hidden');
+  return false;
+}
+document.addEventListener('click', (e) => {
+  const m = $('arrange-menu');
+  if (m && !m.classList.contains('hidden')) {
+    const btn = $('arrange-btn');
+    if (!m.contains(e.target) && e.target !== btn && !(btn && btn.contains(e.target))) m.classList.add('hidden');
+  }
+});
+function arrangeResultMsg(msg, ok) {
+  const el = $('arrange-result');
+  if (el) {
+    el.textContent = msg;
+    el.classList.toggle('win-result-ok', ok === true);
+    el.classList.toggle('win-result-err', ok === false);
+  }
+}
+async function arrangeCall(payload) {
+  const m = $('arrange-menu');
+  if (m) m.classList.add('hidden');
+  arrangeResultMsg('⏳ Đang xếp cửa sổ...', null);
+  window.__ytmArranging = true;
+  try {
+    const res = await sendJson(api + 'syncwin.php?action=arrange', payload);
+    if (res.disconnectAsk) {
+      // Monitor da chon bi rut: hoi user (Later / Arrange sang monitors con lai)
+      const okBtn = $('confirm-ok-btn');
+      if (okBtn) okBtn.textContent = 'Xếp ngay';
+      arrangeResultMsg('⚠ ' + (res.message || 'Mất màn hình'), false);
+      confirmDelete(`Màn hình ${(res.missingMonitors || []).join(', ')} không còn.<br><small>Xếp sang màn hình còn lại?</small>`, async () => {
+        await arrangeCall({ ...payload, confirmed: true });
+      });
+    } else {
+      const ok = !!(res.ok || res.partial);
+      if (ok) window.__ytmLastArrange = Date.now();
+      arrangeResultMsg('✓ ' + (res.message || 'Xong') + (res.partial ? ' (một phần)' : ''), ok);
+      toast(res.message || 'Xong', ok ? 'success' : 'error');
+    }
+  } catch (e) {
+    arrangeResultMsg('✗ Lỗi kết nối', false);
+    toast('Lỗi kết nối khi arrange', 'error');
+  }
+  window.__ytmArranging = false;
+}
+function arrangeSmart() {
+  const ids = Array.from(selectedProfileIds);
+  arrangeCall(ids.length ? { profileIds: ids } : {});
+}
+function arrangeSelected() {
+  const ids = Array.from(selectedProfileIds);
+  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); arrangeResultMsg('✗ Chưa chọn kênh nào', false); return; }
+  arrangeCall({ profileIds: ids });
+}
+function arrangeRunning() { arrangeCall({}); }
+function arrangeWithMode(mode) {
+  const ids = Array.from(selectedProfileIds);
+  arrangeCall(ids.length ? { profileIds: ids, mode } : { mode });
+}
+function gotoLayoutSettings() {
+  const m = $('arrange-menu');
+  if (m) m.classList.add('hidden');
+  switchView('settings');
+}
+function arrangeToMonitorMenu(e) {
+  if (e) e.stopPropagation();
+  const sub = $('arrange-mon-menu');
+  if (!sub) return;
+  const mons = cachedMonitors && cachedMonitors.length ? cachedMonitors : [];
+  let html = `<button onclick="arrangeToMonitors('__selected__')">Màn hình đã chọn (Settings)</button><div class="dropdown-sep"></div>`;
+  if (!mons.length) html += `<button onclick="arrangeToMonitors('__all__')">Tất cả màn hình</button>`;
+  mons.forEach(m => {
+    const name = (m.name || '').replace(/'/g, "\\'");
+    const res = m.resolution ? ` - ${m.resolution.w}x${m.resolution.h}` : '';
+    html += `<button onclick="arrangeToMonitors('${name}')">Màn hình ${m.id}${m.primary ? ' (chính)' : ''}${res}</button>`;
+  });
+  sub.innerHTML = html;
+  sub.classList.toggle('hidden');
+}
+function selectedOrRunningIds() {
+  const ids = Array.from(selectedProfileIds);
+  return ids.length ? { profileIds: ids } : {};
+}
+function arrangeToMonitors(which) {
+  const m = $('arrange-mon-menu');
+  if (m) m.classList.add('hidden');
+  const base = selectedOrRunningIds();
+  if (which === '__selected__') arrangeCall(base);
+  else if (which === '__all__') arrangeCall({ ...base, monitors: [] });
+  else arrangeCall({ ...base, monitors: [which] });
+}
+let lastPreviewPayload = null;
+async function arrangePreview() {
+  const m = $('arrange-menu');
+  if (m) m.classList.add('hidden');
+  const ids = Array.from(selectedProfileIds);
+  const payload = ids.length ? { profileIds: ids, dryRun: true } : { dryRun: true };
+  arrangeResultMsg('⏳ Đang tính preview...', null);
+  try {
+    const res = await sendJson(api + 'syncwin.php?action=arrange', payload);
+    if (!res.ok || !res.plan) {
+      arrangeResultMsg('✗ ' + (res.message || 'Không tính được'), false);
+      toast(res.message || 'Không tính được preview', 'error');
+      return;
+    }
+    lastPreviewPayload = ids.length ? { profileIds: ids } : {};
+    renderPreviewModal(res);
+    showModal('preview-modal');
+    arrangeResultMsg('Xem trước sẵn sàng', true);
+  } catch (e) {
+    arrangeResultMsg('✗ Lỗi kết nối', false);
+  }
+}
+function renderPreviewModal(res) {
+  const plan = res.plan;
+  const bd = plan.breakdown && plan.breakdown.length ? plan.breakdown
+    : [{ monitorId: (plan.monitors || [])[0], count: (plan.slots || []).length, rows: plan.rows, cols: plan.cols, cellW: plan.cellW, cellH: plan.cellH }];
+  $('preview-summary').textContent =
+    `${(plan.slots || []).length} cửa sổ · ${plan.cols}x${plan.rows}` +
+    (plan.fallbackUsed ? ` (dự phòng ${plan.fallbackUsed})` : '') +
+    ((res.missingMonitors && res.missingMonitors.length) ? ` · thiếu màn hình: ${res.missingMonitors.join(',')}` : '');
+  const liveWins = (res.session && res.session.windows ? res.session.windows : []);
+  let html = '';
+  let si = 0;
+  bd.forEach(b => {
+    const names = [];
+    for (let k = 0; k < b.count; k++, si++) {
+      const w = liveWins[si];
+      names.push(w ? '#' + w.profileId : '·');
+    }
+    html += `<div class="preview-mon"><div class="preview-mon-head">Màn hình ${b.monitorId} - ${b.count} cửa sổ · ${b.cols}x${b.rows} · ${b.cellW}x${b.cellH}</div>`;
+    html += `<div class="preview-grid" style="grid-template-columns:repeat(${Math.max(1, b.cols)},1fr)">`;
+    names.forEach(nm => { html += `<div class="preview-cell">${escapeHtml(nm)}</div>`; });
+    html += '</div></div>';
+  });
+  $('preview-body').innerHTML = html;
+}
+async function applyPreviewArrange() {
+  closeModal('preview-modal');
+  if (lastPreviewPayload) await arrangeCall(lastPreviewPayload);
+}
+
+// ============ PHASE 9: Auto Arrange sau Multi Launch (spec muc 27) ============
+// Doi HWND tung Chrome (poll 1s/timeout 20s, KHONG sleep mu), roi arrange theo
+// dung thu tu ids (slot theo profile order, khong phu thuoc launch nhanh/cham).
+async function autoArrangeAfterLaunch(ids) {
+  try {
+    if (!settings || !settings.layout_auto_launch) return;
+    ids = (ids || []).map(Number).filter(x => x > 0);
+    if (!ids.length) return;
+    arrangeResultMsg('⏳ Đợi Chrome hiện cửa sổ...', null);
+    const deadline = Date.now() + 20000;
+    let ready = [];
+    while (Date.now() < deadline) {
+      try {
+        const res = await getJson(api + 'syncwin.php?action=discover');
+        const have = new Set((res.ok && res.data && res.data.windows ? res.data.windows : []).map(w => Number(w.profileId)));
+        ready = ids.filter(id => have.has(id));
+        if (ready.length === ids.length) break;
+      } catch (e) {}
+      await sleep(1000);
+    }
+    if (!ready.length) { arrangeResultMsg('✗ Không thấy cửa sổ nào sau khi mở', false); return; }
+    await arrangeCall({ profileIds: ready });
+    if (ready.length < ids.length) {
+      toast(`Tự xếp ${ready.length}/${ids.length} kênh (số còn lại chưa hiện cửa sổ)`, 'error');
+    }
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 async function openSelected() {
   const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  for (const id of ids) {
-    try { await getJson(api + `browser.php?action=open&id=${id}`); } catch (e) {}
+  window.__ytmBulkOp = true; // chan reflow xen vao giua bulk launch (Phase 12)
+  try {
+    for (const id of ids) {
+      try { await getJson(api + `browser.php?action=open&id=${id}`); } catch (e) {}
+    }
+    toast(`Đã mở ${ids.length} kênh`, 'success');
+    markProfileChanged();
+    refreshAll();
+    await autoArrangeAfterLaunch(ids);
+  } finally {
+    window.__ytmBulkOp = false;
   }
-  toast(`Đã mở ${ids.length} kênh`, 'success');
-  refreshAll();
 }
 async function closeSelected() {
   const ids = getSelectedIds();
@@ -327,22 +590,124 @@ async function closeSelected() {
     try { await getJson(api + `browser.php?action=close&id=${id}`); } catch (e) {}
   }
   toast(`Đã đóng ${ids.length} kênh`, 'success');
+  markProfileChanged();
   refreshAll();
 }
 async function deleteSelected() {
   if (!selectedProfileIds.size) { toast('Chưa chọn kênh nào', 'error'); return; }
   const n = selectedProfileIds.size;
-  confirmDelete(`Bạn chắc chắn muốn xóa ${n} kênh đã chọn?<br><small>Thư mục dữ liệu của các kênh sẽ được giữ nguyên.</small>`, async () => {
+  confirmDelete(`Bạn chắc chắn muốn xóa ${n} kênh đã chọn?<br><small>Thư mục dữ liệu (cache) của các kênh sẽ bị xóa vĩnh viễn.</small>`, async () => {
     const ids = getSelectedIds();
     for (const id of ids) {
       try { await del(api + `profiles.php?action=delete&id=${id}`); } catch (e) {}
     }
+    markProfileChanged();
     toast(`Đã xóa ${ids.length} kênh`, 'success');
     refreshAll();
   });
 }
-function assignProxySelected() {
-  const ids = getSelectedIds();
+// ============ ACCOUNT EVALUATION (bulk + chi tiet) ============
+// Danh gia theo chunk (server tra remaining) de 100 profile khong freeze UI.
+// Khong chon: hoi danh gia toan bo danh sach dang loc.
+async function evaluateSelected() {
+  let ids = Array.from(selectedProfileIds);
+  if (!ids.length) {
+    // Khong chon: danh gia toan bo danh sach dang loc (spec muc 8)
+    ids = profilesFiltered.map(p => p.id);
+    if (!ids.length) { toast('Không có kênh nào để đánh giá', 'error'); return; }
+    toast(`Đánh giá toàn bộ ${ids.length} kênh đang lọc...`, '');
+  }
+  let queue = ids.slice();
+  let done = 0;
+  const stages = {};
+  const el = $('selected-count');
+  try {
+    while (queue.length) {
+      if (el) el.innerHTML = `<span class="sel-pill">Đang đánh giá ${done}/${ids.length}…</span>`;
+      const res = await sendJson(api + 'accounts.php?action=evaluate', { ids: queue, batch: 3 });
+      if (!res.ok) { toast(res.message || 'Lỗi đánh giá', 'error'); break; }
+      for (const r of (res.data.results || [])) {
+        if (r.stage) stages[r.stage] = (stages[r.stage] || 0) + 1;
+      }
+      const n = res.data.processed || 0;
+      done += n;
+      queue = queue.slice(n);
+      if (n === 0) break;
+    }
+  } catch (e) {
+    toast('Lỗi kết nối khi đánh giá', 'error');
+  }
+  const sum = Object.entries(stages).map(([s, c]) => `${ACC_STAGES[s] ? ACC_STAGES[s][0] : s}: ${c}`).join(' · ');
+  toast(`Xong ${done}/${ids.length} kênh${sum ? ' — ' + sum : ''}`, done === ids.length ? 'success' : 'error');
+  refreshAll();
+}
+// Danh gia 1 profile (nut Kiem tra tren card)
+async function evaluateOneProfile(id) {
+  toast('Đang kiểm tra account...', '');
+  const res = await sendJson(api + 'accounts.php?action=refresh', { id });
+  if (res.ok && res.data) {
+    const r = res.data;
+    toast(`#${id}: ${r.stage} (ổn định ${r.stability}, tin cậy ${r.confidence})`, 'success');
+  } else toast(res.message || 'Lỗi', 'error');
+  refreshAll();
+}
+const ACC_STAGE_VN = { NEW: 'Mới', OBSERVING: 'Theo dõi', STABLE: 'Ổn định', READY_FOR_CHANNEL: 'Sẵn sàng mở kênh', CHANNEL_EXISTS: 'Đã có kênh', REVIEW_REQUIRED: 'Cần xem lại', ACTION_REQUIRED: 'Cần xử lý', UNAVAILABLE: 'Không khả dụng' };
+const ACC_REASON_VN = { channel_exists: 'Đã có YouTube channel', recovery_required: 'Cần khôi phục tài khoản', security_challenge: 'Gặp kiểm tra bảo mật', login_or_session_unusable: 'Đăng nhập/phiên không dùng được', too_many_consecutive_failures: 'Lỗi liên tiếp quá nhiều', insufficient_history: 'Chưa đủ dữ liệu theo dõi', stability_below_review: 'Ổn định dưới ngưỡng xem lại', confidence_below_ready: 'Chưa đủ tin cậy', meets_ready_policy: 'Đạt chính sách nội bộ', stable_but_below_ready: 'Ổn nhưng chưa đạt sẵn sàng' };
+function closeAccountDrawer() {
+  const w = $('acc-drawer-wrap');
+  if (w) w.classList.add('hidden');
+}
+async function openAccountDrawer(id) {
+  try {
+    const res = await getJson(api + `accounts.php?action=get&id=${id}`);
+    if (!res.ok) { toast(res.message || 'Lỗi', 'error'); return; }
+    const st = res.data.state, p = res.data.profile || {}, hist = res.data.history || [];
+    const vn = (arr) => (arr || []).map(x => ACC_REASON_VN[x] || x);
+    const row = (k, v) => `<div class="acc-item"><span>${k}</span><strong>${v}</strong></div>`;
+    const yn = (b) => b ? '<span class="badge badge-danger">Có</span>' : '<span class="badge badge-muted">Không</span>';
+    const [sLabel, sCls, sDot] = ACC_STAGES[st.stage] || ACC_STAGES.NEW;
+    const reasons = vn(hist[0] ? hist[0].reasons : []);
+    const warns = vn(hist[0] ? hist[0].warnings : []);
+    const readyTxt = st.stage === 'READY_FOR_CHANNEL' ? 'READY' : (['CHANNEL_EXISTS'].includes(st.stage) ? 'CHANNEL' : st.stage);
+    $('acc-drawer-title').textContent = 'ACCOUNT EVALUATION — ' + (p.name || ('#' + id));
+    $('acc-drawer-body').innerHTML =
+      `<div class="acc-head" style="margin-bottom:10px"><span class="meta-label">Profile / ${escapeHtml(p.name || '')}</span>`
+      + `<span class="acc-stage">${sDot} ${accStageBadge(st.stage)}</span></div>`
+      + `<div class="acc-grid">`
+      + row('Giai đoạn', `${sLabel}`) + row('Quản lý', `${st.managed_days ?? '-'} ngày`)
+      + row('Ổn định', `${st.stability} / 100`) + row('Tin cậy', `${st.confidence} / 100`)
+      + row('Đăng nhập', st.login_state) + row('Phiên', st.session_state)
+      + row('YouTube', st.youtube_state)
+      + row('Thử thách bảo mật', yn(st.security_challenge)) + row('Cần khôi phục', yn(st.recovery_required))
+      + row('Check thành công', st.success_count) + row('Check thất bại', st.fail_count)
+      + row('Lỗi liên tiếp', st.consec_fails)
+      + row('Trạng thái kênh', st.channel_state + (st.channel_name ? ` (${escapeHtml(st.channel_name)})` : ''))
+      + row('Lần check cuối', st.last_checked_at || 'chưa có')
+      + `</div><div class="sync-label">READINESS: ${readyTxt}</div>`
+      + (reasons.map(r => `<p class="reason-ok">✓ ${escapeHtml(r)}</p>`).join('') || '<p class="muted">-</p>')
+      + (warns.length ? `<div class="sync-label" style="margin-top:6px">Cảnh báo:</div>` + warns.map(w => `<p class="reason-warn">⚠ ${escapeHtml(w)}</p>`).join('') : '')
+      + `<div class="sync-label" style="margin-top:8px">Lịch sử (${hist.length}):</div>`
+      + `<div class="acc-hist" style="display:none"><table class="data-table"><thead><tr><th>Thời gian</th><th>Ổn định</th><th>Tin cậy</th><th>Giai đoạn</th><th>Lý do</th></tr></thead><tbody>`
+      + (hist.map(h => `<tr><td class="mono">${escapeHtml(h.checked_at || '')}</td><td>${h.stability}</td><td>${h.confidence}</td><td>${accStageBadge(h.stage)}</td><td><small>${escapeHtml(vn(h.reasons).join('; '))}</small></td></tr>`).join('') || '<tr><td colspan="5">Chưa có lịch sử</td></tr>')
+      + `</tbody></table></div>`;
+    $('acc-drawer-eval').onclick = async () => {
+      $('acc-drawer-eval').disabled = true;
+      const r = await sendJson(api + 'accounts.php?action=refresh', { id });
+      $('acc-drawer-eval').disabled = false;
+      if (r.ok) { openAccountDrawer(id); refreshAll(); }
+      else toast(r.message || 'Lỗi', 'error');
+    };
+    $('acc-drawer-open').onclick = () => { closeAccountDrawer(); openProfile(id); };
+    $('acc-drawer-hist').onclick = () => {
+      const h = document.querySelector('#acc-drawer-body .acc-hist');
+      if (h) h.style.display = h.style.display === 'none' ? '' : 'none';
+    };
+    $('acc-drawer-wrap').classList.remove('hidden');
+  } catch (e) {
+    toast('Lỗi tải chi tiết', 'error');
+  }
+}
+function assignProxySelected() {  const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào, bấm lại "Gán proxy" sau khi chọn', 'error'); return; }
   pendingProxyAssignProfileIds = ids;
   populateBulkProxySelect();
@@ -439,6 +804,52 @@ function platLabel(p) {
   return { youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook', other: 'Khác' }[p] || 'YouTube';
 }
 
+// ============ ACCOUNT EVALUATION (hien thi) ============
+const ACC_STAGES = {
+  NEW: ['Mới', 'badge-warn', '⚪'], OBSERVING: ['Đang theo dõi', 'badge-info', '🔵'],
+  STABLE: ['Ổn định', 'badge-ok', '🟢'], READY_FOR_CHANNEL: ['Sẵn sàng tạo kênh', 'badge-ready', '🟢'],
+  CHANNEL_EXISTS: ['Đã có kênh', 'badge-channel', '🟣'], REVIEW_REQUIRED: ['Cần kiểm tra', 'badge-review', '🟡'],
+  ACTION_REQUIRED: ['Cần xử lý', 'badge-danger', '🔴'], UNAVAILABLE: ['Không khả dụng', 'badge-muted', '⚫']
+};
+function accStageBadge(stage, dot) {
+  const [label, cls, emoji] = ACC_STAGES[stage] || ACC_STAGES.NEW;
+  return `<span class="badge ${cls}">${dot ? emoji + ' ' : ''}${label}</span>`;
+}
+function accBar(v, tip) {
+  v = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
+  const cls = v >= 80 ? 'ok' : (v >= 50 ? 'mid' : 'low');
+  return `<span class="acc-bar" title="${escapeAttr(tip)}"><i class="${cls}" style="width:${v}%"></i></span>`;
+}
+function accDaysVN(p) {
+  return p.acc_days != null ? `${p.acc_days} ngày` : '–';
+}
+function buildAccountRow(p) {
+  const stage = p.acc_stage || 'NEW';
+  const [, , dot] = ACC_STAGES[stage] || ACC_STAGES.NEW;
+  const stabTip = `Ổn định: ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}\nCheck thành công: ${p.acc_success ?? 0}\nCheck thất bại: ${p.acc_fail ?? 0}\nLỗi liên tiếp: ${p.acc_consec ?? 0}`;
+  const confTip = `Tin cậy: ${p.acc_confidence ?? '-'}/100\nTheo dõi: ${accDaysVN(p)}\nChecks thành công: ${p.acc_success ?? 0}\nLần check cuối: ${p.acc_checked ? accRelTime(p.acc_checked) : 'chưa có'}`;
+  const ch = p.acc_channel === 'exists'
+    ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
+    : '';
+  return `<div class="acc-block" onclick="openAccountDrawer(${p.id})" title="Xem chi tiết đánh giá">`
+    + `<div class="acc-head"><span class="meta-label">Account · ${accDaysVN(p)}</span>`
+    + `<span class="acc-stage">${dot} ${accStageBadge(stage)}</span></div>`
+    + `<div class="acc-meter"><span>Ổn định</span><strong>${p.acc_stability ?? '-'}</strong>${accBar(p.acc_stability, stabTip)}${ch}</div>`
+    + `<div class="acc-meter"><span>Tin cậy</span><strong>${p.acc_confidence ?? '-'}</strong>${accBar(p.acc_confidence, confTip)}</div></div>`;
+}
+function accRelTime(s) {
+  try {
+    const t = new Date(s.replace(' ', 'T')).getTime();
+    if (isNaN(t)) return s;
+    const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+    if (m < 1) return 'vừa xong';
+    if (m < 60) return `${m} phút trước`;
+    const h = Math.round(m / 60);
+    if (h < 24) return `${h} giờ trước`;
+    return `${Math.round(h / 24)} ngày trước`;
+  } catch (e) { return s; }
+}
+
 // ============ PROFILE ACTIONS ============
 // Trạng thái đang xử lý (mở/đóng) để card đổi trạng thái NGAY khi bấm, không chờ server.
 const pendingOps = new Map(); // id -> 'opening' | 'closing'
@@ -451,7 +862,7 @@ async function openProfile(id) {
     res = await getJson(api + `browser.php?action=open&id=${id}`);
     toast(res.message || 'Đã mở', res.ok ? 'success' : 'error');
     if (res.proxy_dead) loadProxies();
-    if (res.ok) refreshAll();
+    if (res.ok) { markProfileChanged(); refreshAll(); }
   } catch (e) {
     toast('Lỗi khi mở kênh', 'error');
   } finally {
@@ -462,9 +873,10 @@ async function openProfile(id) {
 async function deleteProfile(id) {
   const p = profiles.find(x => x.id === id);
   const name = p ? p.name : 'kênh này';
-  confirmDelete(`Bạn chắc chắn muốn xóa kênh <strong>${escapeHtml(name)}</strong>?<br><small>Thư mục dữ liệu của kênh sẽ được giữ nguyên.</small>`, async () => {
+  confirmDelete(`Bạn chắc chắn muốn xóa kênh <strong>${escapeHtml(name)}</strong>?<br><small>Thư mục dữ liệu (cache) của kênh sẽ bị xóa vĩnh viễn.</small>`, async () => {
     const res = await del(api + `profiles.php?action=delete&id=${id}`);
     toast(res.ok ? 'Đã xóa kênh' : 'Lỗi', res.ok ? 'success' : 'error');
+    if (res.ok) markProfileChanged();
     refreshAll();
   });
 }
@@ -476,6 +888,7 @@ async function closeProfile(id) {
   try {
     res = await getJson(api + `browser.php?action=close&id=${id}`);
     toast(res.message || 'Đã đóng', res.ok ? 'success' : 'error');
+    if (res.ok) markProfileChanged();
     refreshAll();
   } catch (e) {
     toast('Lỗi khi đóng kênh', 'error');
@@ -485,18 +898,27 @@ async function closeProfile(id) {
   }
 }
 async function openAllProfiles() {
-  for (const p of profiles) {
-    try { await getJson(api + `browser.php?action=open&id=${p.id}`); } catch (e) {}
-    await sleep(700);
+  const ids = profiles.map(p => p.id);
+  window.__ytmBulkOp = true;
+  try {
+    for (const p of profiles) {
+      try { await getJson(api + `browser.php?action=open&id=${p.id}`); } catch (e) {}
+      await sleep(700);
+    }
+    toast(`Đã mở ${profiles.length} kênh`, 'success');
+    markProfileChanged();
+    refreshAll();
+    await autoArrangeAfterLaunch(ids);
+  } finally {
+    window.__ytmBulkOp = false;
   }
-  toast(`Đã mở ${profiles.length} kênh`, 'success');
-  refreshAll();
 }
 async function closeAllProfiles() {
   for (const p of profiles) {
     try { await getJson(api + `browser.php?action=close&id=${p.id}`); } catch (e) {}
   }
   toast('Đã đóng tất cả kênh', 'success');
+  markProfileChanged();
   refreshAll();
 }
 
@@ -676,10 +1098,9 @@ function renderProxies() {
 
   tbody.innerHTML = pageItems.map(p => {
     const used = profiles.filter(x => Number(x.proxy_id) === Number(p.id)).length;
-    const checked = selectedProxies.has(p.id) ? 'checked' : '';
     return `
       <tr class="${selectedProxies.has(p.id) ? 'row-selected' : ''}">
-        <td><input type="checkbox" class="px-check" data-id="${p.id}" ${checked} onchange="toggleProxySelect(${p.id}, this.checked)"></td>
+        <td>${ckHtml(selectedProxies.has(p.id), `class="px-check" data-id="${p.id}" onchange="toggleProxySelect(${p.id}, this.checked)"`)}</td>
         <td>${escapeHtml(p.name)}</td>
         <td class="mono">${escapeHtml(p.host)}:${p.port}${p.username ? ' <span class="status-unknown">(auth)</span>' : ''}</td>
         <td>${p.protocol.toUpperCase()}</td>
@@ -814,7 +1235,8 @@ function openEditProxy(id) {
   $('px-id').value = p.id; $('px-name').value = p.name;
   $('px-host').value = p.host; $('px-port').value = p.port;
   $('px-protocol').value = p.protocol;
-  $('px-user').value = p.username || ''; $('px-pass').value = p.password || '';
+  $('px-user').value = p.username || ''; $('px-pass').value = '';
+  $('px-pass').placeholder = p.username ? '(giữ nguyên nếu để trống)' : 'Mật khẩu nếu proxy yêu cầu';
   $('px-country').value = p.country || '';
   $('px-string').value = '';
   $('proxy-test-result').innerHTML = '';
@@ -967,129 +1389,258 @@ function renderDashboardLogs() {
 function renderDashboard() {
   if (!profiles.length && !proxies.length) return;
   const running = profiles.filter(p => p.status === 'running').length;
-  const totalTabs = syncData.reduce((s, x) => s + (x.tab_count || 0), 0);
   $('stat-profiles').textContent = profiles.length;
   $('stat-running').textContent = running;
   $('stat-proxies').textContent = proxies.length;
-  $('stat-tabs').textContent = totalTabs;
   renderDashboardLogs();
 }
 
-// ============ SYNC (Dong bo tab) ============
-async function loadSync() {
+// ============ SYNCHRONIZE (MAIN -> CONTROLLED) ============
+let synSession = null;
+let synRoles = [];
+let synSelected = new Set();
+let synCfgDirty = false;
+
+function synMarkDirty() { synCfgDirty = true; }
+function synBindDirty() {
+  ['syn-cfg-mousemove', 'syn-cfg-mouseclick', 'syn-cfg-mousewheel', 'syn-cfg-keyboard', 'syn-cfg-text',
+   'syn-cfg-fps', 'syn-cfg-clickdelay', 'syn-cfg-clickrandom', 'syn-cfg-clickvar',
+   'syn-cfg-typemin', 'syn-cfg-typemax', 'syn-cfg-inputmode', 'syn-cfg-stoppolicy', 'syn-cfg-showcursor'].forEach(id => {
+    const el = $(id);
+    if (el && !el.dataset.synbound) { el.dataset.synbound = '1'; el.addEventListener('change', synMarkDirty); }
+  });
+}
+
+async function loadSyn(full = true) {
+  synBindDirty();
   try {
-    const res = await getJson(api + 'sync.php?action=list');
-    if (res.ok) {
-      syncData = res.data;
-      renderSync();
-      renderDashboard();
-    }
+    const res = await getJson(api + 'syncsess.php?action=get');
+    if (!res.ok) return;
+    synSession = res.data.session;
+    synRoles = res.data.roles || [];
+    renderSyn(full);
   } catch (e) {}
 }
 
-function renderSync() {
-  const el = $('sync-results');
-  if (!syncData.length) {
-    el.innerHTML = '<div class="sync-empty">Chưa có kênh nào. Tạo kênh trước để đồng bộ.</div>';
-    $('sync-summary').textContent = '';
-    return;
+function synRoleBadge(role) {
+  if (role === 'MAIN') return '<span class="badge badge-ok">★ MAIN</span>';
+  if (role === 'CONTROLLED') return '<span class="badge badge-info">CONTROLLED</span>';
+  return '<span class="badge">—</span>';
+}
+function synStatusBadge(st) {
+  const map = { SYNCING: 'badge-ok', PAUSED: 'badge-warn', RUNNING: 'badge-ok', IDLE: '',
+                STARTING: 'badge-warn', STOPPING: 'badge-warn', CRASHED: 'badge-danger',
+                DISCONNECTED: 'badge-danger', CLOSED: '', STOPPED: '' };
+  return `<span class="badge ${map[st] || ''}">${st}</span>`;
+}
+
+function renderSyn(full) {
+  const st = synSession ? synSession.state : '—';
+  $('syn-state').textContent = (synSession ? `#${synSession.id} ${synSession.name} · ` : '') + st;
+  const active = synSession && ['RUNNING', 'PAUSED'].includes(synSession.state);
+  $('syn-btn-start').disabled = !synSession || !['IDLE', 'STOPPED', 'ERROR'].includes(synSession.state);
+  $('syn-btn-stop').disabled = !active && !(synSession && synSession.state === 'STARTING');
+  $('syn-btn-pause').disabled = !(synSession && synSession.state === 'RUNNING');
+  $('syn-btn-resume').disabled = !(synSession && synSession.state === 'PAUSED');
+  if (full && synSession && !synCfgDirty) {
+    const c = synSession.config || {};
+    $('syn-cfg-mousemove').checked = !!c.mouseMove;
+    $('syn-cfg-mouseclick').checked = !!c.mouseClick;
+    $('syn-cfg-mousewheel').checked = !!c.mouseWheel;
+    $('syn-cfg-keyboard').checked = !!c.keyboard;
+    $('syn-cfg-text').checked = !!c.text;
+    $('syn-cfg-fps').value = c.fps || 60;
+    $('syn-cfg-clickdelay').value = c.clickDelay ?? 20;
+    $('syn-cfg-clickrandom').checked = !!c.clickRandom;
+    $('syn-cfg-clickvar').value = c.clickVariation ?? 30;
+    $('syn-cfg-typemin').value = c.typingMin ?? 50;
+    $('syn-cfg-typemax').value = c.typingMax ?? 120;
+    $('syn-cfg-inputmode').value = c.inputMode || 'AUTO';
+    $('syn-cfg-stoppolicy').value = c.stopPolicy || 'drain';
+    $('syn-cfg-showcursor').checked = !!c.showCursor;
   }
-  const totalRunning = syncData.filter(x => x.status === 'running').length;
-  const totalTabs = syncData.reduce((s, x) => s + (x.tab_count || 0), 0);
-  $('sync-summary').textContent = `${syncData.length} kênh · ${totalRunning} đang chạy · ${totalTabs} tab đang mở`;
-
-  el.innerHTML = syncData.map(p => {
-    const st = p.status === 'running' ? '<span class="badge badge-ok">● Đang chạy</span>' : '<span class="badge badge-warn">○ Đã dừng</span>';
-    const portInfo = p.port ? `<span class="status-unknown mono">port ${p.port}</span>` : '';
-
-    let body = '';
-    if (p.status === 'running') {
-      if (!p.tabs.length) {
-        body = '<div class="sync-empty">Chrome đang khởi động... hoặc chưa có tab nào</div>';
-      } else {
-        body = p.tabs.map((t, idx) => {
-          const title = t.title || '(không có tiêu đề)';
-          const favicon = t.url ? getFavicon(t.url) : '';
-          return `
-            <div class="sync-tab-item">
-              <img src="${favicon}" onerror="this.style.display='none'" alt="" width="16" height="16">
-              <div class="sync-tab-info">
-                <div class="sync-tab-title" title="${escapeAttr(t.title || '')}">${escapeHtml(title)}</div>
-                <div class="sync-tab-url" title="${escapeAttr(t.url || '')}">${escapeHtml(t.url || '')}</div>
-              </div>
-              <div class="sync-actions">
-                <button class="btn btn-sm" onclick="syncOpenInProfile(${p.id}, '${escapeAttr(t.url)}')">Tab mới</button>
-                <button class="btn btn-sm btn-danger" onclick="syncCloseTab(${p.id}, '${escapeAttr(t.id)}')">Đóng tab</button>
-              </div>
-            </div>`;
-        }).join('');
-      }
-    } else {
-      body = '<div class="sync-empty">Chưa mở Chrome. Bấm "Mở kênh" hoặc đồng bộ URL để chạy.</div>';
+  const tb = $('syn-tbody');
+  tb.innerHTML = synRoles.map((r, i) => {
+    const win = r.hwnd ? `HWND ${r.hwnd}` : '—';
+    const acts = [];
+    if (r.hwnd) acts.push(`<button class="btn btn-sm" onclick="synViewWindow(${r.hwnd})">View</button>`);
+    if (['CRASHED', 'DISCONNECTED'].includes(r.status) && r.role === 'CONTROLLED' && synSession) {
+      acts.push(`<button class="btn btn-sm" onclick="synReconnect(${r.id})">Reconnect</button>`);
     }
-
-    return `
-      <div class="sync-card">
-        <div class="sync-card-head">
-          <div class="avatar">${(p.name || '?').trim()[0].toUpperCase()}</div>
-          <span class="p-name">${escapeHtml(p.name)}</span>
-          ${st} ${portInfo}
-          <div class="spacer"></div>
-          <button class="btn btn-sm" onclick="openProfile(${p.id})">Mở kênh</button>
-          <button class="btn btn-sm btn-danger" onclick="syncCloseAllTabs(${p.id})">Đóng hết tab</button>
-        </div>
-        <div class="sync-card-body">${body}</div>
-      </div>`;
+    if (synSession && r.role !== 'MAIN') {
+      acts.push(`<button class="btn btn-sm" onclick="synSetMainOne(${r.id})">Set MAIN</button>`);
+    }
+    return `<tr>
+      <td>${ckHtml(synSelected.has(r.id), `onchange="synToggle(${r.id}, this.checked)"`)}</td>
+      <td>${i + 1}</td>
+      <td>${escapeHtml(r.name)}</td>
+      <td class="mono">${win}</td>
+      <td>${synRoleBadge(r.role)}</td>
+      <td>${synStatusBadge(r.status)}</td>
+      <td><div class="sync-actions">${acts.join(' ')}</div></td>
+    </tr>`;
   }).join('');
 }
 
-function getFavicon(url) {
-  try {
-    return 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(new URL(url).hostname) + '&sz=32';
-  } catch (e) { return ''; }
+function synToggle(id, on) { on ? synSelected.add(id) : synSelected.delete(id); }
+function synToggleAll(on) {
+  synSelected = new Set(on ? synRoles.map(r => r.id) : []);
+  renderSyn(false);
+}
+function synSelectAll() { synSelected = new Set(synRoles.map(r => r.id)); renderSyn(false); }
+function synSelectNone() { synSelected = new Set(); renderSyn(false); }
+function synSelectInvert() {
+  const all = new Set(synRoles.map(r => r.id));
+  synSelected.forEach(id => all.delete(id));
+  synSelected = all; renderSyn(false);
+}
+function synSelList() { return [...synSelected]; }
+
+async function synStart() {
+  if (!synSession) { toast('Chưa có session (tạo session mới trước)', 'error'); return; }
+  toast('Đang start sync...', '');
+  const res = await getJson(api + `syncsess.php?action=start&id=${synSession.id}`);
+  toast(res.message || (res.ok ? 'Đã start' : 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synStop() {
+  if (!synSession) return;
+  const okBtn = $('confirm-ok-btn');
+  if (okBtn) okBtn.textContent = 'Stop';
+  confirmDelete('Stop sync? (browser giữ nguyên, không đóng)', async () => {
+    const res = await getJson(api + `syncsess.php?action=stop&id=${synSession.id}`);
+    toast(res.message || (res.ok ? 'Đã stop' : 'Lỗi'), res.ok ? 'success' : 'error');
+    loadSyn(true);
+  });
+}
+async function synPause() {
+  if (!synSession) return;
+  const res = await getJson(api + `syncsess.php?action=pause&id=${synSession.id}`);
+  toast(res.ok ? 'Đã pause' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synResume() {
+  if (!synSession) return;
+  const res = await getJson(api + `syncsess.php?action=resume&id=${synSession.id}`);
+  toast(res.ok ? 'Đã resume' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synRestart() {
+  if (!synSession) return;
+  toast('Đang restart (không restart browser)...', '');
+  const res = await getJson(api + `syncsess.php?action=restart&id=${synSession.id}`);
+  toast(res.message || (res.ok ? 'Đã restart' : 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synSetMain() {
+  const ids = synSelList();
+  if (!synSession) { toast('Chưa có session', 'error'); return; }
+  if (ids.length !== 1) { toast('Chọn đúng 1 kênh làm MAIN', 'error'); return; }
+  const res = await sendJson(api + 'syncsess.php?action=set_main', { id: synSession.id, profileId: ids[0] });
+  toast(res.ok ? 'Đã đổi MAIN (MAIN cũ → CONTROLLED)' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synSetMainOne(pid) {
+  if (!synSession) return;
+  const res = await sendJson(api + 'syncsess.php?action=set_main', { id: synSession.id, profileId: pid });
+  toast(res.ok ? 'Đã đổi MAIN' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synMakeControlled() {
+  const ids = synSelList();
+  if (!synSession) { toast('Chưa có session', 'error'); return; }
+  if (!ids.length) { toast('Chọn ít nhất 1 kênh', 'error'); return; }
+  for (const pid of ids) {
+    await sendJson(api + 'syncsess.php?action=add_controlled', { id: synSession.id, profileId: pid });
+  }
+  toast(`Đã thêm ${ids.length} CONTROLLED`, 'success');
+  loadSyn(true);
+}
+async function synNewSession() {
+  const ids = synSelList();
+  if (ids.length < 2) { toast('Chọn ít nhất 2 kênh (1 MAIN + CONTROLLED)', 'error'); return; }
+  const main = ids[0];
+  const controlled = ids.slice(1);
+  confirmDelete(`Tạo session mới?<br>MAIN: <strong>${escapeHtml((synRoles.find(r => r.id === main) || {}).name || main)}</strong><br>CONTROLLED: ${controlled.length} kênh`, async () => {
+    const res = await sendJson(api + 'syncsess.php?action=create', { main, controlled, config: synCollectConfig() });
+    toast(res.ok ? `Đã tạo session #${res.data.id}` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+    synCfgDirty = false;
+    loadSyn(true);
+  });
+}
+async function synReconnect(pid) {
+  if (!synSession) return;
+  const res = await sendJson(api + 'syncsess.php?action=reconnect', { id: synSession.id, profileId: pid });
+  toast(res.ok ? 'Đã yêu cầu reconnect' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  loadSyn(true);
+}
+async function synViewWindow(hwnd) {
+  const res = await sendJson(api + 'syncwin.php?action=front', { hwnd });
+  if (!res.ok) toast(res.message || 'Lỗi', 'error');
+}
+function synCollectConfig() {
+  return {
+    mouseMove: $('syn-cfg-mousemove').checked ? 1 : 0,
+    mouseClick: $('syn-cfg-mouseclick').checked ? 1 : 0,
+    mouseWheel: $('syn-cfg-mousewheel').checked ? 1 : 0,
+    keyboard: $('syn-cfg-keyboard').checked ? 1 : 0,
+    text: $('syn-cfg-text').checked ? 1 : 0,
+    fps: parseInt($('syn-cfg-fps').value || '60', 10),
+    clickDelay: parseInt($('syn-cfg-clickdelay').value || '0', 10),
+    clickRandom: $('syn-cfg-clickrandom').checked ? 1 : 0,
+    clickVariation: parseInt($('syn-cfg-clickvar').value || '0', 10),
+    typingMin: parseInt($('syn-cfg-typemin').value || '0', 10),
+    typingMax: parseInt($('syn-cfg-typemax').value || '0', 10),
+    inputMode: $('syn-cfg-inputmode').value,
+    stopPolicy: $('syn-cfg-stoppolicy').value,
+    showCursor: $('syn-cfg-showcursor').checked ? 1 : 0,
+  };
+}
+async function synSaveConfig() {
+  if (!synSession) { toast('Chưa có session', 'error'); return; }
+  const res = await sendJson(api + 'syncsess.php?action=update_config', { id: synSession.id, config: synCollectConfig() });
+  toast(res.ok ? 'Đã lưu cài đặt' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  if (res.ok) { synCfgDirty = false; $('syn-cfg-result').textContent = 'Đã lưu'; }
+  loadSyn(true);
 }
 
-async function syncOpenUrl() {
-  const url = $('sync-url').value.trim();
-  if (!url) { toast('Nhập URL trước', 'error'); return; }
-  let finalUrl = url;
-  if (!/^https?:\/\//i.test(url)) finalUrl = 'https://' + url;
-  await doSyncOpen(finalUrl);
+// ============ SYNCHRONIZE DEBUG MODE ============
+async function synLoadDebug() {
+  try {
+    const sid = synSession ? synSession.id : 0;
+    const res = await getJson(api + `syncsess.php?action=debug&id=${sid}`);
+    if (!res.ok) return;
+    const d = res.data;
+    const snap = d.snapshot;
+    $('syn-debug-main').textContent = d.session
+      ? `Session #${d.session.id} · ${d.session.state} · engine ${d.engine ? 'ON' : 'OFF'}`
+        + (snap ? ` · captured ${snap.captured} / dispatched ${snap.dispatched} / dropped ${snap.dropped} / failed ${snap.failed}` : ' · chưa có snapshot')
+        + (snap && snap.lastEvent ? ` · last: #${snap.lastEvent.seq} ${snap.lastEvent.type} (${snap.lastEvent.nx},${snap.lastEvent.ny})` : '')
+      : 'Chưa có session';
+    const tb = $('syn-debug-tbody');
+    if (!snap || !snap.targets) { tb.innerHTML = '<tr><td colspan="5">Chưa có dữ liệu (bật session để thu thập).</td></tr>'; }
+    else {
+      tb.innerHTML = Object.entries(snap.targets).map(([fid, t]) => `
+        <tr><td>#${fid} ${escapeHtml(t.name || '')}</td>
+        <td class="mono">${t.x ?? '—'} / ${t.y ?? '—'}</td>
+        <td class="mono">${t.vw}x${t.vh}</td>
+        <td>${t.queue}</td>
+        <td>${t.conn ? '<span class="badge badge-ok">ON</span>' : '<span class="badge badge-danger">OFF</span>'}</td></tr>`).join('');
+    }
+    const ev = $('syn-debug-events');
+    ev.innerHTML = (snap && snap.recent && snap.recent.length)
+      ? snap.recent.slice().reverse().map(e => `#${e.seq} ${escapeHtml(e.type)} nx=${e.nx} ny=${e.ny}`).join('<br>')
+      : '—';
+  } catch (e) {}
 }
-function syncOpen(url) {
-  if (!url) { toast('Thiếu URL', 'error'); return; }
-  doSyncOpen(url);
-}
-function syncOpenHandle() {
-  const h = $('sync-handle').value.trim();
-  if (!h) { toast('Nhập handle', 'error'); return; }
-  const handle = h.startsWith('@') ? h : '@' + h;
-  doSyncOpen('https://www.youtube.com/' + encodeURIComponent(handle));
-}
-async function doSyncOpen(url) {
-  toast('Đang đồng bộ mở URL...', '');
-  const res = await sendJson(api + 'sync.php?action=open_url', { url });
-  toast(res.message || 'Xong', res.ok ? 'success' : 'error');
-  refreshAll();
-}
-async function syncOpenInProfile(profileId, url) {
-  if (!url) return;
-  toast('Mở tab mới cho kênh...', '');
-  const res = await sendJson(api + `sync.php?action=open_tab&profile_id=${profileId}`, { url });
-  toast(res.message || 'Xong', res.ok ? 'success' : 'error');
-  refreshAll();
-}
-async function syncCloseTab(profileId, tabId) {
-  if (!confirm('Đóng tab này?')) return;
-  const res = await getJson(api + `sync.php?action=close_tab&profile_id=${profileId}&tab_id=${encodeURIComponent(tabId)}`);
-  toast(res.message || 'Xong', res.ok ? 'success' : 'error');
-  loadSync();
-}
-async function syncCloseAllTabs(profileId) {
-  if (!confirm('Đóng tất cả tab của kênh này?')) return;
-  const res = await getJson(api + `sync.php?action=close_all_tabs&profile_id=${profileId}`);
-  toast(res.message || 'Xong', res.ok ? 'success' : 'error');
-  loadSync();
+async function synLoadLogs() {
+  try {
+    const res = await getJson(api + 'syncsess.php?action=logs&limit=100');
+    const el = $('syn-debug-logs');
+    el.innerHTML = (res.ok && res.data.length)
+      ? res.data.map(l => `[${escapeHtml(l.ts || '')}] ${escapeHtml(l.level || '')} ${escapeHtml(l.event || '')} ${escapeHtml(l.profileId ?? '')} ${escapeHtml(l.message || '')}`).join('<br>')
+      : '—';
+  } catch (e) {}
 }
 
 // ============ SETTINGS ============
@@ -1103,17 +1654,33 @@ async function loadSettings() {
       $('set-proxy-timeout').value = settings.proxy_timeout || 5;
       $('set-auto-refresh').checked = !!settings.auto_refresh;
       applyAutoRefresh();
+      loadWindowSettingsForm(settings);
+      loadLayoutSettingsForm(settings);
+      loadAccountSettingsForm(settings);
+      loadMonitorsIntoSettings();
     }
   } catch (e) {}
 }
 async function saveSettings() {
+  // Luu chung ca 2 nhom de tranh truong hop user sua panel cua so roi chi bam nut nay
   const data = {
     chrome_path: $('set-chrome-path').value.trim(),
     home_url: $('set-home-url').value.trim(),
     proxy_timeout: parseInt($('set-proxy-timeout').value, 10) || 5,
     auto_refresh: $('set-auto-refresh').checked ? '1' : '0'
   };
+  if ($('win-preset-grid')) Object.assign(data, collectWindowSettings());
+  if ($('set-layout-mode')) Object.assign(data, collectLayoutSettings());
+  if ($('set-acc-days')) Object.assign(data, collectAccountSettings());
   if (!data.chrome_path) { toast('Nhập đường dẫn Chrome', 'error'); return; }
+  if ($('win-preset-grid')) {
+    const werr = validateWindowForm(data);
+    if (werr) { toast(werr, 'error'); return; }
+  }
+  if ($('set-layout-mode')) {
+    const lerr = validateLayoutForm(data);
+    if (lerr) { toast(lerr, 'error'); return; }
+  }
   const res = await sendJson(api + 'settings.php?action=save', data);
   if (res.ok) {
     settings.auto_refresh = !!$('set-auto-refresh').checked;
@@ -1121,9 +1688,536 @@ async function saveSettings() {
     settings.chrome_path = data.chrome_path;
     settings.proxy_timeout = data.proxy_timeout;
     applyAutoRefresh();
+    if ($('win-preset-grid')) { Object.assign(settings, data); paintWindowCards(); updateWindowLiveBadge(false); }
+    if ($('set-layout-mode')) { loadLayoutSettingsForm(settings); }
+    if ($('set-acc-days')) { loadAccountSettingsForm(settings); }
   }
   toast(res.ok ? 'Đã lưu cài đặt' : res.message || 'Lỗi', res.ok ? 'success' : 'error');
   $('settings-result').textContent = res.ok ? '✓ Đã lưu' : '';
+}
+function validateWindowForm(data) {
+  data = data || collectWindowSettings();
+  if (data.window_preset === 'custom') {
+    if (!(data.window_width >= 400 && data.window_width <= 7680)) return 'Chiều rộng phải từ 400 đến 7680';
+    if (!(data.window_height >= 300 && data.window_height <= 4320)) return 'Chiều cao phải từ 300 đến 4320';
+  }
+  if (!(data.window_gap >= 0 && data.window_gap <= 100)) return 'Gap phải từ 0 đến 100 px';
+  return null;
+}
+
+// ============ WINDOW SETTINGS (Global defaults) ============
+const WINDOW_PRESETS = {
+  small: [800, 600], standard: [1024, 768], hd: [1280, 720], hd_plus: [1280, 800],
+  laptop: [1366, 768], fhd: [1920, 1080], qhd: [2560, 1440], uhd: [3840, 2160]
+};
+let winPreset = 'hd';
+let winPos = 'auto';
+function loadWindowSettingsForm(s) {
+  if (!$('win-preset-grid')) return;
+  winPreset = s.window_preset || 'hd';
+  winPos = s.window_position || 'auto';
+  $('set-window-fixed').checked = !!s.window_fixed;
+  $('set-window-width').value = s.window_width ?? 1280;
+  $('set-window-height').value = s.window_height ?? 720;
+  $('set-window-x').value = s.window_x ?? 0;
+  $('set-window-y').value = s.window_y ?? 0;
+  $('set-window-gap').value = s.window_gap ?? 5;
+  setWindowMonitorValue(s.window_monitor || 'primary');
+  paintWindowCards();
+  updateWindowLiveBadge();
+}
+function paintWindowCards() {
+  document.querySelectorAll('#win-preset-grid .preset-card').forEach(c =>
+    c.classList.toggle('active', c.dataset.preset === winPreset));
+  document.querySelectorAll('#win-pos-grid .seg-card').forEach(c =>
+    c.classList.toggle('active', c.dataset.pos === winPos));
+  const custom = winPreset === 'custom';
+  $('set-window-width').disabled = !custom;
+  $('set-window-height').disabled = !custom;
+  $('win-custom-pos').classList.toggle('hidden', winPos !== 'custom');
+}
+function selectWindowPreset(p) {
+  winPreset = p;
+  if (WINDOW_PRESETS[p]) {
+    $('set-window-width').value = WINDOW_PRESETS[p][0];
+    $('set-window-height').value = WINDOW_PRESETS[p][1];
+  }
+  paintWindowCards();
+  updateWindowLiveBadge(true);
+}
+function selectWindowPos(p) {
+  winPos = p;
+  paintWindowCards();
+  updateWindowLiveBadge(true);
+}
+function updateWindowLiveBadge(draft) {
+  const el = $('win-live-badge');
+  if (!el) return;
+  const w = $('set-window-width').value || '?';
+  const h = $('set-window-height').value || '?';
+  const fixed = $('set-window-fixed').checked;
+  const posName = { auto: 'Tự động', cascade: 'Xếp tầng', grid: 'Lưới', custom: 'Tùy chỉnh' }[winPos] || winPos;
+  el.textContent = (fixed ? `${w}×${h}` : 'Tự do') + ` · ${posName}` + (draft ? ' (chưa lưu)' : ' · đang áp dụng');
+}
+function setWindowMonitorValue(v) {
+  const sel = $('set-window-monitor');
+  if (!sel) return;
+  v = String(v || 'primary');
+  if (![...sel.options].some(o => o.value === v)) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v === 'primary' ? 'Màn hình chính' : ('Màn hình ' + v);
+    sel.appendChild(o);
+  }
+  sel.value = v;
+}
+async function loadMonitorsIntoSettings() {
+  try {
+    const res = await getJson(api + 'syncwin.php?action=monitors');
+    if (!res.ok || !Array.isArray(res.data)) return;
+    fillMonitorSelect($('set-window-monitor'), res.data, false,
+      (settings && settings.window_monitor) || 'primary');
+    fillMonitorSelect($('set-layout-monitor'), res.data, true,
+      (settings && settings.layout_monitor) || 'primary');
+  } catch (e) {}
+}
+function fillMonitorSelect(sel, monitors, withAll, cur) {
+  if (!sel) return;
+  cur = String(cur || 'primary');
+  cachedMonitors = monitors || [];
+  sel.innerHTML = '<option value="primary">Màn hình chính</option>'
+    + (withAll ? '<option value="all">Tất cả màn hình</option>' : '');
+  monitors.forEach(m => {
+    const o = document.createElement('option');
+    const r = m.resolution ? ` - ${m.resolution.w}x${m.resolution.h}` : '';
+    o.value = String(m.id);
+    o.textContent = `Màn hình ${m.id}${m.primary ? ' (chính)' : ''}${r}`;
+    sel.appendChild(o);
+  });
+  if (withAll) setLayoutMonitorValue(cur);
+  else setWindowMonitorValue(cur);
+  renderLayoutMonList(monitors);
+  fillMainMonSelect(monitors);
+}
+let cachedMonitors = [];
+function renderLayoutMonList(monitors) {
+  const box = $('set-layout-monlist');
+  if (!box) return;
+  const saved = String((settings && settings.layout_monitors) || '');
+  const checked = new Set(saved.split(',').map(s => s.trim()).filter(Boolean));
+  const limitAll = checked.size === 0;
+  box.innerHTML = '';
+  (monitors || []).forEach(m => {
+    const name = m.name || ('Monitor ' + m.id);
+    const res = m.resolution ? `${m.resolution.w}x${m.resolution.h}` : '';
+    const row = document.createElement('label');
+    row.className = 'mon-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = name;
+    cb.checked = limitAll || checked.has(name);
+    cb.onchange = () => updateLayoutLiveBadge(true);
+    const nm = document.createElement('span');
+    nm.textContent = `Màn hình ${m.id}${m.primary ? ' (chính)' : ''}`;
+    const meta = document.createElement('span');
+    meta.className = 'mon-meta';
+    meta.textContent = `${res}${m.dpi ? ' · ' + m.dpi.x + 'dpi' : ''}`;
+    row.appendChild(cb); row.appendChild(nm); row.appendChild(meta);
+    box.appendChild(row);
+  });
+  if (!(monitors || []).length) {
+    box.innerHTML = '<div class="hint">Không thấy màn hình nào.</div>';
+  }
+}
+function fillMainMonSelect(monitors) {
+  const sel = $('set-layout-mainmon');
+  if (!sel) return;
+  const cur = sel.value || (settings && settings.layout_main_monitor) || '';
+  sel.innerHTML = '<option value="">-- Không --</option>';
+  (monitors || []).forEach(m => {
+    const o = document.createElement('option');
+    o.value = m.name || '';
+    o.textContent = `Màn hình ${m.id}${m.primary ? ' (chính)' : ''}`;
+    sel.appendChild(o);
+  });
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+function collectLayoutMonitors() {
+  const box = $('set-layout-monlist');
+  if (!box) return '';
+  return [...box.querySelectorAll('input[type=checkbox]:checked')].map(c => c.value).join(',');
+}
+function onWindowPresetChange() { paintWindowCards(); }
+function syncPresetInputs() { paintWindowCards(); }
+function collectWindowSettings() {
+  return {
+    window_fixed: $('set-window-fixed').checked ? '1' : '0',
+    window_preset: winPreset,
+    window_width: parseInt($('set-window-width').value, 10),
+    window_height: parseInt($('set-window-height').value, 10),
+    window_position: winPos,
+    window_monitor: $('set-window-monitor').value,
+    window_gap: parseInt($('set-window-gap').value, 10),
+    window_x: parseInt($('set-window-x').value, 10),
+    window_y: parseInt($('set-window-y').value, 10)
+  };
+}
+function winResult(msg, ok) {
+  const el = $('window-settings-result');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('win-result-ok', ok === true);
+  el.classList.toggle('win-result-err', ok === false);
+}
+async function saveWindowSettings() {
+  const btn = $('win-save-btn');
+  try {
+    if (!$('win-preset-grid') || !$('set-window-width')) {
+      toast('Giao diện chưa tải xong (JS cũ?) — bấm Ctrl+F5 tải lại trang', 'error');
+      winResult('✗ JS cũ đang cache — Ctrl+F5 rồi thử lại', false);
+      return;
+    }
+    const data = collectWindowSettings();
+    const werr = validateWindowForm(data);
+    if (werr) { toast(werr, 'error'); winResult('✗ ' + werr, false); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lưu...'; }
+    winResult('⏳ Đang lưu...', null);
+    try {
+      const res = await sendJson(api + 'settings.php?action=save', data);
+      if (!res.ok) {
+        winResult('✗ ' + (res.message || 'Lưu thất bại'), false);
+        toast(res.message || 'Lưu thất bại', 'error');
+      } else {
+        // Doc lai tu server de xac nhan DB giu dung gia tri (chong save "ao")
+        const chk = await getJson(api + 'settings.php?action=get');
+        const sv = chk.ok ? chk.data : null;
+        const okVerify = sv && String(sv.window_preset) === String(data.window_preset)
+          && parseInt(sv.window_width, 10) === data.window_width
+          && parseInt(sv.window_height, 10) === data.window_height;
+        const t = new Date().toLocaleTimeString('vi-VN');
+        if (okVerify) {
+          const size = data.window_fixed === '1' ? `${data.window_width}×${data.window_height}` : 'tự do';
+          settings = sv;
+          loadWindowSettingsForm(sv);
+          winResult(`✓ Đã lưu lúc ${t} — ${size}, áp dụng từ lần Launch tiếp theo`, true);
+          toast(`Đã lưu cửa sổ ${size} — Chrome mở sau sẽ dùng cấu hình này`, 'success');
+        } else {
+          winResult('⚠ Server báo lưu xong nhưng đọc lại khác — bấm Lưu lại giúp mình', false);
+          toast('Xác minh sau lưu thất bại, thử lưu lại', 'error');
+        }
+      }
+    } catch (e) {
+      winResult('✗ Lỗi kết nối, thử lại', false);
+      toast('Lỗi kết nối khi lưu', 'error');
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '💾 Lưu cửa sổ'; }
+  } catch (e) {
+    console.error(e);
+    toast('Lỗi không ngờ: ' + (e.message || e), 'error');
+    try { winResult('✗ Lỗi: ' + (e.message || e), false); } catch (_) {}
+    if (btn) { btn.disabled = false; btn.textContent = '💾 Lưu cửa sổ'; }
+  }
+}
+function resetWindowSettings() {
+  try {
+    confirmDelete('Reset cấu hình cửa sổ về mặc định (HD 1280×720, Fixed ON, Auto, Gap 5, Primary)?', async () => {
+      const btn = $('win-reset-btn');
+      try {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang reset...'; }
+        winResult('⏳ Đang reset...', null);
+        const data = { window_fixed: '1', window_preset: 'hd', window_width: 1280, window_height: 720, window_position: 'auto', window_monitor: 'primary', window_gap: 5, window_x: 0, window_y: 0 };
+        const res = await sendJson(api + 'settings.php?action=save', data);
+        if (res.ok) {
+          await loadSettings();
+          const t = new Date().toLocaleTimeString('vi-VN');
+          winResult(`✓ Đã reset về mặc định lúc ${t} (1280×720)`, true);
+          toast('Đã reset cửa sổ về mặc định 1280×720', 'success');
+        } else {
+          winResult('✗ ' + (res.message || 'Reset thất bại'), false);
+          toast(res.message || 'Reset thất bại', 'error');
+        }
+      } catch (e) {
+        winResult('✗ Lỗi kết nối khi reset', false);
+        toast('Lỗi kết nối khi reset', 'error');
+      }
+      if (btn) { btn.disabled = false; btn.textContent = '↺ Reset mặc định'; }
+    });
+  } catch (e) {
+    console.error(e);
+    toast('Lỗi không ngờ khi reset: ' + (e.message || e), 'error');
+  }
+}
+// Cap nhat badge live khi user sua tay (danh dau "chua luu")
+document.addEventListener('DOMContentLoaded', () => {
+  ['set-window-fixed', 'set-window-width', 'set-window-height', 'set-window-x', 'set-window-y', 'set-window-gap', 'set-window-monitor'].forEach(id => {
+    document.addEventListener('change', e => {
+      if (e.target && e.target.id === id && $('win-live-badge')) updateWindowLiveBadge(true);
+    });
+  });
+  document.addEventListener('change', e => {
+    if (e.target && e.target.id && e.target.id.indexOf('set-layout-') === 0 && $('layout-live-badge')) updateLayoutLiveBadge(true);
+  });
+});
+
+// ============ LAYOUT SETTINGS (Smart Auto Arrange) ============
+function loadLayoutSettingsForm(s) {
+  if (!$('set-layout-mode')) return;
+  $('set-layout-mode').value = s.layout_mode || 'smart_auto';
+  $('set-layout-sizemode').value = s.layout_size_mode || 'auto_fit';
+  $('set-layout-multi').checked = !!s.layout_multi;
+  $('set-layout-gapx').value = s.layout_gap_x ?? 5;
+  $('set-layout-gapy').value = s.layout_gap_y ?? 5;
+  $('set-layout-minw').value = s.layout_min_w ?? 500;
+  $('set-layout-minh').value = s.layout_min_h ?? 400;
+  $('set-layout-taskbar').checked = s.layout_respect_taskbar !== false;
+  $('set-layout-visible').checked = s.layout_keep_visible !== false;
+  $('set-layout-autolaunch').checked = s.layout_auto_launch !== false;
+  $('set-layout-reflow').value = s.layout_reflow || 'ask';
+  $('set-layout-fallback').value = s.layout_fallback || 'auto';
+  $('set-layout-compactx').value = s.layout_compact_x ?? 150;
+  $('set-layout-compacty').value = s.layout_compact_y ?? 40;
+  $('set-layout-dist').value = s.layout_distribution || 'smart';
+  $('set-layout-balance').value = s.layout_size_balance || 'similar';
+  $('set-layout-remember').checked = s.layout_remember_monitors !== false;
+  $('set-layout-respectdpi').checked = s.layout_respect_dpi !== false;
+  $('set-layout-keepinside').checked = s.layout_keep_inside !== false;
+  $('set-layout-disconnect').value = s.layout_disconnect || 'ask';
+  setLayoutMonitorValue(s.layout_monitor || 'primary');
+  updateLayoutLiveBadge();
+}
+function setLayoutMonitorValue(v) {
+  const sel = $('set-layout-monitor');
+  if (!sel) return;
+  v = String(v || 'primary');
+  if (![...sel.options].some(o => o.value === v)) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v === 'primary' ? 'Màn hình chính' : v === 'all' ? 'Tất cả màn hình' : ('Màn hình ' + v);
+    sel.appendChild(o);
+  }
+  sel.value = v;
+}
+function updateLayoutLiveBadge(draft) {
+  const el = $('layout-live-badge');
+  if (!el || !$('set-layout-mode')) return;
+  const modeName = { smart_auto: 'Thông minh', grid: 'Lưới', horizontal: 'Hàng ngang', vertical: 'Hàng dọc', cascade: 'Xếp tầng', compact: 'Xếp chồng' }[$('set-layout-mode').value] || '';
+  el.textContent = modeName + (draft ? ' (chưa lưu)' : ' · đang áp dụng');
+}
+function collectLayoutSettings() {
+  return {
+    layout_mode: $('set-layout-mode').value,
+    layout_size_mode: $('set-layout-sizemode').value,
+    layout_monitor: $('set-layout-monitor').value,
+    layout_multi: $('set-layout-multi').checked ? '1' : '0',
+    layout_gap_x: parseInt($('set-layout-gapx').value, 10),
+    layout_gap_y: parseInt($('set-layout-gapy').value, 10),
+    layout_min_w: parseInt($('set-layout-minw').value, 10),
+    layout_min_h: parseInt($('set-layout-minh').value, 10),
+    layout_respect_taskbar: $('set-layout-taskbar').checked ? '1' : '0',
+    layout_keep_visible: $('set-layout-visible').checked ? '1' : '0',
+    layout_auto_launch: $('set-layout-autolaunch').checked ? '1' : '0',
+    layout_reflow: $('set-layout-reflow').value,
+    layout_fallback: $('set-layout-fallback').value,
+    layout_compact_x: parseInt($('set-layout-compactx').value, 10),
+    layout_compact_y: parseInt($('set-layout-compacty').value, 10),
+    layout_monitors: collectLayoutMonitors(),
+    layout_distribution: $('set-layout-dist').value,
+    layout_size_balance: $('set-layout-balance').value,
+    layout_remember_monitors: $('set-layout-remember').checked ? '1' : '0',
+    layout_respect_dpi: $('set-layout-respectdpi').checked ? '1' : '0',
+    layout_keep_inside: $('set-layout-keepinside').checked ? '1' : '0',
+    layout_disconnect: $('set-layout-disconnect').value,
+    layout_main_monitor: $('set-layout-mainmon').value,
+    layout_controlled_monitors: ''
+  };
+}
+function validateLayoutForm(d) {
+  d = d || collectLayoutSettings();
+  if (!['smart_auto', 'grid', 'horizontal', 'vertical', 'cascade', 'compact'].includes(d.layout_mode)) return 'Layout mode không hợp lệ';
+  if (!(d.layout_gap_x >= 0 && d.layout_gap_x <= 100)) return 'Khe ngang phải 0–100';
+  if (!(d.layout_gap_y >= 0 && d.layout_gap_y <= 100)) return 'Khe dọc phải 0–100';
+  if (!(d.layout_min_w >= 200 && d.layout_min_w <= 4000)) return 'Rộng tối thiểu phải 200–4000';
+  if (!(d.layout_min_h >= 150 && d.layout_min_h <= 3000)) return 'Cao tối thiểu phải 150–3000';
+  if (!(d.layout_compact_x >= 0 && d.layout_compact_x <= 2000)) return 'Lệch ngang phải 0–2000';
+  if (!(d.layout_compact_y >= 0 && d.layout_compact_y <= 2000)) return 'Lệch dọc phải 0–2000';
+  if (!['smart', 'equal', 'sequential', 'manual'].includes(d.layout_distribution)) return 'Cách chia không hợp lệ';
+  if (!['similar', 'maximize'].includes(d.layout_size_balance)) return 'Cân kích thước không hợp lệ';
+  return null;
+}
+function layoutResult(msg, ok) {
+  const el = $('layout-settings-result');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('win-result-ok', ok === true);
+  el.classList.toggle('win-result-err', ok === false);
+}
+async function saveLayoutSettings() {
+  const btn = $('layout-save-btn');
+  try {
+    if (!$('set-layout-mode')) { toast('Giao diện chưa tải xong — Ctrl+F5 rồi thử lại', 'error'); return; }
+    const data = collectLayoutSettings();
+    const err = validateLayoutForm(data);
+    if (err) { toast(err, 'error'); layoutResult('✗ ' + err, false); return; }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lưu...'; }
+    layoutResult('⏳ Đang lưu...', null);
+    const res = await sendJson(api + 'settings.php?action=save', data);
+    if (!res.ok) {
+      layoutResult('✗ ' + (res.message || 'Lưu thất bại'), false);
+      toast(res.message || 'Lưu thất bại', 'error');
+    } else {
+      const chk = await getJson(api + 'settings.php?action=get');
+      const sv = chk.ok ? chk.data : null;
+      const okVerify = sv && String(sv.layout_mode) === String(data.layout_mode)
+        && parseInt(sv.layout_gap_x, 10) === data.layout_gap_x;
+      const t = new Date().toLocaleTimeString('vi-VN');
+      if (okVerify) {
+        settings = sv;
+        loadLayoutSettingsForm(sv);
+        layoutResult(`✓ Đã lưu lúc ${t} — lần Sắp xếp tiếp theo dùng cấu hình này`, true);
+        toast('Đã lưu cấu hình bố cục', 'success');
+      } else {
+        layoutResult('⚠ Lưu xong nhưng đọc lại khác — bấm Lưu lại', false);
+        toast('Xác minh sau lưu thất bại', 'error');
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    toast('Lỗi: ' + (e.message || e), 'error');
+    try { layoutResult('✗ Lỗi: ' + (e.message || e), false); } catch (_) {}
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '💾 Lưu bố cục'; }
+}
+function resetLayoutSettings() {
+  try {
+    confirmDelete('Reset cấu hình bố cục về mặc định (Thông minh, Tự co, Màn hình chính)?', async () => {
+      const btn = $('layout-reset-btn');
+      try {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳...'; }
+        const data = { layout_mode: 'smart_auto', layout_size_mode: 'auto_fit', layout_monitor: 'primary', layout_multi: '0', layout_gap_x: 5, layout_gap_y: 5, layout_min_w: 500, layout_min_h: 400, layout_respect_taskbar: '1', layout_keep_visible: '1', layout_auto_launch: '1', layout_reflow: 'ask', layout_fallback: 'auto', layout_compact_x: 150, layout_compact_y: 40, layout_monitors: '', layout_distribution: 'smart', layout_size_balance: 'similar', layout_remember_monitors: '1', layout_respect_dpi: '1', layout_keep_inside: '1', layout_disconnect: 'ask', layout_main_monitor: '', layout_controlled_monitors: '' };
+        const res = await sendJson(api + 'settings.php?action=save', data);
+        if (res.ok) {
+          await loadSettings();
+          layoutResult('✓ Đã reset bố cục về mặc định', true);
+          toast('Đã reset bố cục về mặc định', 'success');
+        } else {
+          layoutResult('✗ ' + (res.message || 'Loi'), false);
+          toast(res.message || 'Loi', 'error');
+        }
+      } catch (e) {
+        layoutResult('✗ Loi ket noi', false);
+      }
+      if (btn) { btn.disabled = false; btn.textContent = '↺ Mặc định'; }
+    });
+  } catch (e) {
+    toast('Lỗi: ' + (e.message || e), 'error');
+  }
+}
+
+// ============ ACCOUNT SETTINGS ============
+function loadAccountSettingsForm(s) {
+  if (!$('set-acc-days')) return;
+  $('set-acc-days').value = s.acc_min_days ?? 7;
+  $('set-acc-checks').value = s.acc_min_checks ?? 10;
+  $('set-acc-stab').value = s.acc_ready_stability ?? 80;
+  $('set-acc-conf').value = s.acc_ready_confidence ?? 70;
+  $('set-acc-review').value = s.acc_review_threshold ?? 50;
+  $('set-acc-unavail').value = s.acc_unavail_fails ?? 20;
+  $('set-acc-wlogin').value = s.acc_w_login ?? 25;
+  $('set-acc-wsession').value = s.acc_w_session ?? 15;
+  $('set-acc-wyt').value = s.acc_w_youtube ?? 25;
+  $('set-acc-wrate').value = s.acc_w_rate ?? 25;
+  $('set-acc-wconsec').value = s.acc_w_consec ?? 10;
+  $('set-acc-interval').value = s.acc_check_interval_min ?? 120;
+  $('set-acc-maxage').value = s.acc_max_data_age_h ?? 72;
+  $('set-acc-batch').value = s.acc_batch ?? 10;
+  $('set-acc-onstart').checked = !!s.acc_eval_on_start;
+  $('set-acc-bg').checked = !!s.acc_background;
+  refreshAccountMonitorLine();
+}
+function collectAccountSettings() {
+  return {
+    acc_min_days: parseInt($('set-acc-days').value, 10),
+    acc_min_checks: parseInt($('set-acc-checks').value, 10),
+    acc_ready_stability: parseInt($('set-acc-stab').value, 10),
+    acc_ready_confidence: parseInt($('set-acc-conf').value, 10),
+    acc_review_threshold: parseInt($('set-acc-review').value, 10),
+    acc_unavail_fails: parseInt($('set-acc-unavail').value, 10),
+    acc_w_login: parseInt($('set-acc-wlogin').value, 10),
+    acc_w_session: parseInt($('set-acc-wsession').value, 10),
+    acc_w_youtube: parseInt($('set-acc-wyt').value, 10),
+    acc_w_rate: parseInt($('set-acc-wrate').value, 10),
+    acc_w_consec: parseInt($('set-acc-wconsec').value, 10),
+    acc_check_interval_min: parseInt($('set-acc-interval').value, 10),
+    acc_max_data_age_h: parseInt($('set-acc-maxage').value, 10),
+    acc_batch: parseInt($('set-acc-batch').value, 10),
+    acc_eval_on_start: $('set-acc-onstart').checked ? '1' : '0',
+    acc_background: $('set-acc-bg').checked ? '1' : '0'
+  };
+}
+function accResult(msg, ok) {
+  const el = $('account-settings-result');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('win-result-ok', ok === true);
+  el.classList.toggle('win-result-err', ok === false);
+}
+async function saveAccountSettings() {
+  const btn = $('acc-save-btn');
+  try {
+    if (!$('set-acc-days')) { toast('Giao diện chưa tải xong — Ctrl+F5 rồi thử lại', 'error'); return; }
+    const data = collectAccountSettings();
+    for (const [k, v] of Object.entries(data)) {
+      if (typeof v === 'number' && !Number.isFinite(v)) { toast('Giá trị số không hợp lệ', 'error'); accResult('✗ Số không hợp lệ', false); return; }
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lưu...'; }
+    accResult('⏳ Đang lưu...', null);
+    const res = await sendJson(api + 'settings.php?action=save', data);
+    if (!res.ok) {
+      accResult('✗ ' + (res.message || 'Lưu thất bại'), false);
+      toast(res.message || 'Lưu thất bại', 'error');
+    } else {
+      const chk = await getJson(api + 'settings.php?action=get');
+      const sv = chk.ok ? chk.data : null;
+      const okVerify = sv && parseInt(sv.acc_min_days, 10) === data.acc_min_days;
+      const t = new Date().toLocaleTimeString('vi-VN');
+      if (okVerify) {
+        settings = sv;
+        loadAccountSettingsForm(sv);
+        accResult(`✓ Đã lưu lúc ${t}`, true);
+        toast('Đã lưu chính sách đánh giá', 'success');
+      } else {
+        accResult('⚠ Lưu xong nhưng đọc lại khác — bấm Lưu lại', false);
+        toast('Xác minh sau lưu thất bại', 'error');
+      }
+    }
+  } catch (e) {
+    toast('Lỗi: ' + (e.message || e), 'error');
+    try { accResult('✗ Lỗi', false); } catch (_) {}
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '💾 Lưu đánh giá'; }
+}
+function resetAccountSettings() {
+  confirmDelete('Reset chính sách đánh giá về mặc định?', async () => {
+    const data = { acc_min_days: 7, acc_min_checks: 10, acc_ready_stability: 80, acc_ready_confidence: 70, acc_review_threshold: 50, acc_unavail_fails: 20, acc_w_login: 25, acc_w_session: 15, acc_w_youtube: 25, acc_w_rate: 25, acc_w_consec: 10, acc_check_interval_min: 120, acc_max_data_age_h: 72, acc_batch: 10, acc_eval_on_start: '0', acc_background: '0' };
+    const res = await sendJson(api + 'settings.php?action=save', data);
+    if (res.ok) { await loadSettings(); accResult('✓ Đã reset về mặc định', true); toast('Đã reset', 'success'); }
+    else { accResult('✗ ' + (res.message || 'Lỗi'), false); toast(res.message || 'Lỗi', 'error'); }
+  });
+}
+async function refreshAccountMonitorLine() {
+  const el = $('acc-monitor-line');
+  if (!el) return;
+  try {
+    const res = await getJson(api + 'accounts.php?action=monitor_status');
+    if (res.ok && res.data) {
+      el.innerHTML = res.data.running
+        ? `Monitor: <span class="badge badge-ok">đang chạy (pid ${res.data.pid})</span> <button class="btn btn-sm" onclick="accountMonitorCtl(false)">Dừng</button>`
+        : `Monitor: <span class="badge badge-muted">đang tắt</span> <button class="btn btn-sm" onclick="accountMonitorCtl(true)">Chạy nền</button>`;
+    }
+  } catch (e) {}
+}
+async function accountMonitorCtl(on) {
+  const res = await getJson(api + `accounts.php?action=monitor_${on ? 'start' : 'stop'}`);
+  toast(res.ok ? (on ? 'Monitor đã chạy' : 'Monitor đã dừng') : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  refreshAccountMonitorLine();
 }
 
 // ============ UTILS ============
@@ -1159,6 +2253,8 @@ function hideConfirm() {
   confirmDeleteCallback = null;
   const m = $('confirm-modal');
   if (m) m.classList.add('hidden');
+  const okBtn = $('confirm-ok-btn');
+  if (okBtn) okBtn.textContent = 'Xóa'; // tra nut ve mac dinh (reflow doi thanh Arrange tam thoi)
 }
 function escapeHtml(str) {
   const div = document.createElement('div');

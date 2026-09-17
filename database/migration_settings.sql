@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 INSERT INTO settings (skey, svalue) VALUES
     ('chrome_path', 'C:\Program Files\Google\Chrome\Application\chrome.exe'),
-    ('home_url', 'https://www.youtube.com'),
+    ('home_url', 'https://www.google.com/'),
     ('proxy_timeout', '5'),
     ('auto_refresh', '1')
 ON DUPLICATE KEY UPDATE skey = VALUES(skey);

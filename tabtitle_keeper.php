@@ -4,7 +4,8 @@
  * Khi phat hien target page MOI (tab moi, ctrl+T, click link mo tab moi...)
  * thi tu dong gan tien de tab: "Ten kenh | <tieu de trang>" giong tab dau tien.
  *
- * Cach dung: php -f tabtitle_keeper.php <cdp_port> <ten_kenh>
+ * Cach dung: php -f tabtitle_keeper.php <cdp_port> <profile_id>
+ * (ten kenh tu doc tu DB theo profile_id).
  * Thoat tu dong khi CDP mat ket noi (Chrome dong)
  */
 if (PHP_SAPI !== 'cli') exit("CLI only\n");
@@ -82,6 +83,13 @@ while (true) {
         $downRounds = 0;
         $state = [];
         foreach ($targets as $t) $state[$t['id']] = $t;
+        // Don tab da dong khoi map theo doi (tranh mang lon dan qua nhieu ngay chay)
+        foreach (array_keys($scripted) as $sid) {
+            if (!isset($state[$sid])) unset($scripted[$sid]);
+        }
+        foreach (array_keys($giveUp) as $gid) {
+            if (!isset($state[$gid])) unset($giveUp[$gid]);
+        }
         foreach ($state as $id => $t) {
             $prefixed = strpos($t['title'], $name . ' | ') === 0;
             if ($prefixed) continue; // da co ten kenh, khong can lam gi

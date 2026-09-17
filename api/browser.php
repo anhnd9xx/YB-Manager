@@ -53,37 +53,27 @@ try {
     json_out(['ok' => false, 'message' => 'Loi he thong: ' . $e->getMessage()], 500);
 }
 
-function get_debug_port(array $p): ?int
+function open_chrome(array $p, ?string $url = null): void
 {
-    static $used = [];
-    $base = 9200;
-    if (!empty($p['debug_port'])) {
-        $port = (int)$p['debug_port'];
-        if (!isset($used[$port])) {
-            $used[$port] = true;
-            return $port;
-        }
+    // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com)
+    if ($url === null) {
+        $url = get_setting('home_url', 'https://www.google.com/');
     }
-    for ($i = 0; $i < 100; $i++) {
-        $port = $base + (int)$p['id'] + $i;
-        if (isset($used[$port])) continue;
-        if (cdp_reachable($port)) continue; // port dang bi instance khac chiem -> bo qua
-        $used[$port] = true;
-        db()->prepare('UPDATE profiles SET debug_port=? WHERE id=?')->execute([$port, (int)$p['id']]);
-        log_action((int)$p['id'], 'assign_port', 'Debug port ' . $port);
-        return $port;
-    }
-    return null;
-}
-
-function open_chrome(array $p, string $url = 'https://www.youtube.com'): void
-{
     // Neu Chrome dang chay VA CDP con phan hoi VA config (proxy/user-agent) dung nhu DB
     // -> tra ve ngay, khong dong/restart (tranh mat tab khi user bam "Mo" lai).
     // Neu config da doi (gan proxy moi, doi UA...) -> restart de ap dung config moi.
     if (is_chrome_running($p)) {
         if (!empty($p['debug_port']) && cdp_reachable((int)$p['debug_port'])) {
             if (chrome_cmdline_matches_config($p)) {
+                // Relay cua kenh dang chay co CHET (khong lang nghe) khong -> khoi dong lai ngay
+                // (truoc day open tra "dang chay" ma khong sua relay chet -> kenh di qua proxy cut;
+                //  extra: chi dung relay_listening nhanh, khong dung relay_healthy 12s de khoi treo open).
+                $relay = expected_relay_port($p);
+                if ($relay !== null && !relay_listening($relay)) {
+                    if (start_proxy_relay($p) === null) {
+                        json_out(['ok' => false, 'proxy_dead' => true, 'message' => 'Relay cua kenh da chet va khong the khoi dong lai (proxy chet?).'], 409);
+                    }
+                }
                 json_out(['ok' => true, 'message' => 'Kenh "' . $p['name'] . '" dang chay (port ' . $p['debug_port'] . ')', 'port' => (int)$p['debug_port']]);
                 return;
             }
@@ -121,8 +111,8 @@ function open_chrome(array $p, string $url = 'https://www.youtube.com'): void
             ->execute(['alive', (int)$p['proxy_id']]);
     }
 
-    // Bat buoc co debug port truoc khi launch
-    $port = get_debug_port($p);
+    // Bat buoc co debug port truoc khi launch (cap chung via config.php)
+    $port = allocate_debug_port($p);
     if (!$port) {
         json_out(['ok' => false, 'message' => 'Khong the gan debug port'], 500);
     }
@@ -136,6 +126,18 @@ function open_chrome(array $p, string $url = 'https://www.youtube.com'): void
 
     db()->prepare('UPDATE profiles SET status=?, last_opened=NOW(), debug_port=? WHERE id=?')
         ->execute(['running', $port, (int)$p['id']]);
+    // Account Evaluation: dam bao state + danh dau due neu bat "Evaluate on Profile Start"
+    try {
+        require_once __DIR__ . '/../sync/AccountRepository.php';
+        require_once __DIR__ . '/../sync/SettingsService.php';
+        AccountRepository::ensure((int)$p['id']);
+        if (SyncSettingsService::getAccountPolicy()['evalOnStart']) {
+            db()->prepare('UPDATE account_states SET last_checked_at=NULL WHERE profile_id=?')
+                ->execute([(int)$p['id']]);
+        }
+    } catch (Throwable $e) {
+        // khong de danh gia lam hong mo kenh
+    }
     log_action((int)$p['id'], 'open', $url);
     json_out(['ok' => true, 'message' => 'Da mo Chrome cho profile: ' . $p['name'], 'port' => $port]);
 }

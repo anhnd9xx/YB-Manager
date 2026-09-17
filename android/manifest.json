@@ -1,0 +1,9 @@
+{
+  "name": "YT Manager Remote",
+  "short_name": "YTRemote",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318",
+  "icons": []
+}

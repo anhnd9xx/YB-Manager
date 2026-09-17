@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#111318">
+<title>YT Remote</title>
+<link rel="manifest" href="manifest.json">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#111318;color:#e8eaf0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;overscroll-behavior:none}
+body{display:flex;flex-direction:column;height:100%}
+header{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:10px 12px;background:#171a21}
+header h1{font-size:17px;margin-right:auto}
+header button{flex:0 0 auto;background:#262b36;border:0;color:#e8eaf0;border-radius:10px;height:38px;padding:0 12px;font-size:13px}
+header button.go{background:#16a34a}
+header button.stop{background:#b91c1c}
+main{flex:1;overflow:hidden;position:relative}
+.panel{position:absolute;inset:0;overflow-y:auto;padding:10px 12px calc(70px + env(safe-area-inset-bottom));display:none}
+.panel.on{display:block}
+.card{background:#1b1f27;border-radius:14px;padding:12px;margin-bottom:10px}
+.card .top{display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;background:#71717a;flex:0 0 auto}
+.dot.on{background:#22c55e}.dot.busy{background:#f59e0b}.dot.dead{background:#b91c1c}
+.card .nm{font-weight:700;font-size:15px}
+.card .sub{color:#8b93a5;font-size:11.5px;margin-top:2px}
+.card .btns{display:flex;gap:8px;margin-top:10px}
+.card .btns button{flex:1;border:0;border-radius:10px;height:42px;font-size:14px;color:#fff;font-weight:600}
+.bOn{background:#16a34a}.bOff{background:#44485a}.bOn.dis{background:#0e5a2b}
+.bView{background:#2563eb}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:2px}
+.chip{background:#11151c;color:#cfd4de;border:1px solid #2a3040;border-radius:16px;padding:5px 10px;font-size:12px;white-space:nowrap;flex:0 0 auto}
+.chip.cur{border-color:#2563eb;color:#93c5fd}
+/* --- thanh tab kieu browser (stream view) --- */
+#geo{display:flex;gap:6px;overflow-x:auto;padding:8px;background:#10131a;border-bottom:1px solid #232833;z-index:5;scrollbar-width:none}
+#geo::-webkit-scrollbar{display:none}
+#geo::after{content:'';flex:0 0 2px}
+.tab{flex:0 0 auto;display:flex;align-items:center;gap:7px;max-width:190px;min-width:0;background:#1b2029;color:#aeb6c6;border:1px solid #2a3040;border-bottom:2px solid transparent;border-radius:10px 10px 6px 6px;padding:7px 8px 7px 9px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.tab:active{background:#222835}
+.tab.cur{background:#242b3a;color:#fff;border-color:#3b82f6;border-bottom-color:#3b82f6;box-shadow:0 0 0 1px #3b82f6 inset}
+.tab .fav{position:relative;flex:0 0 auto;width:16px;height:16px;border-radius:50%;background:#3b82f6;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.tab .fav img{position:absolute;inset:0;width:16px;height:16px;display:block;background:#1b2029}
+.tab .tt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;background:none;border:0;color:inherit;font-size:12px;padding:0}
+.tab .x{flex:0 0 auto;width:20px;height:20px;border-radius:50%;border:0;background:transparent;color:#8b93a5;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center}
+.tab .x:active{background:#3a4358;color:#fff}
+.tab.newtab{flex:0 0 auto;width:34px;justify-content:center;font-size:16px;color:#7dd3fc;border-style:dashed}
+#ntRow{display:none;gap:6px;padding:6px 8px;background:#10131a;border-bottom:1px solid #232833}
+#ntRow.on{display:flex}
+#ntRow input{flex:1;min-width:0;background:#1b2029;border:1px solid #2a3040;color:#e8eaf0;border-radius:9px;padding:8px 10px;font-size:13px;outline:none}
+#ntRow input:focus{border-color:#3b82f6}
+#ntRow button{flex:0 0 auto;background:#2563eb;border:0;color:#fff;border-radius:9px;padding:0 14px;font-size:13px;font-weight:600}
+#tabCount{flex:0 0 auto;align-self:center;font-size:11px;color:#8b93a5;background:#1b2029;border:1px solid #2a3040;border-radius:12px;padding:3px 9px}
+nav{flex:0 0 auto;display:flex;background:#171a21;border-top:1px solid #232833;padding:6px 0 calc(6px + env(safe-area-inset-bottom))}
+nav button{flex:1;background:none;border:0;color:#8b93a5;font-size:12px;padding:8px 0}
+nav button.on{color:#7dd3fc}
+#grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px 2px}
+.tile{position:relative;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:16/10}
+.tile img{width:100%;height:100%;object-fit:contain;display:block}
+.tile .lb{position:absolute;left:0;top:0;right:0;background:linear-gradient(rgba(0,0,0,.65),transparent);color:#fff;font-size:12px;padding:6px 8px;font-weight:600}
+.tile.empty{display:flex;align-items:center;justify-content:center;color:#565d6d;font-size:12px}
+#view{position:fixed;inset:0;background:#000;display:none;flex-direction:column;z-index:30}
+#view.on{display:flex}
+#bar{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#171a21;z-index:5}
+#bar .tt{flex:1;min-width:0;font-size:12.5px;color:#cfd4de;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#bar button{flex:0 0 auto;background:#262b36;border:0;color:#e8eaf0;border-radius:9px;min-width:38px;height:34px;font-size:16px}
+#geo{display:flex;gap:6px;overflow-x:auto;padding:6px 8px;background:#171a21;border-top:1px solid #232833;z-index:5}
+#stage{flex:1;position:relative;overflow:hidden}
+#stage img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;touch-action:none;user-select:none;-webkit-user-select:none}
+#msg{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);background:#262b36;color:#fff;padding:7px 14px;border-radius:20px;font-size:12.5px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:40;white-space:nowrap}
+#msg.on{opacity:1}
+#cursor{position:absolute;width:18px;height:18px;border:1.5px solid #fff;border-radius:50%;margin:-9px 0 0 -9px;box-shadow:0 0 0 1px rgba(0,0,0,.6);pointer-events:none;z-index:5;display:none}
+#cursor.on{display:block}
+#mag{position:absolute;width:120px;height:120px;border-radius:50%;border:2px solid #7dd3fc;pointer-events:none;z-index:6;display:none;box-shadow:0 0 12px rgba(0,0,0,.7)}
+#mag.on{display:block}
+#mag .hair{position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(125,211,252,.7)}
+#mag .hair.v{left:50%;top:0;bottom:0;width:1px;height:auto}
+#kbd{display:none;flex-direction:column;background:#171a21;padding:6px 8px;gap:6px;z-index:6;border-top:1px solid #232833}
+#kbd.on{display:flex}
+#krow{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.kbtn{flex:0 0 auto;background:#262b36;border:0;color:#e8eaf0;border-radius:7px;padding:7px 9px;font-size:12px;min-width:38px}
+.kbtn.hi{background:#2563eb}
+#kbd input{flex:1;border:0;border-radius:9px;padding:10px;font-size:15px;background:#11151c;color:#e8eaf0;min-width:0}
+#kbd button:not(.kbtn){background:#262b36;border:0;color:#e8eaf0;border-radius:9px;padding:0 14px;font-size:14px}
+input[type=file]{display:none}
+.tip{color:#8b93a5;font-size:11px;margin-top:8px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>YT Remote</h1>
+  <button class="go" id="bAllOn">⚡ Bật tất cả</button>
+  <button class="stop" id="bAllOff">⏹ Tắt tất cả</button>
+</header>
+
+<main>
+  <div class="panel on" id="panelCh">
+    <div id="cards"></div>
+  </div>
+  <div class="panel" id="panelVw">
+    <div id="grid"></div>
+    <div class="tip">Lưới lọc theo kênh đang chạy — chạm ô để xem fullscreen</div>
+  </div>
+</main>
+
+<nav>
+  <button class="on" data-tab="panelCh">Kênh</button>
+  <button data-tab="panelVw">Xem</button>
+</nav>
+
+<div id="view">
+  <div id="bar">
+    <button id="bBack" title="Lưới">▧</button>
+    <div class="tt" id="tt"></div>
+    <button id="bDbl" class="hi" title="Double click: bật">2x</button>
+    <button id="bReload" title="Reload">↻</button>
+    <button id="bTab" title="Tab mới">+</button>
+    <button id="bKbd" title="Bàn phím">⌨</button>
+    <button id="bFile" title="Upload">⇪</button>
+  </div>
+  <div id="geo"></div>
+  <div id="ntRow"><input id="ntUrl" type="url" placeholder="Nhập địa chỉ web…" autocomplete="off"><button id="ntGo">Mở</button></div>
+  <div id="stage">
+    <img id="frame" alt="">
+    <div id="cursor"><span class="hair"></span><span class="hair v"></span></div>
+    <div id="mag"><span class="hair"></span><span class="hair v"></span></div>
+  </div>
+  <div id="kbd">
+    <div id="krow">
+      <input id="kbdIn" type="text" placeholder="Nhập văn bản..." autocomplete="off">
+      <button id="kbdGo">Gõ</button>
+      <button id="kbdEnter">⏎</button>
+    </div>
+    <div id="krow" data-sel="left:0;right:0;up:0;down:0;backspace:0;delete:0;tab:0;escape:0;home:0;end:0;pageup:0;pagedown:0;f5:0;ctrl+enter:1"></div>
+  </div>
+</div>
+<input type="file" id="filePick">
+<div id="msg"></div>
+
+<script>
+const API='api.php', FR='frame.php', META='scd_meta.php';
+let apps=[], cur=null, meta={w:0,h:0}, pumpTimer=null, loading=false, lastScroll=0, gridTimers=[];
+
+function $(s){return document.querySelector(s)}
+function toast(t){const m=$('#msg');m.textContent=t;m.classList.add('on');clearTimeout(toast._t);toast._t=setTimeout(()=>m.classList.remove('on'),2200)}
+function api(act, params){
+  const fd=new FormData(); fd.append('act',act);
+  for(const k in params||{}) fd.append(k,params[k]);
+  return fetch(API,{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({error:'net'}));
+}
+function pc(action,id){
+  return fetch('/yt-manager/api/browser.php?action='+action+'&id='+id,{cache:'no-store'}).then(r=>r.json()).catch(()=>({ok:false}));
+}
+function esc(s){return String(s??'').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}
+function busy(id,on){const b=$('#on'+id);if(b){b.classList.toggle('dis',on);b.disabled=on;b.textContent=on?'Đang mở…':'▶ Bật'}}
+
+function card(a){
+  const run=a.status==='running';
+  const cd=run&&a.tabs.length===0;
+  const st=run?(cd?'dead':'on'):'';
+  const stTxt=run?(cd?'Chrome đã chết (cần bật lại)':(a.meta.state==='streaming'?'Đang stream':'Đang chạy')):'Đang tắt';
+  const px=a.proxy?(' · '+a.proxy):'';
+  return `<div class="card">
+    <div class="top"><span class="dot ${st}"></span>
+      <div style="flex:1;min-width:0">
+        <div class="nm">${esc(a.name)}</div>
+        <div class="sub">${stTxt}${px}</div>
+      </div>
+    </div>
+    <div class="btns">
+      ${run?`<button class="bOn dis" id="off${a.id}" onclick="setChannel(${a.id},false)">▶ Bật</button><button class="bView" onclick="openStream(${a.id})">🔍 Xem</button>`
+          :`<button class="bOn" id="on${a.id}" onclick="setChannel(${a.id},true)">▶ Bật</button><button class="bView" onclick="openStream(${a.id})">🔍 Xem</button>`}
+    </div>
+  </div>`;
+}
+async function renderCh(){
+  $('#cards').innerHTML=apps.map(card).join('');
+}
+async function setChannel(id,on){
+  const btn=on?$('#on'+id):$('#off'+id);
+  if(btn){btn.disabled=true;btn.textContent=on?'Đang mở…':'Đang tắt…'}
+  if(on){
+    const r=await pc('open',id);
+    if(!r.ok) toast(r.message||'Lỗi mở kênh');
+    else { toast('Đã bật kênh'); await api('stream',{id}); }
+  }else{
+    const r=await pc('close',id);
+    toast(r.message||'Đã tắt');
+    if(cur&&cur.id===id){closeStream()}
+  }
+  load();
+}
+async function allOn(){
+  for(const a of apps){ if(a.status!=='running'){ await setChannel(a.id,true); await new Promise(r=>setTimeout(r,400)); } }
+  toast('Đã bật tất cả');
+}
+async function allOff(){
+  if(!confirm('Tắt tất cả kênh?'))return;
+  for(const a of apps){ if(a.status==='running'){ await pc('close',a.id); } }
+  load(); toast('Đã tắt tất cả');
+}
+
+async function load(){
+  try{ const d=await api('list'); apps=d.channels||[]; await renderCh(); renderGrid(); }catch(e){}
+}
+
+/* ---------- XEM: lưới 2x2 ---------- */
+function renderGrid(){
+  const g=$('#grid');
+  const chans=apps.filter(a=>a.status==='running');
+  const html=chans.map(a=>{
+    const live=a.meta&&a.meta.state==='streaming';
+    return `<div class="tile ${live?'':'empty'}" id="tile${a.id}" onclick="openStream(${a.id},true)">
+      <img id="g${a.id}" src="${FR}?id=${a.id}&_=${Math.random()}" ${live?'':'style="display:none"'}>
+      <div class="lb">${esc(a.name)}</div>
+    </div>`;
+  }).join('') || `<div class="tile empty" style="grid-column:1/-1">Chưa có kênh chạy</div>`;
+  g.innerHTML=html;
+  startGridPoll();
+}
+function startGridPoll(){
+  gridTimers.forEach(clearInterval); gridTimers=[];
+  const pan=$('#panelVw');
+  if(!pan.classList.contains('on'))return;
+  for(const a of apps){
+    if(a.status==='running'){
+      (function(id){ gridTimers.push(setInterval(()=>{
+        const el=$('#g'+id);
+        if(el) el.src=FR+'?id='+id+'&_='+Date.now();
+      },700)); })(a.id);
+    }
+  }
+}
+
+/* ---------- XEM: fullscreen 1 kênh ---------- */
+async function openStream(id, fromGrid){
+  cur={id, tab:null};
+  $('#view').classList.add('on');
+  $('#tt').textContent='Kênh …';
+  await api('stream',{id});
+  const a=apps.find(x=>x.id===id)||{name:'Kênh'};
+  try{ const m=await fetch(META+'?id='+id,{cache:'no-store'}).then(r=>r.json()); Object.assign(meta,m); }catch(e){}
+  let tab=meta.tab||null;
+  if(!tab&&a.tabs&&a.tabs[0]){ tab=a.tabs[0].id; }
+  if(tab){ await api('select',{id,tab}); cur.tab=tab; }
+  else toast('Kênh chưa có tab');
+  $('#geo').innerHTML='';
+  renderTabs(id, a.tabs||[], cur.tab);
+  $('#tt').textContent=(a.name||'')+` · ${(a.tabs||[]).length} tab`;
+  meta={w:meta.w||0,h:meta.h||0};
+  startPump();
+}
+function favHost(u){try{return new URL(u).hostname}catch(e){return ''}}
+function renderTabs(id, tabs, curTab){
+  tabs=tabs||[];
+  const el=$('#geo');
+  el.innerHTML=tabs.map(t=>{
+    const host=favHost(t.url||'');
+    const letter=esc(((t.title||host||'?').trim().charAt(0)||'?').toUpperCase());
+    const img=host?`<img src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32" alt="" loading="lazy" onerror="this.remove()">`:'';
+    return `<div class="tab ${t.id===curTab?'cur':''}" data-tab="${esc(t.id)}" onclick="switchTab(${id},'${esc(t.id)}')">`
+      +`<span class="fav">${letter}${img}</span>`
+      +`<span class="tt">${esc(t.title||'(trống)')}</span>`
+      +`<button class="x" aria-label="Đóng tab" onclick="event.stopPropagation();closeTab(${id},'${esc(t.id)}')">×</button></div>`;
+  }).join('')
+  +`<div class="tab newtab" onclick="toggleNtRow()">+</div>`
+  +`<span id="tabCount">${tabs.length} tab</span>`;
+  const curEl=el.querySelector('.tab.cur');
+  if(curEl&&curEl.scrollIntoView) curEl.scrollIntoView({inline:'center',block:'nearest'});
+}
+async function refreshTabs(){
+  try{
+    const d=await api('list');
+    if(d.channels) apps=d.channels;
+    if(cur){
+      const a=apps.find(x=>x.id===cur.id);
+      if(a){
+        renderTabs(cur.id,a.tabs||[],cur.tab);
+        $('#tt').textContent=(a.name||'')+` · ${(a.tabs||[]).length} tab`;
+      }
+    }
+  }catch(e){}
+}
+async function switchTab(id,tab){
+  cur.tab=tab; await api('select',{id,tab}); meta={w:0,h:0};
+  document.querySelectorAll('#geo .tab').forEach(c=>c.classList.toggle('cur',c.getAttribute('data-tab')===String(tab)));
+}
+async function closeTab(id,tab){
+  const r=await api('closetab',{id,tab});
+  if(!r.ok){toast('Không đóng được tab');return;}
+  toast('Đã đóng tab');
+  if(cur&&cur.id===id){
+    if(cur.tab===tab) cur.tab=null;
+    await refreshTabs();
+    const tabs=(apps.find(x=>x.id===id)||{tabs:[]}).tabs||[];
+    if(tabs.length) await switchTab(id,tabs[0].id);
+    else toast('Hết tab — bấm + để mở tab mới');
+  }
+  load();
+}
+function closeStream(){cur=null;stopPump();$('#view').classList.remove('on');load();}
+
+function startPump(){
+  stopPump();
+  (function loop(){
+    if(!cur)return;
+    loading=true;
+    $('#frame').src=FR+'?id='+cur.id+'&_='+Date.now();
+    const idle=Date.now()-lastAct;
+    const d=idle>9000?2200:(idle>3000?700:150);
+    pumpTimer=setTimeout(()=>{loading=false;loop()},d);
+  })();
+}
+function stopPump(){if(pumpTimer){clearTimeout(pumpTimer);pumpTimer=null}}
+
+/* --- ánh xạ toạ độ đúng tỉ lệ (bỏ lề letterbox) --- */
+let lastAct=Date.now();
+function contentRect(){
+  const r=$('#stage').getBoundingClientRect();
+  const w=meta.w||($('#frame').naturalWidth||r.width);
+  const h=meta.h||($('#frame').naturalHeight||r.height);
+  const s=Math.min(r.width/w, r.height/h);
+  const cw=Math.round(w*s), ch=Math.round(h*s);
+  return {left:r.left+(r.width-cw)/2, top:r.top+(r.height-ch)/2, width:cw, height:ch};
+}
+function map(clientX,clientY){
+  const c=contentRect();
+  const w=meta.w||($('#frame').naturalWidth||1), h=meta.h||($('#frame').naturalHeight||1);
+  const x=Math.min(Math.max((clientX-c.left)/c.width*w,0),w);
+  const y=Math.min(Math.max((clientY-c.top)/c.height*h,0),h);
+  return {x,y};
+}
+const curEl=$('#cursor'), magEl=$('#mag');
+function updateMag(cx,cy){
+  const c=contentRect();
+  const w=meta.w||$('#frame').naturalWidth, h=meta.h||$('#frame').naturalHeight;
+  if(!w||!h)return;
+  const Z=2.1, M=120;
+  magEl.style.left=(cx-M/2)+'px'; magEl.style.top=(cy-M/2)+'px';
+  magEl.style.backgroundImage="url('"+FR+'?id='+cur.id+'&_='+Date.now()+"')";
+  magEl.style.backgroundSize=(c.width*Z)+'px '+(c.height*Z)+'px';
+  const p=map(cx,cy);
+  magEl.style.backgroundPosition=-((p.x/w)*c.width*Z-M/2)+'px '+(-((p.y/h)*c.height*Z-M/2))+'px';
+}
+function placeCursor(cx,cy){curEl.style.left=cx+'px';curEl.style.top=cy+'px'}
+
+let down=false, two=false, pressT=null, act=null, lastTap={t:0,x:0,y:0}, mm={x:0,y:0}, lastScrollT=0, mid0=null, dblMode=false;
+$('#stage').addEventListener('touchstart',e=>{
+  if(!cur)return; e.preventDefault(); lastAct=Date.now();
+  if(e.touches.length===2){
+    two=true; act='scroll'; clearTimeout(pressT);
+    curEl.classList.add('on'); magEl.classList.remove('on');
+    mid0={x:(e.touches[0].clientX+e.touches[1].clientX)/2, y:(e.touches[0].clientY+e.touches[1].clientY)/2};
+    return;
+  }
+  if(e.touches.length!==1)return;
+  down=true; act='ptr'; mm={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  const p=map(mm.x,mm.y); curEl.classList.add('on'); placeCursor(mm.x,mm.y); updateMag(mm.x,mm.y); magEl.classList.add('on');
+  pressT=setTimeout(()=>{ if(down&&act==='ptr'){ act='right'; if(navigator.vibrate)navigator.vibrate(15); magEl.style.borderColor='#f87171'; } },600);
+},{passive:false});
+$('#stage').addEventListener('touchmove',e=>{
+  if(!cur)return; e.preventDefault(); lastAct=Date.now();
+  if(two&&e.touches.length===2){
+    const cx=(e.touches[0].clientX+e.touches[1].clientX)/2, cy=(e.touches[0].clientY+e.touches[1].clientY)/2;
+    const p=map(cx,cy); const now=Date.now();
+    if(mid0&&now-lastScrollT>70){ lastScrollT=now; api('scroll',{id:cur.id,tab:cur.tab,x:p.x,y:p.y,dx:(mid0.x-cx),dy:(mid0.y-cy)}); }
+    placeCursor(cx,cy); mid0={x:cx,y:cy};
+    return;
+  }
+  if(!down||e.touches.length!==1)return;
+  const t=e.touches[0]; const mmx=t.clientX,mmy=t.clientY;
+  if(act!=='right'&&Math.hypot(mmx-mm.x,mmy-mm.y)>6){ act='drag'; magEl.style.borderColor='#7dd3fc'; }
+  placeCursor(mmx,mmy); updateMag(mmx,mmy);
+  mm={x:mmx,y:mmy};
+},{passive:false});
+$('#stage').addEventListener('touchend',e=>{
+  if(!cur)return; e.preventDefault(); clearTimeout(pressT);
+  if(two){ two=false; mid0=null; return; }
+  if(!down)return; down=false;
+  magEl.classList.remove('on');
+  const lastX=mm.x,lastY=mm.y, p=map(lastX,lastY);
+  if(act==='right'){ api('mouse',{id:cur.id,tab:cur.tab,kind:'right',x:p.x,y:p.y}); toast('Chuột phải'); }
+  else if(dblMode){ api('mouse',{id:cur.id,tab:cur.tab,kind:'dbl',x:p.x,y:p.y}); }
+  else{
+    const now=Date.now();
+    if(now-lastTap.t<320&&Math.hypot(lastX-lastTap.x,lastY-lastTap.y)<14){ api('mouse',{id:cur.id,tab:cur.tab,kind:'dbl',x:p.x,y:p.y}); lastTap={t:0}; }
+    else{ api('tap',{id:cur.id,tab:cur.tab,type:'both',x:p.x,y:p.y}); lastTap={t:now,x:lastX,y:lastY}; }
+  }
+  act=null;
+});
+$('#stage').addEventListener('contextmenu',e=>e.preventDefault());
+$('#frame').addEventListener('load',()=>{ if(down) updateMag(mm.x,mm.y); });
+
+$('#bBack').onclick=closeStream;
+$('#bDbl').onclick=()=>{
+  dblMode=!dblMode; $('#bDbl').classList.toggle('hi',dblMode);
+  toast('Double click: '+(dblMode?'BẬT':'tắt'));
+};
+$('#bReload').onclick=()=>cur&&api('reload',{id:cur.id,tab:cur.tab});
+function toggleNtRow(){const r=$('#ntRow');if(!r)return;r.classList.toggle('on');if(r.classList.contains('on')){const i=$('#ntUrl');if(i)i.focus();}}
+$('#bTab').onclick=toggleNtRow;
+async function ntGo(){
+  let u=($('#ntUrl').value||'').trim();
+  if(!u) u='https://www.youtube.com';
+  if(!/^https?:\/\//i.test(u)) u='https://'+u;
+  if(!cur) return;
+  $('#ntUrl').value=''; $('#ntRow').classList.remove('on');
+  const r=await api('newtab',{id:cur.id,url:u});
+  if(r.tab) cur.tab=r.tab;
+  await refreshTabs();
+  if(cur&&cur.tab) await switchTab(cur.id,cur.tab);
+  load();
+}
+$('#ntGo').onclick=ntGo;
+$('#ntUrl').addEventListener('keydown',e=>{if(e.key==='Enter')ntGo()});
+$('#bKbd').onclick=()=>{$('#kbd').classList.toggle('on');cur&&($('#kbd').classList.contains('on')&&api('stream',{id:cur.id}))};
+
+const KEY_LABEL={left:'←',right:'→',up:'↑',down:'↓',backspace:'⌫',delete:'⌦',tab:'Tab',escape:'Esc',home:'Home',end:'End',pageup:'PgUp',pagedown:'PgDn',f5:'F5','ctrl+enter':'Ctrl⏎'};
+(function(){
+  const rows=document.querySelectorAll('#kbd #krow[data-sel], #kbd #krow[data-sel2]');
+  const cbs=[['copy','ctrl+c','Ctrl+C'],['paste','ctrl+v','Ctrl+V'],['cuta','ctrl+x','Ctrl+X'],['sela','ctrl+a','Ctrl+A'],['undo','ctrl+z','Ctrl+Z'],['gol','ctrl+l','Ctrl+L'],['dev','ctrl+shift+i','Ctrl+⇧I']];
+  rows.forEach(row=>{
+    const sel=(row.dataset.sel||'').split(';').filter(Boolean);
+    const box=document.createElement('div'); box.id='krow'; box.style.cssText='display:flex;flex-wrap:wrap;gap:5px;align-items:center';
+    sel.forEach(s=>{
+      const [k,hiI]=s.split(':');
+      const hi=k==='ctrl+enter';
+      const b=document.createElement('button'); b.className='kbtn'+(hi?' hi':''); b.textContent=KEY_LABEL[k]||k;
+      b.onclick=()=>{lastAct=Date.now();cur&&api('raw',{id:cur.id,tab:cur.tab,key:k});};
+      box.appendChild(b);
+    });
+    cbs.forEach(([id,key,label])=>{
+      const b=document.createElement('button'); b.className='kbtn hi'; b.textContent=label;
+      b.onclick=()=>{lastAct=Date.now();cur&&api('raw',{id:cur.id,tab:cur.tab,key});};
+      box.appendChild(b);
+    });
+    row.replaceWith(box);
+  });
+})();
+
+$('#kbdGo').onclick=()=>{const t=$('#kbdIn').value;if(t&&cur){lastAct=Date.now();api('keys',{id:cur.id,tab:cur.tab,text:t});$('#kbdIn').value=''}};
+$('#kbdEnter').onclick=()=>{lastAct=Date.now();cur&&api('keys',{id:cur.id,tab:cur.tab,enter:'1'})};
+$('#bFile').onclick=()=>$('#filePick').click();
+$('#filePick').onchange=()=>{
+  const f=$('#filePick').files[0]; if(!f||!cur)return;
+  const fd=new FormData(); fd.append('id',cur.id); fd.append('tab',cur.tab||''); fd.append('file',f);
+  fetch('up.php',{method:'POST',body:fd}).then(r=>r.json()).then(d=>toast(d.ok?'Đã đưa file vào trang':(d.info||'Không có ô file trên trang'))).catch(()=>toast('lỗi'));
+  $('#filePick').value='';
+};
+
+/* ---------- NAV ---------- */
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
+  b.classList.add('on');
+  $('#panel'+((b.dataset.tab==='panelCh')?'Ch':'Vw')).classList.add('on');
+  if(b.dataset.tab==='panelVw') startGridPoll();
+});
+
+$('#bAllOn').onclick=allOn;
+$('#bAllOff').onclick=allOff;
+load(); setInterval(load,5000);
+</script>
+</body>
+</html>

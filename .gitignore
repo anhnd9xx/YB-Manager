@@ -3,6 +3,7 @@ profiles/
 
 # Temp / log
 *.log
+*.err
 *.tmp
 *.bak
 Thumbs.db
@@ -10,6 +11,11 @@ Desktop.ini
 
 # Khoa chong trung lap overlay keeper
 bin/overlay_keeper.lock
+bin/.relay_watchdog.lock
+bin/.account_monitor.lock
+
+# Runtime cua remote mobile (screenshot, pid, log theo tung lan chay)
+android/frames/
 
 # IDE
 .idea/

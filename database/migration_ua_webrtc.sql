@@ -15,6 +15,6 @@ PREPARE stmt FROM @sql_ua; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @has_webrtc := (SELECT COUNT(*) FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA='yt_manager' AND TABLE_NAME='profiles' AND COLUMN_NAME='webrtc_protection');
 SET @sql_webrtc := IF(@has_webrtc = 0,
-    'ALTER TABLE profiles ADD COLUMN webrtc_protection ENUM(''default'',''disable_nonproxied_udp'',''disabled'') NOT NULL DEFAULT ''default'' AFTER user_agent',
+    'ALTER TABLE profiles ADD COLUMN webrtc_protection ENUM(''default'',''disable_nonproxied_udp'') NOT NULL DEFAULT ''default'' AFTER user_agent',
     'SELECT 1');
 PREPARE stmt FROM @sql_webrtc; EXECUTE stmt; DEALLOCATE PREPARE stmt;

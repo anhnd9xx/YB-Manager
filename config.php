@@ -111,7 +111,7 @@ function log_action(?int $profileId, string $action, ?string $detail = null): vo
     }
 }
 
-// =================== Health check chung (dung cho browser.php, profiles.php, sync.php) ===================
+// =================== Health check chung (dung cho browser.php, profiles.php) ===================
 
 /**
  * Scan MOT LAN toan bo process chrome.exe dang chay (1 luot PowerShell duy nhat),
@@ -191,7 +191,7 @@ function chrome_cmdline_matches_config(array $p): bool
     $hasUa = strpos($cmd, '--user-agent=') !== false;
     if ($wantUa !== $hasUa) return false;
     // Thay doi webrtc_protection / accept-lang -> restart de ap dung fingerprint moi
-    $wantWebrtc = (($p['webrtc_protection'] ?? 'default') !== 'default');
+    $wantWebrtc = (($p['webrtc_protection'] ?? 'default') === 'disable_nonproxied_udp');
     $hasWebrtc = strpos($cmd, '--webrtc-ip-handling-policy') !== false;
     if ($wantWebrtc !== $hasWebrtc) return false;
     $wantLang = channel_fingerprint((int)($p['id'] ?? 0))['lang'];
@@ -200,7 +200,9 @@ function chrome_cmdline_matches_config(array $p): bool
     return true;
 }
 
-/** Port relay local cho proxy co credential (9400 + proxy_id), tra ve null neu proxy khong can relay */
+/** Port relay local cho proxy co credential (9400 + proxy_id, MOI proxy 1 port RIENG),
+ *  tra ve null neu proxy khong can relay.
+ *  LƯU Ý: khong dung %100 nua (proxy 14 va 114 truoc day dung chung port -> kill nham relay nhau). */
 function expected_relay_port(array $p): ?int
 {
     if (empty($p['proxy_host']) || empty($p['proxy_port'])) return null;
@@ -223,9 +225,12 @@ function proxy_server_arg(array $p, ?int $relayPort = null): string
     return $addr;
 }
 
+/** Port relay = 9400 + proxy_id (duy nhat moi proxy; proxy_id toi da ~56000 trong range port).
+ *  Range debug port (9200-9399) tach biet de khong bao gio dung do. */
 function proxy_relay_port(int $proxyId): int
 {
-    return 9400 + ((int)$proxyId % 100);
+    $port = 9400 + (int)$proxyId;
+    return max(9401, min(65535, $port));
 }
 
 /** Kiem tra relay co lang nghe tren port khong */
@@ -236,15 +241,17 @@ function relay_listening(int $port): bool
     return false;
 }
 
-/** Kiem tra relay THUC SU phuc vu duoc (CONNECT + upstream): tranh reuse relay chet/hong */
+/** Kiem tra relay THUC SU phuc vu duoc (CONNECT + upstream): tranh reuse relay chet/hong.
+ *  Timeout LONG (12s) vi proxy xa/thap (VD proxy Mỹ RTT 1-4s) can thoi gian CONNECT roi
+ *  moi nhan 200; timeout 6s truoc day lam relay SONG-nhung-cham bi bao "chet" (409/restart). */
 function relay_healthy(int $port): bool
 {
-    $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 1);
+    $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2);
     if (!$fp) return false;
     fwrite($fp, "CONNECT www.gstatic.com:443 HTTP/1.1\r\nHost: www.gstatic.com:443\r\n\r\n");
-    stream_set_timeout($fp, 6);
+    stream_set_timeout($fp, 12);
     $buf = '';
-    $deadline = microtime(true) + 6;
+    $deadline = microtime(true) + 12;
     while (strpos($buf, "\r\n") === false && microtime(true) < $deadline) {
         $c = fread($fp, 4096);
         if ($c === '' || $c === false) break;
@@ -269,8 +276,14 @@ function start_proxy_relay(array $p): ?int
 {
     $port = expected_relay_port($p);
     if ($port === null) return null;
-    if (relay_healthy($port)) return $port;
-    // relay cu song port nhung hong (vi du proc_open duoi Apache) -> dong truoc khi spawn lai
+    // Relay dang len PORT va THUC SU phuc vu duoc -> dung ngay (khong khoi dong lai)
+    if (relay_listening($port)) {
+        if (relay_healthy($port)) return $port;
+        // Relay song port nhung chua/phuc-vu cham -> KHONG giet (tranh mat ket noi kenh dang chay);
+        // qui ve kiem tra lai o vong sau. Tra ve port de khoi treo open kenh.
+        return $port;
+    }
+    // relay cu con giu port (socket treo) -> don truoc khi spawn lai
     stop_proxy_relay($port);
     $php = php_cli_binary();
     if ($php === '') return null;
@@ -280,9 +293,14 @@ function start_proxy_relay(array $p): ?int
     $ps = "Start-Process -FilePath '" . str_replace("'", "''", $php) . "' -ArgumentList @($args) -WindowStyle Hidden";
     $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' . str_replace('"', '\\"', $ps) . '"';
     @shell_exec($cmd);
-    for ($i = 0; $i < 30; $i++) {
-        usleep(150000);
-        if (relay_healthy($port)) return $port;
+    // Cho relay len PORT truoc (nhanh, 0.5s/check); sau do xac nhan e2e 1 lan
+    // (proxy Mỹ RTT cao -> can nhieu thoi gian hon 4.5s cua loop cu).
+    for ($i = 0; $i < 20; $i++) {
+        usleep(300000);
+        if (relay_listening($port)) {
+            if (relay_healthy($port)) return $port;
+            return $port; // song port + da qua async, cho du chan -> tra ve luon
+        }
     }
     return null;
 }
@@ -323,7 +341,20 @@ function start_overlay_keeper(): void
     @shell_exec($cmd);
 }
 
-/** Dong relay tre port (chi kill process dang LISTENING tren port reserved 9400+) */
+/** Khoi dong relay watchdog (auto-heal relay chet cho kenh dang chay). Lock file trong script loai trung lap. */
+function start_relay_watchdog(): void
+{
+    $wd = __DIR__ . '/bin/relay_watchdog.php';
+    $php = php_cli_binary();
+    if ($php === '' || !is_file($wd)) return;
+    // Launch detached: second instance tu-exit via lock file
+    $args = "'-f','" . str_replace("'", "''", $wd) . "'";
+    $ps = "Start-Process -FilePath '" . str_replace("'", "''", $php) . "' -ArgumentList @($args) -WindowStyle Hidden";
+    $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' . str_replace('"', '\\"', $ps) . '"';
+    @shell_exec($cmd);
+}
+
+/** Dong relay tren port (chi kill process dang LISTENING tren port do) */
 function stop_proxy_relay(int $port): void
 {
     $ps = 'powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ' . (int)$port
@@ -340,6 +371,58 @@ function stop_proxy_relay_if_unused(array $p): void
     $st->execute([(int)$p['proxy_id'], (int)($p['id'] ?? 0)]);
     if ((int)$st->fetchColumn() > 0) return;
     stop_proxy_relay($port);
+}
+
+/** Port debug (CDP) co dang bi profile khac giu trong DB khong? */
+function debug_port_taken_by_other(int $port, int $selfId): bool
+{
+    try {
+        $st = db()->prepare('SELECT COUNT(*) FROM profiles WHERE debug_port=? AND id<>?');
+        $st->execute([$port, $selfId]);
+        return (int)$st->fetchColumn() > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/**
+ * Cấp debug port (CDP) cho 1 profile — dùng cho browser.php.
+ * Range chính 9200-9399 (tách biệt relay 9400+ nên không bao giờ đụng relay).
+ * Bỏ qua: port đã cấp trong request này, port đang LISTEN (bất kỳ process nào),
+ * port profile khác đang giữ trong DB. Persist + log assign_port.
+ */
+function allocate_debug_port(array $p): ?int
+{
+    static $used = [];
+    $id = (int)($p['id'] ?? 0);
+    if ($id <= 0) return null;
+    $claim = function (int $port) use (&$used, $id): bool {
+        if (isset($used[$port])) return false;
+        if (relay_listening($port)) return false; // dang LISTEN = đã có chủ (CDP/relay/app khác)
+        if (debug_port_taken_by_other($port, $id)) return false;
+        $used[$port] = true;
+        db()->prepare('UPDATE profiles SET debug_port=? WHERE id=?')->execute([$port, $id]);
+        log_action($id, 'assign_port', 'Debug port ' . $port);
+        return true;
+    };
+    // Tái dùng port đã lưu nếu vẫn sạch
+    if (!empty($p['debug_port'])) {
+        $port = (int)$p['debug_port'];
+        if (!isset($used[$port]) && !relay_listening($port) && !debug_port_taken_by_other($port, $id)) {
+            $used[$port] = true;
+            return $port;
+        }
+    }
+    // Quét range chính, ưu tiên 9200+id (quy ước cũ)
+    for ($off = 0; $off < 200; $off++) {
+        $port = 9200 + (($id + $off) % 200);
+        if ($claim($port)) return $port;
+    }
+    // Tràn range: quét tiếp từ 9500 trở lên
+    for ($port = 9500; $port <= 65535; $port++) {
+        if ($claim($port)) return $port;
+    }
+    return null;
 }
 
 /** Kiem tra CDP endpoint cua 1 debug port co lang nghe khong (TCP connect 0.5s, khong lay du lieu) */
@@ -520,28 +603,68 @@ function chrome_user_agent(): string
  * Fingerprint ẩn riêng theo kênh để giảm khả năng Google nối 2 account trên 2 kênh:
  * hardwareConcurrency + deviceMemory + timezone + accept-language đều khác nhau từng kênh,
  * sinh ổn định từ profileId (không đổi mỗi lần mở). Các giá trị cùng "nhóm" (mem/CPU khớp nhau).
+ *
+ * LƯU Ý: id 47..51 giữ NGUYÊN 5 combo cũ (tương thích kênh đã warm trước đây);
+ * id khác sinh xác định (deterministic) từ hash id -> mỗi kênh 1 fingerprint riêng,
+ * không còn giới hạn 5 combo chung cho cả farm.
  */
 function channel_fingerprint(int $profileId): array
 {
-    $idx = max(1, min(5, $profileId - 46));
-    $i = $idx - 1;
+    // 5 combo legacy (giữ nguyên cho kênh đã warm: 47->1 ... 51->5)
+    static $legacy = [
+        ['hardwareConcurrency' => 4, 'deviceMemory' => 8, 'timezoneId' => 'Asia/Ho_Chi_Minh', 'tzOffset' => -420, 'lang' => 'vi-VN,vi;q=0.9,en;q=0.8'],
+        ['hardwareConcurrency' => 8, 'deviceMemory' => 4, 'timezoneId' => 'Asia/Bangkok',     'tzOffset' => -420, 'lang' => 'en-US,en;q=0.9,vi;q=0.8'],
+        ['hardwareConcurrency' => 4, 'deviceMemory' => 4, 'timezoneId' => 'Asia/Singapore',   'tzOffset' => -480, 'lang' => 'vi-VN,vi;q=0.9,en;q=0.8'],
+        ['hardwareConcurrency' => 6, 'deviceMemory' => 6, 'timezoneId' => 'Asia/Manila',      'tzOffset' => -480, 'lang' => 'en-GB,en;q=0.9,vi;q=0.8'],
+        ['hardwareConcurrency' => 8, 'deviceMemory' => 8, 'timezoneId' => 'Asia/Jakarta',     'tzOffset' => -420, 'lang' => 'vi-VN,vi;q=0.9,en;q=0.8'],
+    ];
+    if ($profileId >= 47 && $profileId <= 51) {
+        $fp = $legacy[$profileId - 47];
+        $fp['index'] = $profileId - 46;
+        return $fp;
+    }
+    // Kênh mới: hash id -> chọn từ pool (ổn định, không đổi giữa các lần mở)
+    $h = md5('ytm-fp-v1:' . $profileId, true);
+    $b = array_values(unpack('C*', $h));
+    $cpus = [2, 4, 6, 8, 12, 16];
+    $mems = [2, 4, 6, 8];
+    // timezone + offset GMT tương ứng (tránh múi giờ DST để offset ổn định)
+    $tzs = [
+        ['Asia/Ho_Chi_Minh', -420], ['Asia/Bangkok', -420], ['Asia/Jakarta', -420],
+        ['Asia/Singapore', -480], ['Asia/Manila', -480], ['Asia/Kuala_Lumpur', -480],
+        ['Asia/Hong_Kong', -480], ['Asia/Shanghai', -480], ['Asia/Taipei', -480],
+        ['Asia/Tokyo', -540], ['Asia/Seoul', -540],
+    ];
+    $langs = [
+        'vi-VN,vi;q=0.9,en;q=0.8', 'en-US,en;q=0.9,vi;q=0.8', 'en-GB,en;q=0.9,vi;q=0.8',
+        'vi-VN,vi;q=0.9', 'en-US,en;q=0.9', 'id-ID,id;q=0.9,en;q=0.8',
+    ];
+    $cpu = $cpus[$b[0] % count($cpus)];
+    // RAM theo nhóm hợp lý với CPU (tránh combo phi thực tế như 16 CPU + 2GB)
+    $memPool = $cpu >= 12 ? [8, 16] : ($cpu >= 6 ? [4, 6, 8] : [2, 4, 6, 8]);
+    // deviceMemory của Chrome chỉ nhận 0.25/0.5/1/2/4/8 -> clamp về 8 max
+    $mem = min(8, $memPool[$b[1] % count($memPool)]);
+    $tz = $tzs[$b[2] % count($tzs)];
     return [
-        'index'              => $idx,
-        'hardwareConcurrency'=> [4, 8, 4, 6, 8][$i],
-        'deviceMemory'       => [8, 4, 4, 6, 8][$i],
-        'timezoneId'         => ['Asia/Ho_Chi_Minh', 'Asia/Bangkok', 'Asia/Singapore', 'Asia/Manila', 'Asia/Jakarta'][$i],
-        // getTimezoneOffset (phút, đông dương = GMT - giờ địa phương): VN/Bangkok/Jakarta UTC+7 => -420, SG/Manila UTC+8 => -480
-        'tzOffset'           => [-420, -420, -480, -480, -420][$i],
-        'lang'               => ['vi-VN,vi;q=0.9,en;q=0.8', 'en-US,en;q=0.9,vi;q=0.8', 'vi-VN,vi;q=0.9,en;q=0.8', 'en-GB,en;q=0.9,vi;q=0.8', 'vi-VN,vi;q=0.9,en;q=0.8'][$i],
+        'index'               => 100 + ($b[3] % 900),
+        'hardwareConcurrency' => $cpu,
+        'deviceMemory'        => $mem,
+        'timezoneId'          => $tz[0],
+        'tzOffset'            => $tz[1],
+        'lang'                => $langs[$b[4] % count($langs)],
     ];
 }
 
 /**
- * Dung chung de launch Chrome (browser.php va sync.php).
+ * Dung chung de launch Chrome (browser.php).
  * Gom cac cuoc goi chung: user-agent, WebRTC, remote-debugging, proxy.
  */
-function build_chrome_command(array $p, string $url = 'https://www.youtube.com', ?int $port = null, ?int $relayPort = null): array
+function build_chrome_command(array $p, ?string $url = null, ?int $port = null, ?int $relayPort = null): array
 {
+    // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com)
+    if ($url === null) {
+        $url = get_setting('home_url', 'https://www.google.com/');
+    }
     $cmd = [
         chrome_path(),
         '--user-data-dir=' . $p['user_data_dir'],
@@ -574,10 +697,15 @@ function build_chrome_command(array $p, string $url = 'https://www.youtube.com',
     $cmd[] = '--no-pings';
     $cmd[] = '--disable-domain-reliability';
     $cmd[] = '--disable-default-apps';
+    $cmd[] = '--disable-backgrounding-occluded-windows';
+    $cmd[] = '--disable-renderer-backgrounding';
+    $cmd[] = '--disable-background-timer-throttling';
 
     // Chống lộ IP thật qua WebRTC: dùng ĐÚNG dạng Chrome đọc được (2 cờ riêng).
     // disable_non_proxied_udp = cấm UDP không đi qua proxy -> STUN/WebRTC không thấy IP thật.
-    if (($p['webrtc_protection'] ?? 'default') !== 'default') {
+    // LƯU Ý: Chrome desktop KHÔNG có flag tắt hẳn WebRTC (chỉ có extension/policy);
+    // 'disable_nonproxied_udp' là mức bảo vệ mạnh nhất qua command-line (vẫn giữ gọi video).
+    if (($p['webrtc_protection'] ?? 'default') === 'disable_nonproxied_udp') {
         $cmd[] = '--webrtc-ip-handling-policy=disable_non_proxied_udp';
         $cmd[] = '--force-webrtc-ip-handling-policy';
     }
@@ -625,6 +753,8 @@ function ensure_chrome_profile_name(array $p): void
         @mkdir($base . DIRECTORY_SEPARATOR . 'Default', 0777, true);
     }
     $data['profile']['name'] = $name;
+    // Luon hien thanh dau trang (bookmarks bar) tren moi tab cua kenh.
+    $data['bookmark_bar']['show_on_all_tabs'] = true;
     @file_put_contents($prefPath, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 
     // 2) Local State -> profile.info_cache.<dir profile>.name (Chrome dung cai nay de tao AUMI)
@@ -644,7 +774,7 @@ function ensure_chrome_profile_name(array $p): void
     @file_put_contents($lsPath, json_encode($ls, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 }
 
-/** Fire-and-forget launch Chrome (khong cho thoat), dung chung browser.php + sync.php.
+/** Fire-and-forget launch Chrome (khong cho thoat), dung cho browser.php.
  * Voi proxy co credential: start_proxy_relay BEEN LA guard song/chet cua proxy
  * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep). */
 function launch_chrome(array $p, string $url, ?int $port): void
@@ -672,6 +802,30 @@ function launch_chrome(array $p, string $url, ?int $port): void
     // ten kenh tren tab do tabtitle_keeper lo (khong cha de title xong moi tra loi -> mo nhanh)
     if ($port) {
         start_tab_title_keeper($port, (int)($p['id'] ?? 0));
+    }
+    // relay watchdog: tu bật lai relay khi chet (chay ring, de phong ko phai mo lai kenh)
+    start_relay_watchdog();
+    // Global Window Settings (SSOT): snapshot TAI THOI DIEM launch roi giao cho
+    // tien trinh nen apply (poll HWND 100ms/timeout 10s). Fire-and-forget: khong bao gio
+    // block/throw launch chinh. Fixed OFF + Auto -> bo qua de giu hanh vi cu.
+    // Snapshot truyen qua FILE (khong qua argv: tranh vo quote/base64 tren cmd Windows).
+    try {
+        require_once __DIR__ . '/sync/SettingsService.php';
+        $snap = SyncSettingsService::snapshot();
+        if ($snap['fixed'] || $snap['position'] !== 'auto') {
+            $php = php_cli_binary();
+            $scr = __DIR__ . '/bin/apply_window.php';
+            if ($php !== '' && is_file($scr)) {
+                $tmp = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR
+                    . 'ytm_win_' . (int)($p['id'] ?? 0) . '_' . getmypid() . '.json';
+                if (@file_put_contents($tmp, json_encode($snap)) !== false) {
+                    $cmd2 = 'start "" /B "' . $php . '" -f "' . $scr . '" -- ' . (int)($p['id'] ?? 0) . ' "' . $tmp . '" > NUL 2>&1';
+                    pclose(popen($cmd2, 'r'));
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        // applier loi khong duoc pha launch Chrome
     }
 }
 
@@ -775,6 +929,66 @@ function find_or_create_proxy(array $p): ?int
             strtoupper($p['country'] ?? ''),
         ]);
     return (int)db()->lastInsertId();
+}
+
+/** Xoa de quy mot thu muc (va moi noi dung ben trong). Khong bao loi khi khong ton tai. */
+function rrmdir(string $dir): void
+{
+    if ($dir === '' || !is_dir($dir)) return;
+    $items = @scandir($dir);
+    if ($items === false) return;
+    foreach ($items as $it) {
+        if ($it === '.' || $it === '..') continue;
+        $path = $dir . DIRECTORY_SEPARATOR . $it;
+        is_dir($path) && !is_link($path) ? rrmdir($path) : @unlink($path);
+    }
+    @rmdir($dir);
+}
+
+/** Dong scd.php daemon (screencast) cua 1 profile theo daemon.pid */
+function kill_frame_daemon(int $id): void
+{
+    if ($id <= 0) return;
+    $pidFile = __DIR__ . '/android/frames/ch' . $id . '/daemon.pid';
+    if (!is_file($pidFile)) return;
+    $pid = (int)trim((string)file_get_contents($pidFile));
+    if ($pid <= 0) return;
+    $ps = 'powershell -NoProfile -Command '
+        . '"Get-CimInstance Win32_Process -Filter \"Name=' . "'" . 'php.exe' . "'" . '\" '
+        . '| Where-Object { $_.ProcessId -eq ' . $pid . ' } '
+        . '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
+    @shell_exec($ps);
+}
+
+/** Dong scd daemon roi xoa record khoi DB (da ghi log) */
+function delete_profile(array $p): void
+{
+    $id = (int)$p['id'];
+
+    // 1. Dong Chrome kenh nay (mac dinh cung kill tabtitle_keeper + stop relay neu khong con kenh nao dung)
+    kill_chrome_processes($p);
+    usleep(500000);
+
+    // 2. Dong scd daemon screencast
+    kill_frame_daemon($id);
+
+    // 3. Xoa cache Chrome (user_data_dir — thu muc nang nhat, con GBs).
+    //    Chrome co the con giu khoa file ngay sau khi kill -> retry toi ~5s cho den khi het.
+    if (!empty($p['user_data_dir'])) {
+        $udir = $p['user_data_dir'];
+        rrmdir($udir);
+        for ($i = 0; $i < 5 && is_dir($udir); $i++) {
+            usleep(1000000); // 1s, toi da ~5s
+            rrmdir($udir);
+        }
+    }
+
+    // 4. Xoa khung hinh daemon (frame.jpg, meta.json, daemon.log, daemon.pid, ctrl.json...)
+    rrmdir(__DIR__ . '/android/frames/ch' . $id);
+
+    // 5. Xoa DB row (activity_logs.profile_id tu SET NULL on delete)
+    log_action($id, 'delete', 'Xoa profile (da xoa cache)');
+    db()->prepare('DELETE FROM profiles WHERE id = ?')->execute([$id]);
 }
 
 /** Test 1 proxy co song khong (dung chung cho proxies.php va browser.php) */

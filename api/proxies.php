@@ -11,6 +11,8 @@ try {
     switch ($action) {
         case 'list':
             $proxies = db()->query('SELECT * FROM proxies ORDER BY id DESC')->fetchAll();
+            foreach ($proxies as &$row) unset($row['password']); // khong tra password ra browser
+            unset($row);
             json_out(['ok' => true, 'data' => $proxies]);
             break;
 
@@ -19,8 +21,9 @@ try {
             $stmt = db()->prepare('SELECT * FROM proxies WHERE id = ?');
             $stmt->execute([$id]);
             $proxy = $stmt->fetch();
-            $proxy ? json_out(['ok' => true, 'data' => $proxy])
-                   : json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
+            if (!$proxy) json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
+            unset($proxy['password']);
+            json_out(['ok' => true, 'data' => $proxy]);
             break;
 
         case 'add':
@@ -28,6 +31,8 @@ try {
             if (empty($b['host']) || empty($b['port'])) {
                 json_out(['ok' => false, 'message' => 'Thieu host hoac port'], 400);
             }
+            $protocol = strtolower((string)($b['protocol'] ?? 'http'));
+            if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
             $stmt = db()->prepare('INSERT INTO proxies (name, host, port, username, password, protocol, country)
                                    VALUES (?, ?, ?, ?, ?, ?, ?)');
             $stmt->execute([
@@ -36,7 +41,7 @@ try {
                 (int)$b['port'],
                 $b['username'] ?? null,
                 $b['password'] ?? null,
-                $b['protocol'] ?? 'http',
+                $protocol,
                 strtoupper($b['country'] ?? ''),
             ]);
             json_out(['ok' => true, 'id' => (int)db()->lastInsertId()], 201);
@@ -46,6 +51,15 @@ try {
             $b = json_body();
             $id = (int)($b['id'] ?? 0);
             if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $chk = db()->prepare('SELECT id, password FROM proxies WHERE id=?');
+            $chk->execute([$id]);
+            $cur = $chk->fetch();
+            if (!$cur) json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
+            $protocol = strtolower((string)($b['protocol'] ?? 'http'));
+            if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
+            // Password khong tra ra browser nua -> form edit gui rong nghia la GIU NGUYEN
+            $newPass = array_key_exists('password', $b) && $b['password'] !== '' && $b['password'] !== null
+                ? (string)$b['password'] : $cur['password'];
             $stmt = db()->prepare('UPDATE proxies SET name=?, host=?, port=?, username=?, password=?, protocol=?, country=?
                                    WHERE id=?');
             $stmt->execute([
@@ -53,8 +67,8 @@ try {
                 trim($b['host'] ?? ''),
                 (int)($b['port'] ?? 0),
                 $b['username'] ?? null,
-                $b['password'] ?? null,
-                $b['protocol'] ?? 'http',
+                $newPass,
+                $protocol,
                 strtoupper($b['country'] ?? ''),
                 $id,
             ]);

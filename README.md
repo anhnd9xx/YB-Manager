@@ -9,7 +9,7 @@ bảng điều khiển web, kiểm tra trạng thái và CLI/chế độ Console
 - Tên kênh hiện trên **tiêu đề mọi tab** của Chrome kênh đó (`Kênh 5 | YouTube`) — kể cả tab
   mở mới (Ctrl+T, click link), qua `tabtitle_keeper.php` chạy nền bám CDP.
 - Gán proxy cho từng kênh, kiểm tra proxy alive / xem kênh đang chạy cổng debug nào.
-- Mở / đóng / mở lại kênh qua web (`api/browser.php`) dùng chung code với `api/sync.php`.
+- Mở / đóng / mở lại kênh qua web (`api/browser.php`).
 - Cơ chế **proxy relay** để Chrome gắn proxy có username/password hoạt động đầy đủ (xem bên dưới).
 - Bảng activity log, cài đặt (đường dẫn Chrome, timeout...), thống kê.
 
@@ -30,7 +30,7 @@ bảng điều khiển web, kiểm tra trạng thái và CLI/chế độ Console
 ## Cấu trúc
 
 ```
-api/            browser.php, profiles.php, proxies.php, settings.php, sync.php, logs.php
+api/            browser.php, profiles.php, proxies.php, settings.php, logs.php
 assets/         css, js giao diện
 database/       db.sql + các migration
 proxy_relay.php relay local (proxy forward) — core của fix proxy cho Chrome
@@ -48,7 +48,7 @@ nhưng **mọi fetch/XHR trong trang fail**, nhìn như "mất internet".
 Cách xử lý:
 
 1. `launch_chrome()` khởi động `proxy_relay.php` cục bộ
-   (`127.0.0.1`, port `9400 + proxy_id % 100`) — relay kết nối ra proxy thật có
+   (`127.0.0.1`, port `9400 + proxy_id` — mỗi proxy một port riêng) — relay kết nối ra proxy thật có
    username/password và **tự thêm** `Proxy-Authorization` vào mọi yêu cầu.
 2. Chrome được khởi động với `--proxy-server=http://127.0.0.1:<port>` (không kèm credentials).
 3. Relay là một event-loop **multi-client** duy nhất — không nghẽn khi proxy chậm,
