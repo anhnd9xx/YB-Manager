@@ -707,12 +707,27 @@ async function openAccountDrawer(id) {
     toast('Lỗi tải chi tiết', 'error');
   }
 }
-function assignProxySelected() {  const ids = getSelectedIds();
+function assignProxySelected() {
+  const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào, bấm lại "Gán proxy" sau khi chọn', 'error'); return; }
   pendingProxyAssignProfileIds = ids;
   populateBulkProxySelect();
   setBulkProxyMode('single');
-  $('bulk-proxy-count').textContent = `Sẽ gán proxy cho ${ids.length} kênh đã chọn.`;
+  // Che do THAY THE: kenh da co proxy se bi ghi de -> bao ro truoc khi gán
+  const byId = {};
+  profiles.forEach(p => { byId[p.id] = p; });
+  const had = ids.filter(id => byId[id] && byId[id].proxy_host);
+  const hint = $('bulk-proxy-count');
+  if (had.length) {
+    hint.innerHTML = `Sẽ <strong>THAY THẾ</strong> proxy cho ${ids.length} kênh đã chọn `
+      + `(<span style="color:var(--red)">${had.length} kênh đang có proxy sẽ bị ghi đè</span>).`;
+  } else {
+    hint.textContent = `Sẽ gán proxy cho ${ids.length} kênh đã chọn (đang chưa có proxy).`;
+  }
+  const saveBtn = $('bulk-proxy-save-btn');
+  if (saveBtn) saveBtn.textContent = had.length ? '⇄ Thay thế proxy' : 'Gán proxy';
+  $('bulk-proxy-list').value = '';
+  $('bulk-proxy-preview').textContent = '';
   showModal('bulk-proxy-modal');
 }
 function setBulkProxyMode(mode) {
@@ -727,15 +742,36 @@ function populateBulkProxySelect(selectedId) {
   const sel = $('bulk-proxy-select');
   sel.innerHTML = '<option value="">Không dùng proxy (gỡ proxy)</option>' +
     proxies.map(p =>
-      `<option value="${p.id}" ${p.id == selectedId ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.host)}:${p.port})</option>`
+      `<option value="${p.id}" ${p.id == selectedId ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.host)}:${p.port}) [${escapeHtml((p.protocol || 'http').toUpperCase())}]</option>`
     ).join('');
+}
+function previewBulkProxyList() {
+  const el = $('bulk-proxy-preview');
+  if (!el) return;
+  const defProto = ($('bulk-proxy-protocol') || {}).value || 'http';
+  const lines = ($('bulk-proxy-list').value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const counts = {};
+  let valid = 0;
+  lines.forEach(ln => {
+    const m = ln.match(/^(https?|socks4|socks5|ssh):\/\//i);
+    const parts = ln.replace(/^(https?|socks4|socks5|ssh):\/\//i, '').split(':');
+    const host = (parts[0] || '').trim();
+    const port = parseInt(parts[1], 10);
+    if (!host || !(port > 0)) return;
+    const proto = (m ? m[1] : defProto).toLowerCase();
+    counts[proto] = (counts[proto] || 0) + 1;
+    valid++;
+  });
+  el.textContent = lines.length
+    ? `${valid}/${lines.length} dòng hợp lệ` + (valid ? ` (${Object.entries(counts).map(([k, v]) => k.toUpperCase() + '×' + v).join(', ')})` : '')
+    : '';
 }
 async function saveBulkProxy() {
   if (!pendingProxyAssignProfileIds || !pendingProxyAssignProfileIds.length) return;
   const ids = pendingProxyAssignProfileIds;
   pendingProxyAssignProfileIds = null;
 
-  // MODE LIST: paste danh sách proxy -> gán theo thứ tự
+  // MODE LIST: paste danh sách proxy -> gán theo thứ tự (ghi đè proxy cũ)
   if (bulkProxyMode === 'list') {
     const list = $('bulk-proxy-list').value;
     if (!list.trim()) {
@@ -743,9 +779,11 @@ async function saveBulkProxy() {
       pendingProxyAssignProfileIds = ids;
       return;
     }
-    const res = await sendJson(api + 'profiles.php?action=assign_proxy_list_bulk', { ids, list });
+    const protocol = ($('bulk-proxy-protocol') || {}).value || 'http';
+    const res = await sendJson(api + 'profiles.php?action=assign_proxy_list_bulk', { ids, list, protocol });
     if (res.ok) {
-      toast(`Đã gán proxy cho ${res.updated}/${ids.length} kênh (${res.proxy_count} proxy)`, 'success');
+      const rep = res.replaced ? ` (thay thế ${res.replaced})` : '';
+      toast(`Đã gán proxy cho ${res.updated}/${ids.length} kênh${rep} (${res.proxy_count} proxy)`, 'success');
       closeModal('bulk-proxy-modal');
     } else {
       toast(res.message || 'Lỗi', 'error');
@@ -757,10 +795,16 @@ async function saveBulkProxy() {
     return;
   }
 
-  // MODE SINGLE: chọn 1 proxy
+  // MODE SINGLE: chọn 1 proxy (ghi đè proxy cũ)
   const proxyId = $('bulk-proxy-select').value || null;
   const res = await sendJson(api + 'profiles.php?action=assign_proxy_bulk', { ids, proxy_id: proxyId });
-  toast(res.ok ? `Đã gán proxy cho ${res.updated || 0} kênh` : res.message || 'Lỗi', res.ok ? 'success' : 'error');
+  if (res.ok) {
+    let msg;
+    if (!proxyId) msg = `Đã gỡ proxy của ${res.updated || 0} kênh`;
+    else if (res.replaced) msg = `Đã thay thế proxy cho ${res.replaced}/${res.updated || 0} kênh`;
+    else msg = `Đã gán proxy cho ${res.updated || 0} kênh`;
+    toast(msg, 'success');
+  } else toast(res.message || 'Lỗi', 'error');
   if (res.ok) closeModal('bulk-proxy-modal');
   refreshAll();
 }
@@ -1194,6 +1238,46 @@ async function deleteSelectedProxies() {
 
 function statusLabel(s) {
   return { alive: '● Sống', dead: '● Chết', unknown: '○ Chưa test' }[s || 'unknown'] || '○ Chưa test';
+}
+
+// ============ SUA PROXY HANG LOAT (field rong = giu nguyen) ============
+let pendingBulkEditProxyIds = [];
+function openBulkEditProxies() {
+  if (!selectedProxies.size) { toast('Chưa chọn proxy nào', 'error'); return; }
+  pendingBulkEditProxyIds = [...selectedProxies];
+  $('be-protocol').value = 'keep';
+  $('be-country').value = '';
+  $('be-user').value = '';
+  $('be-pass').value = '';
+  $('be-lines').value = '';
+  $('bulk-edit-count').textContent = `Sẽ sửa ${pendingBulkEditProxyIds.length} proxy đã chọn. Để trống = giữ nguyên.`;
+  showModal('bulk-edit-modal');
+}
+async function saveBulkEditProxies() {
+  if (!pendingBulkEditProxyIds.length) return;
+  const ids = pendingBulkEditProxyIds;
+  const data = { ids };
+  if ($('be-protocol').value !== 'keep') data.protocol = $('be-protocol').value;
+  if ($('be-country').value.trim()) data.country = $('be-country').value.trim();
+  if ($('be-user').value.trim()) data.username = $('be-user').value.trim();
+  if ($('be-pass').value) data.password = $('be-pass').value;
+  const lines = $('be-lines').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (lines.length) data.lines = lines;
+  const btn = $('bulk-edit-save-btn');
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang lưu...'; }
+    const res = await sendJson(api + 'proxies.php?action=update_bulk', data);
+    if (res.ok) {
+      toast(`Đã sửa ${res.updated}/${ids.length} proxy`, 'success');
+      closeModal('bulk-edit-modal');
+      loadProxies();
+    } else {
+      toast(res.message || 'Lỗi', 'error');
+    }
+  } catch (e) {
+    toast('Lỗi kết nối khi lưu', 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Lưu thay đổi'; }
 }
 
 async function testProxy(id) {

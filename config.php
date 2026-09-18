@@ -860,15 +860,18 @@ function refresh_profile_status(array $p): string
     return $status;
 }
 
-/** Parse chuoi proxy thanh mang (dung chung cho proxies.php, profiles.php) */
-function parse_proxy_string(string $s): ?array
+/** Parse chuoi proxy thanh mang (dung chung cho proxies.php, profiles.php).
+ *  $defaultProtocol ap dung cho dong KHONG ghi ro protocol; dong co prefix
+ *  protocol:// van uu tien theo prefix. Luon whitelist ve 4 loai ho tro. */
+function parse_proxy_string(string $s, string $defaultProtocol = 'http'): ?array
 {
     // Dang ho tro:
     //   host:port
     //   host:port:user:pass
     //   protocol://host:port
     //   protocol://user:pass@host:port
-    $protocol = 'http';
+    $protocol = strtolower(trim($defaultProtocol));
+    if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
     $auth = null;
 
     if (preg_match('#^(https?|socks4|socks5|ssh)://#i', $s, $m)) {

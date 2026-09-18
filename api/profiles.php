@@ -126,37 +126,58 @@ try {
                 $chk->execute([$proxy_id]);
                 if (!$chk->fetch()) json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
             }
+            // Dem kenh BI THAY THE proxy cu (de UI bao ro thay vi "gan")
+            $replaced = 0;
+            if ($proxy_id !== null) {
+                $inIds = implode(',', array_fill(0, count($ids), '?'));
+                $qOld = db()->prepare("SELECT COUNT(*) FROM profiles WHERE id IN ($inIds) AND proxy_id IS NOT NULL AND proxy_id <> ?");
+                $qOld->execute(array_merge($ids, [$proxy_id]));
+                $replaced = (int)$qOld->fetchColumn();
+            }
             $in = implode(',', array_fill(0, count($ids), '?'));
             $stmt = db()->prepare("UPDATE profiles SET proxy_id=? WHERE id IN ($in)");
             $stmt->execute(array_merge([$proxy_id], $ids));
-            json_out(['ok' => true, 'updated' => count($ids)]);
+            json_out(['ok' => true, 'updated' => count($ids), 'replaced' => $replaced]);
             break;
 
         // Gan danh sach proxy (paste nhieu dong) cho nhieu kenh theo thu tu:
         // kenh 1 <- proxy dong 1, kenh 2 <- proxy dong 2, ... Tu dong tao proxy chua co.
+        // $b['protocol']: loai mac dinh cho dong khong ghi prefix (dong co prefix giu theo prefix).
+        // Ghi de proxy cu: kenh da co proxy se BI THAY THE (tra ve replaced).
         case 'assign_proxy_list_bulk':
             $b = json_body();
             $ids = array_values(array_filter(array_map('intval', (array)($b['ids'] ?? []))));
             $lines = preg_split('/\r?\n/', trim((string)($b['list'] ?? '')), -1, PREG_SPLIT_NO_EMPTY);
             if (empty($ids)) json_out(['ok' => false, 'message' => 'Chua chon kenh nao'], 400);
             if (empty($lines)) json_out(['ok' => false, 'message' => 'Chua nhap danh sach proxy'], 400);
+            $defProto = strtolower(trim((string)($b['protocol'] ?? 'http')));
+            if (!in_array($defProto, ['http', 'socks4', 'socks5', 'ssh'], true)) $defProto = 'http';
 
             $proxyIds = [];
             foreach ($lines as $line) {
-                $proxy = parse_proxy_string(trim($line));
+                $proxy = parse_proxy_string(trim($line), $defProto);
                 if (!$proxy) continue;
                 $proxyIds[] = find_or_create_proxy($proxy);
             }
             if (empty($proxyIds)) json_out(['ok' => false, 'message' => 'Khong co proxy nao hop le trong danh sach'], 400);
 
+            // Nho proxy cu de bao so luong BI THAY THE
+            $oldMap = [];
+            $inIds = implode(',', array_fill(0, count($ids), '?'));
+            $qOld = db()->prepare("SELECT id, proxy_id FROM profiles WHERE id IN ($inIds)");
+            $qOld->execute($ids);
+            foreach ($qOld->fetchAll() as $r) $oldMap[(int)$r['id']] = $r['proxy_id'] === null ? null : (int)$r['proxy_id'];
+
             $updated = 0;
+            $replaced = 0;
             $update = db()->prepare('UPDATE profiles SET proxy_id=? WHERE id=?');
             foreach ($ids as $i => $profileId) {
                 if (!isset($proxyIds[$i])) break; // thieu proxy: cac kenh con lai giu nguyen
                 $update->execute([$proxyIds[$i], (int)$profileId]);
                 $updated++;
+                if (!empty($oldMap[(int)$profileId]) && (int)$oldMap[(int)$profileId] !== (int)$proxyIds[$i]) $replaced++;
             }
-            json_out(['ok' => true, 'updated' => $updated, 'proxy_count' => count($proxyIds)]);
+            json_out(['ok' => true, 'updated' => $updated, 'replaced' => $replaced, 'proxy_count' => count($proxyIds)]);
             break;
 
         case 'update':

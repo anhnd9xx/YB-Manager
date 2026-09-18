@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260917q">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260917s">
 </head>
 <body>
 
@@ -181,6 +181,7 @@
           <button class="btn" onclick="testAllProxies()">Test tất cả</button>
           <div class="sel-divider"></div>
           <label class="sel-all-label"><span class="ck"><input type="checkbox" id="sel-all-proxies" onchange="toggleSelectAllProxies(this.checked)"><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></span> Chọn tất cả</label>
+          <button class="btn btn-sm" onclick="openBulkEditProxies()">✎ Sửa hàng loạt</button>
           <button class="btn btn-sm btn-danger" onclick="deleteSelectedProxies()">🗑 Xóa đã chọn</button>
           <span id="selected-proxies-count" class="sel-count"></span>
           <div class="spacer"></div>
@@ -670,6 +671,43 @@
   </div>
 </div>
 
+<!-- ===== MODAL: Sửa proxy hàng loạt ===== -->
+<div id="bulk-edit-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Sửa proxy hàng loạt</h2>
+      <button class="modal-close" onclick="closeModal('bulk-edit-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint" id="bulk-edit-count" style="margin-top:0"></div>
+      <div class="hint">Để trống = giữ nguyên. Chỉ field có giá trị mới bị ghi đè.</div>
+      <div class="win-row">
+        <div class="win-field"><label>Loại proxy</label>
+          <select id="be-protocol">
+            <option value="keep">Giữ nguyên</option>
+            <option value="http">HTTP</option>
+            <option value="socks4">SOCKS4</option>
+            <option value="socks5">SOCKS5</option>
+            <option value="ssh">SSH</option>
+          </select>
+        </div>
+        <div class="win-field"><label>Quốc gia (mã 2 chữ)</label><input type="text" id="be-country" maxlength="2" placeholder="US"></div>
+      </div>
+      <div class="win-row">
+        <div class="win-field"><label>Username</label><input type="text" id="be-user" placeholder="Để trống = giữ nguyên"></div>
+        <div class="win-field"><label>Password</label><input type="text" id="be-pass" placeholder="Để trống = giữ nguyên"></div>
+      </div>
+      <label>Thay host:port theo danh sách (dòng i → proxy thứ i, dòng lỗi/trống thì proxy đó giữ nguyên)</label>
+      <textarea id="be-lines" rows="5" placeholder="1.2.3.4:8080&#10;socks5://5.6.7.8:1080:user:pass"></textarea>
+      <div class="hint">Dòng có user:pass thì đổi luôn auth. Dòng có prefix protocol thì đổi luôn loại.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('bulk-edit-modal')">Hủy</button>
+      <button class="btn btn-primary" id="bulk-edit-save-btn" onclick="saveBulkEditProxies()">Lưu thay đổi</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== MODAL: Import ===== -->
 <div id="import-modal" class="modal-overlay hidden">
   <div class="modal">
@@ -711,13 +749,24 @@
 
       <div id="bp-list-fields" class="hidden">
         <label>Danh sách proxy (mỗi dòng 1 proxy)</label>
-        <textarea id="bulk-proxy-list" rows="6" placeholder="host:port&#10;host:port:user:pass&#10;http://user:pass@host:port&#10;socks5://host:port"></textarea>
-        <div class="hint">Gán theo thứ tự: kênh 1 ← dòng 1, kênh 2 ← dòng 2... Proxy chưa có sẽ tự thêm. Nếu ít proxy hơn số kênh thì các kênh cuối không gán.</div>
+        <textarea id="bulk-proxy-list" rows="6" oninput="previewBulkProxyList()" placeholder="host:port&#10;host:port:user:pass&#10;http://user:pass@host:port&#10;socks5://host:port"></textarea>
+        <div class="win-row">
+          <div class="win-field"><label>Loại proxy cho dòng không ghi rõ</label>
+            <select id="bulk-proxy-protocol" onchange="previewBulkProxyList()">
+              <option value="http">HTTP</option>
+              <option value="socks4">SOCKS4</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="ssh">SSH</option>
+            </select>
+          </div>
+          <div class="win-field"><label>&nbsp;</label><div class="summary-text" id="bulk-proxy-preview"></div></div>
+        </div>
+        <div class="hint">Dòng có prefix (vd socks5://…) giữ theo prefix. Gán theo thứ tự: kênh 1 ← dòng 1… Proxy chưa có sẽ tự thêm. Ít proxy hơn số kênh thì các kênh cuối giữ nguyên.</div>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('bulk-proxy-modal')">Hủy</button>
-      <button class="btn btn-primary" onclick="saveBulkProxy()">Gán</button>
+      <button class="btn btn-primary" id="bulk-proxy-save-btn" onclick="saveBulkProxy()">Gán</button>
     </div>
   </div>
 </div>
@@ -793,6 +842,6 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260917q"></script>
+<script src="assets/js/app.js?v=20260917s"></script>
 </body>
 </html>
