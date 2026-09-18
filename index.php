@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260918e">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260918f">
 </head>
 <body>
 
@@ -96,8 +96,8 @@
             <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             Tạo kênh
           </button>
-          <button class="btn btn-sm tb-sec" onclick="openAllProfiles()">Mở tất cả</button>
-          <button class="btn btn-sm tb-sec" onclick="closeAllProfiles()">Đóng tất cả</button>
+          <button class="btn btn-sm tb-sec" id="btn-open-all" onclick="openAllProfiles()">Mở tất cả</button>
+          <button class="btn btn-sm tb-sec" id="btn-close-all" onclick="closeAllProfiles()">Đóng tất cả</button>
           <div class="sel-divider"></div>
           <label class="sel-all-label"><span class="ck"><input type="checkbox" id="sel-all" onchange="toggleSelectAll(this.checked)"><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></span> Chọn tất cả</label>
           <button class="btn btn-sm" onclick="openSelected()">▶ Mở đã chọn</button>
@@ -937,6 +937,6 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260918e"></script>
+<script src="assets/js/app.js?v=20260918f"></script>
 </body>
 </html>

@@ -201,23 +201,24 @@ class TabSessionStore
         }
     }
 
-        /**
+    /**
      * Thu tu tab strip THAT (ke ca user da keo-tha): xoay active bang Ctrl+PgDn,
      * doc document.visibilityState de biet tab nao dang hien. Tra ve tabs sap
      * dung thu tu trai->phai, hoac null neu khong xac dinh duoc (window minimize,
-     * qua 8 tabs, CDP loi, het budget 25s) -> caller dung thu tu readLive.
+     * qua 8 tabs, CDP loi, het budget) -> caller dung thu tu readLive.
      * Toi uu: fetch /json/list 1 LAN (endpoint nay cham khi browser ban),
      * evaluate thi nhanh; cache id->ws ca vong chay.
      * Co tac dong hien thi nhe (tab nhay) + cham (~0.5s/tab) nen CHI dung khi
      * user luu tay / pre-close, KHONG dung cho autosave dinh ky.
      * Luon tra active ve tab ban dau truoc khi return.
      * @param array{id:string,url:string,title:string}[] $tabs (tu readLive)
+     * @param int $budgetMs Ngan sach toi da (0 = mac dinh 25s)
      */
-    public static function trueOrderTabs(int $port, array $tabs): ?array
+    public static function trueOrderTabs(int $port, array $tabs, int $budgetMs = 0): ?array
     {
         try {
             if (count($tabs) <= 1 || count($tabs) > 8) return null;
-            $deadline = microtime(true) + 25;
+            $deadline = microtime(true) + ($budgetMs > 0 ? min(25, $budgetMs / 1000) : 25);
             $byId = [];
             foreach ($tabs as $t) $byId[(string)$t['id']] = $t;
             // 1 list duy nhat -> map id=>ws (on dinh trong vong cycling)
@@ -271,13 +272,14 @@ class TabSessionStore
     /**
      * Snapshot live day du: readLive (+true-order neu $precise) -> buildSnapshot.
      * $precise=true: luu tay / pre-close. false: autosave (nhanh, khong flicker).
+     * $budgetMs: ngan sach cho true-order (pre-close 1200ms; qua gio -> fallback).
      */
-    public static function snapshotLive(int $profileId, int $port, bool $precise): ?array
+    public static function snapshotLive(int $profileId, int $port, bool $precise, int $budgetMs = 0): ?array
     {
         $live = self::readLive($profileId, $port);
         if ($live === null) return null;
         if ($precise) {
-            $ordered = self::trueOrderTabs($port, $live['tabs']);
+            $ordered = self::trueOrderTabs($port, $live['tabs'], $budgetMs);
             if ($ordered !== null) {
                 // trueOrder bat dau chu ky tu tab dang active + tra active ve do
                 // -> ordered[0] chinh la active tab hien tai

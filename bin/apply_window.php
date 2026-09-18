@@ -57,21 +57,34 @@ if (!$snap['fixed'] && $snap['position'] === 'auto') {
     exit(0);
 }
 
-// ---- Wait for HWND: poll 100ms, timeout 10s (khong sleep mu 2s) ----
+// ---- Wait for HWND: finder gon + backoff (100ms x10, 250ms x12, 500ms x12 ~ 10s).
+// Moi poll chi 1 EnumWindows + 1 CIM (khong lay monitor/DPI nhu discovery day du)
+// nen re hon nhieu khi Start All mo nhieu Chrome song song.
 aw_log('[Window] Waiting for HWND', $profileId);
 $win = null;
-$deadline = microtime(true) + 10;
-while (microtime(true) < $deadline) {
-    foreach (SyncWindowDiscovery::discover(false)['windows'] as $w) {
-        if ($w->profileId === $profileId && $w->class === 'Chrome_WidgetWin_1' && $w->visible
-            && $w->rect !== null && $w->rect['w'] > 0 && $w->rect['h'] > 0
-            && ($win === null || $w->area() > $win->area())) {
-            $win = $w;
-        }
+try {
+    $st = db()->prepare('SELECT user_data_dir FROM profiles WHERE id=?');
+    $st->execute([$profileId]);
+    $udir = (string)($st->fetchColumn() ?? '');
+} catch (Throwable $e) {
+    $udir = '';
+}
+if ($udir === '') {
+    SyncLogger::warn('window_apply', '[Window] Khong tim thay profile', $profileId);
+    exit(2);
+}
+$findScript = __DIR__ . '/../sync/win32_find_profile.ps1';
+$waits = array_merge(array_fill(0, 10, 100000), array_fill(0, 12, 250000), array_fill(0, 12, 500000));
+foreach ($waits as $waitUs) {
+    $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $findScript . '"'
+        . ' -UserDataDir "' . str_replace('"', '', $udir) . '"';
+    $json = @shell_exec($cmd);
+    $r = is_string($json) ? json_decode(trim($json), true) : null;
+    if (is_array($r) && !empty($r['ok']) && (int)($r['hwnd'] ?? 0) > 0) {
+        $win = ['hwnd' => (int)$r['hwnd'], 'pid' => (int)($r['pid'] ?? 0), 'rect' => null];
+        break;
     }
-    if ($win !== null && !$win->minimized) break;
-    $win = ($win !== null && !$win->minimized) ? $win : null;
-    usleep(100000);
+    usleep($waitUs);
 }
 if ($win === null) {
     $msg = "[Window] HWND khong xuat hien sau 10s (profile #$profileId)";
@@ -79,7 +92,15 @@ if ($win === null) {
     echo date('H:i:s') . " $msg\n";
     exit(1);
 }
-aw_log('[Window] HWND found: ' . $win->hwnd, $profileId);
+aw_log('[Window] HWND found: ' . $win['hwnd'], $profileId);
+
+// Rect hien tai: 1 lan discovery duy nhat (khong poll) de tinh vi tri giu/clamp
+$curRect = null;
+try {
+    $found = SyncWindowManager::findWindow((int)$win['hwnd']);
+    if ($found !== null) $curRect = $found->rect;
+} catch (Throwable $e) {
+}
 
 // ---- Resolve monitor (fallback Primary neu monitor chon bi thao) ----
 $monId = $snap['monitor'] === 'primary' ? null : (int)$snap['monitor'];
@@ -99,13 +120,13 @@ if ($monId !== null && (int)$wa['monitorId'] !== $monId) {
 aw_log("[Window] Monitor: {$wa['monitorName']} (id {$wa['monitorId']})", $profileId);
 
 // ---- Tinh rect dich ----
-$W = $snap['fixed'] ? $snap['width'] : (int)($win->rect['w'] ?? $snap['width']);
-$H = $snap['fixed'] ? $snap['height'] : (int)($win->rect['h'] ?? $snap['height']);
+$W = $snap['fixed'] ? $snap['width'] : (int)($curRect['w'] ?? $snap['width']);
+$H = $snap['fixed'] ? $snap['height'] : (int)($curRect['h'] ?? $snap['height']);
 $W = min($W, $wa['w']);
 $H = min($H, $wa['h']);
 $gap = $snap['gap'];
-$x = (int)($win->rect['x'] ?? $wa['x']);
-$y = (int)($win->rect['y'] ?? $wa['y']);
+$x = (int)($curRect['x'] ?? $wa['x']);
+$y = (int)($curRect['y'] ?? $wa['y']);
 
 switch ($snap['position']) {
     case 'custom':
@@ -126,7 +147,7 @@ switch ($snap['position']) {
         $n = max(1, count($all));
         $idx = 0;
         foreach ($all as $i => $w) {
-            if ($w->hwnd === $win->hwnd) {
+            if ($w->hwnd === (int)$win['hwnd']) {
                 $idx = $i;
                 break;
             }
@@ -149,7 +170,7 @@ $x = max($wa['x'], min($x, $wa['x'] + $wa['w'] - $W));
 $y = max($wa['y'], min($y, $wa['y'] + $wa['h'] - $H));
 
 aw_log("[Window] Applying global window settings: {$W}x{$H} @ ($x,$y) mode={$snap['position']}", $profileId);
-$r = SyncWindowManager::moveResize($win->hwnd, $x, $y, $W, $H);
+$r = SyncWindowManager::moveResize((int)$win['hwnd'], $x, $y, $W, $H);
 if ($r['ok']) {
     $rc = $r['rect'] ?? null;
     $got = is_array($rc) ? " -> thuc te {$rc['w']}x{$rc['h']} @ ({$rc['x']},{$rc['y']})" : '';

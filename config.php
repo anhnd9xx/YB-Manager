@@ -809,7 +809,15 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
             require_once __DIR__ . '/sync/SyncLogger.php';
             $autoRes = get_setting('tab_autorestore', '1');
             if ($autoRes === '1' || $autoRes === 'true') {
+                $tPre = microtime(true);
                 $sess = TabSessionStore::getUrlsForLaunch((int)($p['id'] ?? 0));
+                $msPre = (int)round((microtime(true) - $tPre) * 1000);
+                try {
+                    require_once __DIR__ . '/sync/SyncLogger.php';
+                    SyncLogger::info('tab_session', '[PERF] preload ' . count($sess['urls'] ?? [])
+                        . ' session URLs #' . (int)($p['id'] ?? 0) . ": {$msPre}ms", (int)($p['id'] ?? 0));
+                } catch (Throwable $e2) {
+                }
                 if ($sess !== null && !empty($sess['urls'])) {
                     $startupUrls = $sess['urls'];
                     SyncLogger::info('tab_session', '[SESSION] #' . (int)($p['id'] ?? 0)
@@ -891,8 +899,7 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
 
 /** Con process Chrome nao cua user_data_dir khong? (1 luot WMI, dung de poll sau kill) */
 function chrome_processes_alive(string $udir): bool
-{
-    $udir = trim($udir);
+{    $udir = trim($udir);
     if ($udir === '') return false;
     $like = '*' . str_replace("'", "''", $udir) . '*';
     $ps = 'powershell -NoProfile -Command '
@@ -907,9 +914,60 @@ function chrome_processes_alive(string $udir): bool
     return false;
 }
 
+/** Dong NHẸ NHÀNG cac window Chrome cua 1 profile (PostMessage WM_CLOSE 1 luot,
+ *  cho process tu thoat toi da 3s). Tra ve true neu tat ca process thoat sach
+ *  (khong can kill). CHI cham window thuộc user-data-dir cua profile (khong
+ *  dung Chrome ngoai tool). Loi -> false, caller fallback kill. */
+function close_chrome_gracefully(array $p): bool
+{
+    $t0 = microtime(true);
+    try {
+        require_once __DIR__ . '/sync/WindowDiscovery.php';
+        $hwnds = [];
+        foreach (SyncWindowDiscovery::discover(false)['windows'] as $w) {
+            if ($w->profileId !== null && (int)$w->profileId === (int)($p['id'] ?? 0)
+                && $w->class === 'Chrome_WidgetWin_1' && $w->visible) {
+                $hwnds[] = $w->hwnd;
+            }
+        }
+        $hwnds = array_values(array_unique(array_filter(array_map('intval', $hwnds))));
+        if (!$hwnds) return (bool)!chrome_processes_alive((string)($p['user_data_dir'] ?? ''));
+        $script = __DIR__ . '/sync/win32_close.ps1';
+        $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"'
+            . ' -Hwnd "' . implode(',', $hwnds) . '"';
+        @shell_exec($cmd);
+        $msDispatch = (int)round((microtime(true) - $t0) * 1000);
+        try {
+            require_once __DIR__ . '/sync/SyncLogger.php';
+            SyncLogger::info('browser_perf', '[PERF] WM_CLOSE dispatch ' . count($hwnds)
+                . ' (#' . (int)($p['id'] ?? 0) . '): ' . $msDispatch . 'ms', (int)($p['id'] ?? 0));
+        } catch (Throwable $e) {
+        }
+        // Cho process tu dong (poll 100ms, toi da 3s) thay vi force kill ngay
+        $deadline = microtime(true) + 3;
+        while (microtime(true) < $deadline) {
+            if (!chrome_processes_alive((string)($p['user_data_dir'] ?? ''))) {
+                $ms = (int)round((microtime(true) - $t0) * 1000);
+                try {
+                    SyncLogger::info('browser_perf', '[PERF] graceful close #' . (int)($p['id'] ?? 0)
+                        . ": {$ms}ms", (int)($p['id'] ?? 0));
+                } catch (Throwable $e) {
+                }
+                return true;
+            }
+            usleep(100000);
+        }
+        return false;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
 /** Dong toan bo process Chrome cua 1 profile (theo user_data_dir) */
 function kill_chrome_processes(array $p): void
 {
+    // Graceful truoc: WM_CLOSE de Chrome flush profile/cookie (3s), that bai -> fallback kill
+    close_chrome_gracefully($p);
     $udir = $p['user_data_dir'];
     $ps = 'powershell -NoProfile -Command '
         . '"Get-CimInstance Win32_Process -Filter \"Name=' . "'" . 'chrome.exe' . "'" . '\" '

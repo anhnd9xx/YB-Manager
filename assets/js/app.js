@@ -833,48 +833,100 @@ async function autoArrangeAfterLaunch(ids) {
   }
 }
 
+// Live tracker: trong batch mo/dong, poll nhe 2s/lan de card cap nhat
+// RUNNING/CLOSING truc tiep (thay vi chi busy den cuoi batch). Render 1 lan/luot.
+function startBulkTracker() {
+  stopBulkTracker();
+  window.__ytmBulkTimer = setInterval(() => {
+    if (!document.hidden) loadProfiles();
+  }, 2000);
+}
+function stopBulkTracker() {
+  if (window.__ytmBulkTimer) { clearInterval(window.__ytmBulkTimer); window.__ytmBulkTimer = null; }
+}
 async function openSelected() {
   const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
+  if (activeBatch) { toast(`Đang ${activeBatch.kind === 'open' ? 'mở' : 'đóng'} hàng loạt — thử lại sau`, 'error'); return; }
+  const seq = ++batchSeq;
+  activeBatch = { kind: 'open', seq };
+  const ui = batchBtn(null, 'Đang mở');
   window.__ytmBulkOp = true; // chan reflow xen vao giua bulk launch (Phase 12)
+  startBulkTracker(); // card cap nhat RUNNING truc tiep trong batch
   try {
     // Pool 5 song song + stagger (mo tuan tu 20 kenh mat hang phut)
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở');
-    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở', { seq, onTick: ui.tick.bind(ui) });
     markProfileChanged();
+    if (r.cancelled) { toast('Đã hủy mở hàng loạt', 'error'); refreshAll(); return; }
+    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
     refreshAll();
     await autoArrangeAfterLaunch(ids);
   } finally {
     window.__ytmBulkOp = false;
+    stopBulkTracker();
+    ui.done();
+    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
   }
 }
 async function closeSelected() {
   const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng');
-  toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-  markProfileChanged();
-  refreshAll();
+  if (activeBatch) { toast('Đang chạy batch khác — thử lại sau', 'error'); return; }
+  const seq = ++batchSeq; // huy batch Start dang chay (QUEUED dung, STARTING/RUNNING -> CLOSING)
+  activeBatch = { kind: 'close', seq };
+  const ui = batchBtn(null, 'Đang đóng');
+  window.__ytmBulkOp = true;
+  startBulkTracker();
+  try {
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng', { seq, onTick: ui.tick.bind(ui) });
+    markProfileChanged();
+    if (r.cancelled) { toast('Đã hủy', 'error'); refreshAll(); return; }
+    toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+    refreshAll();
+  } finally {
+    window.__ytmBulkOp = false;
+    stopBulkTracker();
+    ui.done();
+    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
+  }
 }
 // Pool dispatch song song co gioi han (B1-B3): toi da 5 request dong thoi,
-// worker thu w nghi w*150ms truoc khi chay (stagger chong spike). Tra ve {ok,fail}.
-// UI khong block: hien tien trinh tren nut refresh qua selected-count.
+// worker thu w nghi w*150ms truoc khi chay (stagger chong spike). Tra ve {ok,fail,cancelled}.
+// opts: {seq, verbEl, onTick(done,total)} — seq khac batch hien tai -> dung (bi huy).
 const BULK_POOL = 5, BULK_STAGGER_MS = 150;
-async function poolEach(ids, fn, verb) {
+let batchSeq = 0; // tang moi batch Start/Stop (Stop huy Start dang chay)
+let activeBatch = null; // {kind:'open'|'close', seq, btnId, label}
+async function poolEach(ids, fn, verb, opts) {
+  opts = opts || {};
   let i = 0, ok = 0, fail = 0;
-  const el = $('selected-count');
-  const tick = () => { if (el) el.textContent = `${verb || 'Đang xử lý'} ${ok + fail}/${ids.length}…`; };
+  const el = opts.verbEl ? $(opts.verbEl) : $('selected-count');
+  const tick = () => {
+    if (el) el.textContent = `${verb || 'Đang xử lý'} ${ok + fail}/${ids.length}…`;
+    if (opts.onTick) { try { opts.onTick(ok + fail, ids.length); } catch (e) {} }
+  };
   tick();
   const workers = Array.from({ length: Math.min(BULK_POOL, ids.length) }, async (_, w) => {
     if (w > 0) await sleep(w * BULK_STAGGER_MS);
     while (i < ids.length) {
+      if (opts.seq !== undefined && opts.seq !== batchSeq) return; // bi huy
       const id = ids[i++];
       try { await fn(id); ok++; } catch (e) { fail++; }
       tick();
     }
   });
   await Promise.all(workers);
-  return { ok, fail };
+  const cancelled = opts.seq !== undefined && opts.seq !== batchSeq;
+  return { ok, fail, cancelled };
+}
+// Helper batch nut Mo/Dong tat ca: progress tren nut, chong double-click,
+// Stop huy Start dang chay (cancel QUEUED, STARTING/RUNNING chuyen CLOSING).
+function batchBtn(btnId, label) {
+  const btn = btnId ? $(btnId) : null;
+  return {
+    start(text) { if (btn) { btn.dataset.orig = btn.dataset.orig || btn.textContent; btn.textContent = text; } },
+    tick(done, total) { if (btn) btn.textContent = `◌ ${label} ${done}/${total}`; },
+    done() { if (btn && btn.dataset.orig) { btn.textContent = btn.dataset.orig; delete btn.dataset.orig; } }
+  };
 }
 async function deleteSelected() {
   if (!selectedProfileIds.size) { toast('Chưa chọn kênh nào', 'error'); return; }
@@ -1292,23 +1344,48 @@ async function closeProfile(id) {
 }
 async function openAllProfiles() {
   const ids = profiles.map(p => p.id);
+  if (!ids.length) { toast('Chưa có kênh nào', 'error'); return; }
+  if (activeBatch) { toast(`Đang ${activeBatch.kind === 'open' ? 'mở' : 'đóng'} hàng loạt — thử lại sau`, 'error'); return; }
+  const seq = ++batchSeq;
+  activeBatch = { kind: 'open', seq };
+  const ui = batchBtn('btn-open-all', 'Đang mở');
   window.__ytmBulkOp = true;
+  startBulkTracker();
   try {
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở');
-    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở', { seq, onTick: ui.tick.bind(ui) });
     markProfileChanged();
+    if (r.cancelled) { toast('Đã hủy mở tất cả', 'error'); refreshAll(); return; }
+    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
     refreshAll();
     await autoArrangeAfterLaunch(ids);
   } finally {
     window.__ytmBulkOp = false;
+    stopBulkTracker();
+    ui.done();
+    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
   }
 }
 async function closeAllProfiles() {
   const ids = profiles.map(p => p.id);
-  const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng');
-  toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-  markProfileChanged();
-  refreshAll();
+  if (!ids.length) { toast('Chưa có kênh nào', 'error'); return; }
+  if (activeBatch && activeBatch.kind === 'close') { toast('Đang đóng — thử lại sau', 'error'); return; }
+  const seq = ++batchSeq; // huy Start dang chay: QUEUED dung, STARTING/RUNNING -> CLOSING
+  activeBatch = { kind: 'close', seq };
+  const ui = batchBtn('btn-close-all', 'Đang đóng');
+  window.__ytmBulkOp = true;
+  startBulkTracker();
+  try {
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng', { seq, onTick: ui.tick.bind(ui) });
+    markProfileChanged();
+    if (r.cancelled) { toast('Đã hủy', 'error'); refreshAll(); return; }
+    toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+    refreshAll();
+  } finally {
+    window.__ytmBulkOp = false;
+    stopBulkTracker();
+    ui.done();
+    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
+  }
 }
 
 // ---- đổi tên / handle nhanh trên card ----

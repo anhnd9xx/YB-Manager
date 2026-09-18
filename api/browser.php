@@ -171,8 +171,9 @@ function tab_snapshot_before_close(array $p): void
         require_once __DIR__ . '/../sync/TabSessionStore.php';
         require_once __DIR__ . '/../sync/SyncLogger.php';
         $t0 = microtime(true);
-        // Pre-close: true-order de giu dung vi tri ke ca da keo-tha tab
-        $snap = TabSessionStore::snapshotLive($id, $port, true);
+        // Pre-close: true-order de giu dung vi tri ke ca da keo-tha tab.
+        // Deadline 1200ms: qua gio dung last_good, khong block dong Chrome.
+        $snap = TabSessionStore::snapshotLive($id, $port, true, 1200);
         if ($snap === null) return;
         TabSessionStore::save($id, $snap);
         $ms = (int)round((microtime(true) - $t0) * 1000);
