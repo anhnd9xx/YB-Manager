@@ -820,6 +820,48 @@ body {
 [data-theme="light"] .status-dot.status-busy { color: #d9480f; }
 [data-theme="light"] .status-dot.status-busy i { box-shadow: 0 0 8px rgba(217,72,15,.5); }
 
+/* ===== LIGHT THEME VIP PACK (nen + vien + font, chi nen sang) ===== */
+[data-theme="light"] {
+  --bg: #e8edf6;
+  --bg-glow-1: rgba(224,49,49,.09);
+  --bg-glow-2: rgba(25,113,194,.1);
+  --sidebar: #fbfcff;
+  --border: #d3dbef;
+  --border-soft: #e2e8f5;
+  --shadow-card: 0 6px 20px rgba(35,50,90,.09);
+  --shadow-pop: 0 16px 44px rgba(35,50,90,.18);
+}
+[data-theme="light"] body { background: linear-gradient(180deg, #eff2f9 0%, #e4e9f3 100%); }
+[data-theme="light"] .sidebar {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f4fa 100%);
+  box-shadow: 4px 0 24px rgba(35,50,90,.07);
+}
+[data-theme="light"] .nav-btn.active {
+  background: var(--primary-grad);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(224,49,49,.35);
+}
+[data-theme="light"] .nav-btn.active .nav-count { background: rgba(255,255,255,.28); color: #fff; }
+[data-theme="light"] .topbar { border-bottom: 1px solid var(--border-soft); }
+[data-theme="light"] .stat-card::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--primary-grad); border-radius: 4px 0 0 4px;
+}
+[data-theme="light"] .stat-card:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(35,50,90,.14); }
+.stat-value { font-variant-numeric: tabular-nums; }
+[data-theme="light"] .panel { box-shadow: 0 8px 26px rgba(35,50,90,.09); }
+[data-theme="light"] .panel-head h3 { display: flex; align-items: center; gap: 9px; }
+[data-theme="light"] .panel-head h3::before {
+  content: ''; flex: 0 0 auto; width: 4px; height: 17px;
+  border-radius: 2px; background: var(--primary-grad);
+}
+[data-theme="light"] .data-table th { background: #edf1f9; }
+[data-theme="light"] .data-table tbody tr:hover { background: #f4f7fd; }
+[data-theme="light"] .btn:hover { box-shadow: 0 3px 10px rgba(35,50,90,.13); }
+[data-theme="light"] .profile-card:hover { box-shadow: 0 12px 30px rgba(35,50,90,.15); }
+[data-theme="light"] .toolbar .btn, [data-theme="light"] .settings-actions .btn { box-shadow: 0 1px 4px rgba(35,50,90,.08); }
+
 /* ===== Arrange dropdown ===== */
 .dropdown { position: relative; display: inline-block; }
 .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; min-width: 210px; padding: 6px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border-strong); box-shadow: var(--shadow-pop); }
