@@ -121,6 +121,18 @@ CREATE TABLE IF NOT EXISTS account_history (
     warnings TEXT DEFAULT NULL,
     INDEX idx_profile_time (profile_id, checked_at),
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ Tab Session Manager (luu/khoi phuc tab theo profile) ============
+CREATE TABLE IF NOT EXISTS tab_sessions (
+    profile_id INT NOT NULL,
+    kind ENUM('current','last_good') NOT NULL DEFAULT 'current',
+    saved_at DATETIME NOT NULL,
+    active_index INT NOT NULL DEFAULT 0,
+    tabs TEXT DEFAULT NULL,
+    fingerprint VARCHAR(64) DEFAULT NULL,
+    PRIMARY KEY (profile_id, kind),
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;-- Dữ liệu mặc định (chạy lần đầu; INSERT IGNORE giữ nguyên giá trị đã sửa)
 INSERT IGNORE INTO settings (skey, svalue) VALUES
     ('chrome_path',   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'),
@@ -159,4 +171,8 @@ INSERT IGNORE INTO settings (skey, svalue) VALUES
     ('layout_keep_inside',        '1'),
     ('layout_disconnect',         'ask'),
     ('layout_main_monitor',       ''),
-    ('layout_controlled_monitors','');
+    ('layout_controlled_monitors',''),
+    ('tab_autosave', '1'),
+    ('tab_autorestore', '1'),
+    ('tab_remember_active', '1'),
+    ('tab_autosave_interval', '30');

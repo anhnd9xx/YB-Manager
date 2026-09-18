@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/../sync/SyncLogger.php';
 
 $action = $_GET['action'] ?? 'open';
 $profileId = (int)($_GET['id'] ?? 0);
@@ -55,7 +56,10 @@ try {
 
 function open_chrome(array $p, ?string $url = null): void
 {
-    // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com)
+    $t0 = microtime(true); // B7: do dispatch time (khong tinh render Chrome)
+    // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com).
+    // Prelaunch restore (neu co session) do launch_chrome lo (inject URLs vao command).
+    $explicitUrl = $url !== null;
     if ($url === null) {
         $url = get_setting('home_url', 'https://www.google.com/');
     }
@@ -117,9 +121,13 @@ function open_chrome(array $p, ?string $url = null): void
         json_out(['ok' => false, 'message' => 'Khong the gan debug port'], 500);
     }
 
-    // Fire-and-forget: dung popen + start /B de khong cho Chrome thoat
+    // Fire-and-forget: dung popen + start /B de khong cho Chrome thoat.
+    // URL chi dinh (Studio/Dashboard) -> skip session inject; mo mac dinh thi
+    // launch_chrome tu inject session (prelaunch restore, khong blank).
+    // LUU Y: dung $explicitUrl (chup TRUOC khi gan home_url), khong dung $url.
     try {
-        launch_chrome($p, $url, $port);
+        launch_chrome($p, $url ?? get_setting('home_url', 'https://www.google.com/'), $port,
+            $explicitUrl ? ['skipSessionInject' => true] : []);
     } catch (RuntimeException $e) {
         json_out(['ok' => false, 'proxy_dead' => true, 'message' => $e->getMessage()], 409);
     }
@@ -144,14 +152,45 @@ function open_chrome(array $p, ?string $url = null): void
 
 function kill_chrome_quiet(array $p): void
 {
+    tab_snapshot_before_close($p);
     kill_chrome_processes($p);
     db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $p['id']]);
 }
 
+/**
+ * Snapshot tab TRUOC KHI dong Chrome (CLOSING -> snapshot -> save).
+ * Timeout ngan (~1.5s): fail thi bo qua, dung last_good lam fallback.
+ * Khong bao gio block dong Chrome.
+ */
+function tab_snapshot_before_close(array $p): void
+{
+    try {
+        $id = (int)($p['id'] ?? 0);
+        $port = (int)($p['debug_port'] ?? 0);
+        if ($id <= 0 || $port <= 0 || !cdp_reachable($port)) return;
+        require_once __DIR__ . '/../sync/TabSessionStore.php';
+        require_once __DIR__ . '/../sync/SyncLogger.php';
+        $t0 = microtime(true);
+        // Pre-close: true-order de giu dung vi tri ke ca da keo-tha tab
+        $snap = TabSessionStore::snapshotLive($id, $port, true);
+        if ($snap === null) return;
+        TabSessionStore::save($id, $snap);
+        $ms = (int)round((microtime(true) - $t0) * 1000);
+        SyncLogger::info('tab_session', "[SESSION] profile=$id port=$port snapshot "
+            . count($snap['tabs']) . " tabs: {$ms}ms (pre-close)", $id);
+    } catch (Throwable $e) {
+        // snapshot fail -> khong block dong Chrome
+    }
+}
+
 function kill_chrome(array $p): void
 {
+    $t0 = microtime(true);
+    tab_snapshot_before_close($p);
     kill_chrome_processes($p);
     db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $p['id']]);
+    SyncLogger::info('browser_perf', '[PERF] close profile #' . (int)$p['id']
+        . ' dispatch: ' . (int)round((microtime(true) - $t0) * 1000) . 'ms');
     log_action((int)$p['id'], 'close', 'Dong chrome');
     json_out(['ok' => true, 'message' => 'Da dong Chrome cho profile: ' . $p['name']]);
 }

@@ -176,8 +176,11 @@ async function loadProfiles() {
 let reflowBaseline = null;
 let reflowPending = null; // {count, ticks}
 function markProfileChanged() {
-  // Mo/dong/xoa trong app: tu dong nhan so luong moi, KHONG hoi reflow (tranh popup vo duyen)
+  // Mo/dong/xoa trong app: lan quan sat KE TIEP tu nhan baseline moi, KHONG hoi
+  // reflow. Dung co thay vi dem 60s giay (Chrome bop setInterval khi tab nen nen
+  // tick den muon, dem gio khong con tac dung). 60s ben duoi chi la backup.
   window.__ytmLastProfileChange = Date.now();
+  window.__ytmAdoptNext = true;
   reflowPending = null;
 }
 function trackReflow() {
@@ -189,7 +192,14 @@ function trackReflow() {
       return;
     }
     if (reflowBaseline === null) { reflowBaseline = n; return; } // baseline lan dau, khong hoi
-    // Thao tac mo/dong trong app <60s: nhan baseline moi im lang (Phase 9 da lo arrange)
+    // Thao tac trong app: nhan baseline o lan quan sat ke tiep (mien nhiem throttle timer)
+    if (window.__ytmAdoptNext) {
+      window.__ytmAdoptNext = false;
+      reflowBaseline = n;
+      reflowPending = null;
+      return;
+    }
+    // Backup: thao tac mo/dong trong app <60s: nhan baseline moi im lang (Phase 9 da lo arrange)
     if (Date.now() - (window.__ytmLastProfileChange || 0) < 60000) {
       reflowBaseline = n;
       reflowPending = null;
@@ -256,10 +266,10 @@ function renderProfiles() {
 
   // chọn tất cả theo trang current
   const pageItems = paginateProfiles();
-  const pageIds = new Set(pageItems.map(p => p.id));
-  const pageAllSelected = pageItems.length > 0 && pageItems.every(p => selectedProfileIds.has(p.id));
+  const pageIds = new Set(pageItems.map(p => Number(p.id)));
+  const pageAllSelected = pageItems.length > 0 && pageItems.every(p => selectedProfileIds.has(Number(p.id)));
   const selAllEl = $('sel-all');
-  if (selAllEl) { selAllEl.checked = pageAllSelected; selAllEl.indeterminate = !pageAllSelected && pageItems.some(p => selectedProfileIds.has(p.id)); }
+  if (selAllEl) { selAllEl.checked = pageAllSelected; selAllEl.indeterminate = !pageAllSelected && pageItems.some(p => selectedProfileIds.has(Number(p.id))); }
   updateSelectedCount();
 
   // summary: tổng số kênh hiện có
@@ -287,8 +297,9 @@ function renderProfiles() {
     const tabInfo = p.debug_port
       ? `<div class="meta-row"><span class="meta-label">Debug port</span><span class="meta-value mono">${p.debug_port}</span></div>`
       : '';
+    const sessInfo = `<div class="meta-row"><span class="meta-label">Tabs</span><span class="meta-value"><button class="btn btn-xs" onclick="openTabsPanel(${p.id})" title="Xem/lưu/khôi phục tabs">${p.tab_count_saved || 0} tabs · Xem</button></span></div>`;
     const accInfo = buildAccountRow(p);
-    const checked = selectedProfileIds.has(p.id);
+    const checked = selectedProfileIds.has(Number(p.id));
     return `
       <div class="profile-card ${checked ? 'card-selected' : ''}">
         <div class="card-check">
@@ -306,6 +317,7 @@ function renderProfiles() {
         <div class="card-meta">
           ${proxyInfo}
           ${tabInfo}
+          ${sessInfo}
           ${accInfo}
         </div>
         <div class="card-actions">
@@ -360,14 +372,16 @@ function reloadProfilesView() {
 }
 
 // ============ SELECT (chọn nhiều kênh) ============
+// Chuan hoa Number het (id tu JSON co the la string, inline onclick truyen number)
 function toggleProfileSelect(id, checked) {
+  id = Number(id);
   if (checked) selectedProfileIds.add(id);
   else selectedProfileIds.delete(id);
   renderProfiles();
 }
 function toggleSelectAll(checked) {
   const pageItems = paginateProfiles();
-  pageItems.forEach(p => { checked ? selectedProfileIds.add(p.id) : selectedProfileIds.delete(p.id); });
+  pageItems.forEach(p => { checked ? selectedProfileIds.add(Number(p.id)) : selectedProfileIds.delete(Number(p.id)); });
   renderProfiles();
 }
 function getSelectedIds() {
@@ -572,10 +586,9 @@ async function openSelected() {
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
   window.__ytmBulkOp = true; // chan reflow xen vao giua bulk launch (Phase 12)
   try {
-    for (const id of ids) {
-      try { await getJson(api + `browser.php?action=open&id=${id}`); } catch (e) {}
-    }
-    toast(`Đã mở ${ids.length} kênh`, 'success');
+    // Pool 5 song song + stagger (mo tuan tu 20 kenh mat hang phut)
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở');
+    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
     markProfileChanged();
     refreshAll();
     await autoArrangeAfterLaunch(ids);
@@ -586,12 +599,30 @@ async function openSelected() {
 async function closeSelected() {
   const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  for (const id of ids) {
-    try { await getJson(api + `browser.php?action=close&id=${id}`); } catch (e) {}
-  }
-  toast(`Đã đóng ${ids.length} kênh`, 'success');
+  const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng');
+  toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
   markProfileChanged();
   refreshAll();
+}
+// Pool dispatch song song co gioi han (B1-B3): toi da 5 request dong thoi,
+// worker thu w nghi w*150ms truoc khi chay (stagger chong spike). Tra ve {ok,fail}.
+// UI khong block: hien tien trinh tren nut refresh qua selected-count.
+const BULK_POOL = 5, BULK_STAGGER_MS = 150;
+async function poolEach(ids, fn, verb) {
+  let i = 0, ok = 0, fail = 0;
+  const el = $('selected-count');
+  const tick = () => { if (el) el.textContent = `${verb || 'Đang xử lý'} ${ok + fail}/${ids.length}…`; };
+  tick();
+  const workers = Array.from({ length: Math.min(BULK_POOL, ids.length) }, async (_, w) => {
+    if (w > 0) await sleep(w * BULK_STAGGER_MS);
+    while (i < ids.length) {
+      const id = ids[i++];
+      try { await fn(id); ok++; } catch (e) { fail++; }
+      tick();
+    }
+  });
+  await Promise.all(workers);
+  return { ok, fail };
 }
 async function deleteSelected() {
   if (!selectedProfileIds.size) { toast('Chưa chọn kênh nào', 'error'); return; }
@@ -706,6 +737,72 @@ async function openAccountDrawer(id) {
   } catch (e) {
     toast('Lỗi tải chi tiết', 'error');
   }
+}
+// ============ TAB SESSION (panel trong drawer chung) ============
+let tabsPanelId = 0;
+async function openTabsPanel(id) {
+  tabsPanelId = id;
+  const p = profiles.find(x => x.id === id);
+  $('acc-drawer-title').textContent = 'TABS — ' + (p ? p.name : ('#' + id));
+  $('acc-drawer-body').innerHTML = '<p class="muted">Đang tải tabs...</p>';
+  setDrawerFoot('Lưu phiên', 'Khôi phục', 'Xóa phiên', saveTabsPanel, restoreTabsPanel, clearTabsPanel);
+  $('acc-drawer-wrap').classList.remove('hidden');
+  await refreshTabsPanel();
+}
+function setDrawerFoot(t1, t2, t3, f1, f2, f3) {
+  const b1 = $('acc-drawer-eval'), b2 = $('acc-drawer-open'), b3 = $('acc-drawer-hist');
+  if (b1) { b1.textContent = t1; b1.onclick = f1; b1.disabled = false; }
+  if (b2) { b2.textContent = t2; b2.onclick = f2; }
+  if (b3) { b3.textContent = t3; b3.onclick = f3; }
+}
+async function refreshTabsPanel() {
+  const id = tabsPanelId;
+  if (!id) return;
+  try {
+    const [live, saved] = await Promise.all([
+      getJson(api + `tabsessions.php?action=tabs&id=${id}`),
+      getJson(api + `tabsessions.php?action=get&id=${id}`)
+    ]);
+    const tabs = (live.ok && live.data && live.data.tabs) ? live.data.tabs : [];
+    const running = !!(live.ok && live.data && live.data.running);
+    const cur = saved.ok && saved.data ? saved.data.current : null;
+    const good = saved.ok && saved.data ? saved.data.last_good : null;
+    const esc2 = (s) => escapeHtml(s || '');
+    let html = `<div class="sync-url-row" style="padding:0 0 8px"><button class="btn btn-sm" onclick="refreshTabsPanel()">↻ Làm mới</button>`
+      + `<span class="summary-text">${running ? tabs.length + ' tab đang mở' : 'Chrome chưa chạy'}</span></div>`;
+    html += tabs.length
+      ? tabs.map((t, i) => `<div class="sync-tab-item"><span>${i === (live.data.active || 0) ? '▶' : '○'}</span>`
+        + `<div class="sync-tab-info"><div class="sync-tab-title">${esc2(t.title)}</div>`
+        + `<div class="sync-tab-url">${esc2(t.host || t.url)}</div></div></div>`).join('')
+      : '<div class="sync-empty">Không có tab nào (mở Chrome để xem trực tiếp)</div>';
+    const fmt = (s) => s ? `<div class="sync-label">Đã lưu: ${esc2(s.saved_at)} (${(s.tabs || []).length} tabs)</div>` : '';
+    html += fmt(cur) + fmt(good);
+    $('acc-drawer-body').innerHTML = html;
+  } catch (e) {
+    $('acc-drawer-body').innerHTML = '<p class="muted">Lỗi tải tabs</p>';
+  }
+}
+async function saveTabsPanel() {
+  if (!tabsPanelId) return;
+  const res = await sendJson(api + 'tabsessions.php?action=save', { id: tabsPanelId });
+  toast(res.ok ? `Đã lưu ${res.count} tabs (${res.ms}ms)` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  refreshTabsPanel();
+  refreshAll();
+}
+async function restoreTabsPanel() {
+  if (!tabsPanelId) return;
+  const res = await sendJson(api + 'tabsessions.php?action=restore', { id: tabsPanelId });
+  toast(res.ok ? `Đã khôi phục ${res.count} tabs (${res.ms}ms)` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  refreshTabsPanel();
+}
+async function clearTabsPanel() {
+  if (!tabsPanelId) return;
+  confirmDelete('Xóa session tabs đã lưu của kênh này?', async () => {
+    const res = await sendJson(api + 'tabsessions.php?action=clear', { id: tabsPanelId });
+    toast(res.ok ? 'Đã xóa phiên' : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+    refreshTabsPanel();
+    refreshAll();
+  });
 }
 function assignProxySelected() {
   const ids = getSelectedIds();
@@ -945,11 +1042,8 @@ async function openAllProfiles() {
   const ids = profiles.map(p => p.id);
   window.__ytmBulkOp = true;
   try {
-    for (const p of profiles) {
-      try { await getJson(api + `browser.php?action=open&id=${p.id}`); } catch (e) {}
-      await sleep(700);
-    }
-    toast(`Đã mở ${profiles.length} kênh`, 'success');
+    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở');
+    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
     markProfileChanged();
     refreshAll();
     await autoArrangeAfterLaunch(ids);
@@ -958,10 +1052,9 @@ async function openAllProfiles() {
   }
 }
 async function closeAllProfiles() {
-  for (const p of profiles) {
-    try { await getJson(api + `browser.php?action=close&id=${p.id}`); } catch (e) {}
-  }
-  toast('Đã đóng tất cả kênh', 'success');
+  const ids = profiles.map(p => p.id);
+  const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng');
+  toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
   markProfileChanged();
   refreshAll();
 }
@@ -1195,14 +1288,19 @@ function setProxyPerPage(n) {
 
 // ---- chọn nhiều proxy ----
 function toggleProxySelect(id, checked) {
+  id = Number(id);
   if (checked) selectedProxies.add(id); else selectedProxies.delete(id);
   syncProxySelectUI();
 }
 function toggleSelectAllProxies(checked) {
-  selectedProxies = checked ? new Set(proxies.map(p => p.id)) : new Set();
+  // Chuan hoa Number het (id tu JSON co the la string) de so sanh khong lech kieu
+  selectedProxies = checked ? new Set(proxies.map(p => Number(p.id))) : new Set();
   syncProxySelectUI();
 }
 function syncProxySelectUI() {
+  // Tu chua cac id cu dang string (da tick tu truoc) -> chuan hoa 1 lan
+  const norm = new Set([...selectedProxies].map(Number));
+  selectedProxies = norm;
   const count = selectedProxies.size;
   const el = $('selected-proxies-count');
   if (el) el.textContent = count ? `Đã chọn ${count}` : '';
@@ -1214,11 +1312,11 @@ function syncProxySelectUI() {
   if (toolAll) toolAll.checked = all;
 
   document.querySelectorAll('.px-check').forEach(cb => {
-    cb.checked = selectedProxies.has(parseInt(cb.dataset.id, 10));
+    cb.checked = selectedProxies.has(Number(cb.dataset.id));
   });
   document.querySelectorAll('tr.row-selected').forEach(tr => tr.classList.remove('row-selected'));
   proxies.forEach(p => {
-    if (selectedProxies.has(p.id)) {
+    if (selectedProxies.has(Number(p.id))) {
       const row = document.querySelector(`td input.px-check[data-id="${p.id}"]`);
       if (row) row.closest('tr').classList.add('row-selected');
     }
@@ -1555,7 +1653,7 @@ function renderSyn(full) {
       acts.push(`<button class="btn btn-sm" onclick="synSetMainOne(${r.id})">Set MAIN</button>`);
     }
     return `<tr>
-      <td>${ckHtml(synSelected.has(r.id), `onchange="synToggle(${r.id}, this.checked)"`)}</td>
+      <td>${ckHtml(synSelected.has(Number(r.id)), `onchange="synToggle(${r.id}, this.checked)"`)}</td>
       <td>${i + 1}</td>
       <td>${escapeHtml(r.name)}</td>
       <td class="mono">${win}</td>
@@ -1564,14 +1662,21 @@ function renderSyn(full) {
       <td><div class="sync-actions">${acts.join(' ')}</div></td>
     </tr>`;
   }).join('');
+  const synAll = $('syn-check-all');
+  if (synAll) {
+    const allIds = synRoles.map(r => Number(r.id));
+    const allOn = allIds.length > 0 && allIds.every(id => synSelected.has(id));
+    synAll.checked = allOn;
+    synAll.indeterminate = !allOn && allIds.some(id => synSelected.has(id));
+  }
 }
 
-function synToggle(id, on) { on ? synSelected.add(id) : synSelected.delete(id); }
+function synToggle(id, on) { id = Number(id); on ? synSelected.add(id) : synSelected.delete(id); }
 function synToggleAll(on) {
-  synSelected = new Set(on ? synRoles.map(r => r.id) : []);
+  synSelected = new Set(on ? synRoles.map(r => Number(r.id)) : []);
   renderSyn(false);
 }
-function synSelectAll() { synSelected = new Set(synRoles.map(r => r.id)); renderSyn(false); }
+function synSelectAll() { synSelected = new Set(synRoles.map(r => Number(r.id))); renderSyn(false); }
 function synSelectNone() { synSelected = new Set(); renderSyn(false); }
 function synSelectInvert() {
   const all = new Set(synRoles.map(r => r.id));
@@ -1738,6 +1843,12 @@ async function loadSettings() {
       $('set-proxy-timeout').value = settings.proxy_timeout || 5;
       $('set-auto-refresh').checked = !!settings.auto_refresh;
       applyAutoRefresh();
+      if ($('set-tab-autosave')) {
+        $('set-tab-autosave').checked = settings.tab_autosave !== false;
+        $('set-tab-autorestore').checked = settings.tab_autorestore !== false;
+        $('set-tab-active').checked = settings.tab_remember_active !== false;
+        $('set-tab-interval').value = settings.tab_autosave_interval ?? 30;
+      }
       loadWindowSettingsForm(settings);
       loadLayoutSettingsForm(settings);
       loadAccountSettingsForm(settings);
@@ -1756,6 +1867,14 @@ async function saveSettings() {
   if ($('win-preset-grid')) Object.assign(data, collectWindowSettings());
   if ($('set-layout-mode')) Object.assign(data, collectLayoutSettings());
   if ($('set-acc-days')) Object.assign(data, collectAccountSettings());
+  if ($('set-tab-autosave')) {
+    Object.assign(data, {
+      tab_autosave: $('set-tab-autosave').checked ? '1' : '0',
+      tab_autorestore: $('set-tab-autorestore').checked ? '1' : '0',
+      tab_remember_active: $('set-tab-active').checked ? '1' : '0',
+      tab_autosave_interval: parseInt($('set-tab-interval').value, 10) || 30
+    });
+  }
   if (!data.chrome_path) { toast('Nhập đường dẫn Chrome', 'error'); return; }
   if ($('win-preset-grid')) {
     const werr = validateWindowForm(data);

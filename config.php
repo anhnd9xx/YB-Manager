@@ -659,7 +659,7 @@ function channel_fingerprint(int $profileId): array
  * Dung chung de launch Chrome (browser.php).
  * Gom cac cuoc goi chung: user-agent, WebRTC, remote-debugging, proxy.
  */
-function build_chrome_command(array $p, ?string $url = null, ?int $port = null, ?int $relayPort = null): array
+function build_chrome_command(array $p, ?string $url = null, ?int $port = null, ?int $relayPort = null, array $startupUrls = []): array
 {
     // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com)
     if ($url === null) {
@@ -725,7 +725,14 @@ function build_chrome_command(array $p, ?string $url = null, ?int $port = null, 
         $cmd[] = '--proxy-bypass-list=<local>';
     }
 
-    $cmd[] = $url;
+    // Prelaunch session restore: append TOAN BO URLs theo dung thu tu de Chrome mo
+    // ngay N tab tu frame dau (khong blank, khong NTP thua, khong navigate sau).
+    $startupUrls = array_values(array_filter(array_map(fn($u) => trim((string)$u), $startupUrls)));
+    if ($startupUrls) {
+        foreach ($startupUrls as $su) $cmd[] = $su;
+    } else {
+        $cmd[] = $url;
+    }
     return $cmd;
 }
 
@@ -776,8 +783,11 @@ function ensure_chrome_profile_name(array $p): void
 
 /** Fire-and-forget launch Chrome (khong cho thoat), dung cho browser.php.
  * Voi proxy co credential: start_proxy_relay BEEN LA guard song/chet cua proxy
- * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep). */
-function launch_chrome(array $p, string $url, ?int $port): void
+ * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep).
+ * $opts['skipSessionInject']=true: mo URL chi dinh (Studio/Dashboard), khong inject session.
+ * Mac dinh: prelaunch restore - load session tu DB (nhanh, khong can Chrome chay)
+ * va append URLs vao command de Chrome mo dung tabs ngay frame dau. */
+function launch_chrome(array $p, string $url, ?int $port, array $opts = []): void
 {
     $relayPort = start_proxy_relay($p);
     // proxy co credential nhung relay khong len duoc (proxy chet/hong) -> dung mo Chrome,
@@ -789,7 +799,41 @@ function launch_chrome(array $p, string $url, ?int $port): void
             'Proxy cua kenh khong phan hoi nen khong mo duoc Chrome. Gan proxy khac hoac thu lai.'
         );
     }
-    $cmd = build_chrome_command($p, $url, $port, $relayPort);
+    // Prelaunch session restore (§1-2): doc session TRUOC khi Popen, inject URLs vao command.
+    $startupUrls = [];
+    $restoreSnapFile = null;
+    if (empty($opts['skipSessionInject'])) {
+        try {
+            require_once __DIR__ . '/sync/SettingsService.php';
+            require_once __DIR__ . '/sync/TabSessionStore.php';
+            require_once __DIR__ . '/sync/SyncLogger.php';
+            $autoRes = get_setting('tab_autorestore', '1');
+            if ($autoRes === '1' || $autoRes === 'true') {
+                $sess = TabSessionStore::getUrlsForLaunch((int)($p['id'] ?? 0));
+                if ($sess !== null && !empty($sess['urls'])) {
+                    $startupUrls = $sess['urls'];
+                    SyncLogger::info('tab_session', '[SESSION] #' . (int)($p['id'] ?? 0)
+                        . ' loaded ' . count($startupUrls) . ' URLs before launch', (int)($p['id'] ?? 0));
+                }
+            }
+        } catch (Throwable $e) {
+            $startupUrls = [];
+        }
+    }
+    $cmd = build_chrome_command($p, $url, $port, $relayPort, $startupUrls);
+    if ($startupUrls) {
+        SyncLogger::info('tab_session', '[LAUNCH] #' . (int)($p['id'] ?? 0)
+            . ' launching with ' . count($startupUrls) . ' startup tabs', (int)($p['id'] ?? 0));
+        SyncLogger::info('tab_session', '[SESSION] #' . (int)($p['id'] ?? 0)
+            . ' URLs injected at process launch', (int)($p['id'] ?? 0));
+        // Snapshot cho activator (giong apply_window: file thay argv)
+        $restoreSnapFile = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR
+            . 'ytm_restore_' . (int)($p['id'] ?? 0) . '_' . getmypid() . '.json';
+        if (@file_put_contents($restoreSnapFile, json_encode(
+            ['urls' => $startupUrls, 'activeUrl' => $sess['activeUrl'] ?? null])) === false) {
+            $restoreSnapFile = null;
+        }
+    }
     $quoted = array_map(function ($arg) {
         return '"' . $arg . '"';
     }, $cmd);
@@ -805,6 +849,22 @@ function launch_chrome(array $p, string $url, ?int $port): void
     }
     // relay watchdog: tu bật lai relay khi chet (chay ring, de phong ko phai mo lai kenh)
     start_relay_watchdog();
+    // Tab Session activator (fire-and-forget): chi kich hoat tab cu, KHONG
+    // navigate/create (URLs da inject vao command). Khong session -> khong spawn.
+    try {
+        if ($restoreSnapFile !== null) {
+            $php = php_cli_binary();
+            $scr = __DIR__ . '/bin/restore_tabs.php';
+            if ($php !== '' && is_file($scr)) {
+                $cmdR = 'start "" /B "' . $php . '" -f "' . $scr . '" -- ' . (int)($p['id'] ?? 0) . ' "' . $restoreSnapFile . '" > NUL 2>&1';
+                pclose(popen($cmdR, 'r'));
+            } else {
+                @unlink($restoreSnapFile);
+            }
+        }
+    } catch (Throwable $e) {
+        // activator loi khong duoc pha launch Chrome
+    }
     // Global Window Settings (SSOT): snapshot TAI THOI DIEM launch roi giao cho
     // tien trinh nen apply (poll HWND 100ms/timeout 10s). Fire-and-forget: khong bao gio
     // block/throw launch chinh. Fixed OFF + Auto -> bo qua de giu hanh vi cu.
@@ -829,6 +889,24 @@ function launch_chrome(array $p, string $url, ?int $port): void
     }
 }
 
+/** Con process Chrome nao cua user_data_dir khong? (1 luot WMI, dung de poll sau kill) */
+function chrome_processes_alive(string $udir): bool
+{
+    $udir = trim($udir);
+    if ($udir === '') return false;
+    $like = '*' . str_replace("'", "''", $udir) . '*';
+    $ps = 'powershell -NoProfile -Command '
+        . '"Get-CimInstance Win32_Process -Filter \"Name=' . "'" . 'chrome.exe' . "'" . '\" '
+        . '| Where-Object { $_.CommandLine -like ' . "'" . $like . "'" . ' } '
+        . '| Select-Object -First 1 | ForEach-Object { $_.ProcessId }"';
+    $out = [];
+    @exec($ps, $out);
+    foreach ($out as $line) {
+        if (trim((string)$line) !== '') return true;
+    }
+    return false;
+}
+
 /** Dong toan bo process Chrome cua 1 profile (theo user_data_dir) */
 function kill_chrome_processes(array $p): void
 {
@@ -838,8 +916,12 @@ function kill_chrome_processes(array $p): void
         . '| Where-Object { $_.CommandLine -like ' . "'" . '*' . $udir . '*' . "'" . ' } '
         . '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"';
     exec($ps);
-    // cho process thoat het truoc khi launch instance moi
-    usleep(700000);
+    // Cho process thoat that (poll 100ms, toi da ~2s) thay vi sleep mu 700ms:
+    // may nhanh ve ngay sau 100ms, may cham van duoc cho du.
+    for ($i = 0; $i < 20; $i++) {
+        if (!chrome_processes_alive((string)$udir)) break;
+        usleep(100000);
+    }
     // don tab title keeper cua kenh nay (tab moi khong con can gan ten)
     kill_tab_title_keeper((int)($p['debug_port'] ?? 0));
     // don relay neu khong con profile nao dung proxy nay

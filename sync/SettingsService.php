@@ -470,10 +470,20 @@ class SyncSettingsService
         ]];
     }
 
-    /** Default Account Evaluation policy (diem noi bo, khong phai Google Trust). */
-    public static function accountDefaults(): array
+    /** Default Tab Session (luu/khoi phuc tab theo profile). */
+    public static function tabDefaults(): array
     {
         return [
+            'tab_autosave' => '1',
+            'tab_autorestore' => '1',
+            'tab_remember_active' => '1',
+            'tab_autosave_interval' => '30',
+        ];
+    }
+
+    /** Default Account Evaluation policy (diem noi bo, khong phai Google Trust). */
+    public static function accountDefaults(): array
+    {        return [
             'acc_min_days' => '7',
             'acc_min_checks' => '10',
             'acc_ready_stability' => '80',

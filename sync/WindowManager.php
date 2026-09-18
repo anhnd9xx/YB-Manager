@@ -101,4 +101,60 @@ class SyncWindowManager
     {
         return self::control($hwnd, 'front');
     }
+
+    /**
+     * Apply NHIEU rect trong 1 batch duy nhat (B5-B6): 1 process powershell,
+     * DeferWindowPos + NOACTIVATE (khong cuop focus). Loi 1 window khong lan.
+     * @param array $rects [{hwnd,x,y,w,h}, ...]
+     * @return array hwnd(string) => ['ok'=>bool,'error'=>?string,'rect'=>?array]
+     */
+    public static function applyLayoutBatch(array $rects): array
+    {
+        $out = [];
+        $items = [];
+        foreach ($rects as $r) {
+            $hwnd = (int)($r['hwnd'] ?? 0);
+            if ($hwnd <= 0) continue;
+            $items[] = ['hwnd' => $hwnd, 'x' => (int)($r['x'] ?? 0), 'y' => (int)($r['y'] ?? 0),
+                        'w' => (int)($r['w'] ?? 0), 'h' => (int)($r['h'] ?? 0)];
+            $out[(string)$hwnd] = ['ok' => false, 'error' => 'Chua apply', 'rect' => null];
+        }
+        if (!$items) return $out;
+        $tmp = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_layout_' . getmypid() . '.json';
+        try {
+            if (@file_put_contents($tmp, json_encode($items)) === false) {
+                foreach ($out as $k => &$v) $v['error'] = 'Khong ghi duoc input batch';
+                unset($v);
+                return $out;
+            }
+            $script = __DIR__ . '/win32_apply_layout.ps1';
+            $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"'
+                . ' -InputFile "' . $tmp . '"';
+            $json = @shell_exec($cmd);
+            $r = is_string($json) ? json_decode(trim($json), true) : null;
+            if (!is_array($r) || !isset($r['results']) || !is_array($r['results'])) {
+                SyncLogger::warn('window_batch', 'Batch script khong tra ve JSON');
+                foreach ($out as $k => &$v) $v['error'] = 'Batch script khong phan hoi';
+                unset($v);
+                return $out;
+            }
+            foreach ($r['results'] as $one) {
+                $k = (string)(int)($one['hwnd'] ?? 0);
+                if (!isset($out[$k])) continue;
+                $out[$k] = ['ok' => !empty($one['ok']), 'error' => $one['error'] ?? null,
+                            'rect' => $one['rect'] ?? null];
+                if (empty($one['ok'])) {
+                    SyncLogger::warn('window_batch', "Batch hwnd=$k that bai: " . ($one['error'] ?? ''));
+                }
+            }
+            return $out;
+        } catch (Throwable $e) {
+            SyncLogger::error('window_batch', 'Exception batch apply', null, $e);
+            foreach ($out as $k => &$v) $v['error'] = mb_substr($e->getMessage(), 0, 200);
+            unset($v);
+            return $out;
+        } finally {
+            @unlink($tmp);
+        }
+    }
 }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260917s">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260917y">
 </head>
 <body>
 
@@ -334,6 +334,16 @@
               <input type="checkbox" id="set-auto-refresh">
               <span>Tự động làm mới trạng thái mỗi 15 giây</span>
             </label>
+
+            <div class="win-group-title">Phiên tab (Tab Session)</div>
+            <div class="win-row" style="flex-wrap:wrap;gap:8px">
+              <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-tab-autosave" checked><span>Tự lưu tabs</span></label>
+              <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-tab-autorestore" checked><span>Tự khôi phục tabs</span></label>
+              <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-tab-active" checked><span>Nhớ tab đang active</span></label>
+            </div>
+            <div class="win-row">
+              <div class="win-field"><label>Autosave mỗi (giây, 10–3600)</label><input type="number" id="set-tab-interval" min="10" max="3600" value="30"></div>
+            </div>
 
             <div class="settings-actions">
               <button class="btn btn-primary" onclick="saveSettings()">Lưu cài đặt</button>
@@ -842,6 +852,6 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260917s"></script>
+<script src="assets/js/app.js?v=20260917y"></script>
 </body>
 </html>

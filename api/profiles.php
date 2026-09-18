@@ -9,6 +9,7 @@ try {
     switch ($action) {
         case 'list':
             require_once __DIR__ . '/../sync/AccountRepository.php';
+            require_once __DIR__ . '/../sync/TabSessionStore.php';
             AccountRepository::ensureAll();
             $profiles = db()->query(
                 'SELECT p.*, pr.host AS proxy_host, pr.port AS proxy_port, pr.protocol AS proxy_protocol,
@@ -26,8 +27,12 @@ try {
                  ORDER BY p.id DESC'
             )->fetchAll();
             // Dong bo trang thai voi thuc te (Chrome bi tat/ngat tay thi cap nhat lai)
+            $tabCounts = TabSessionStore::counts(array_map(fn($r) => (int)$r['id'], $profiles));
             foreach ($profiles as &$row) {
                 $row['status'] = refresh_profile_status($row);
+                $tc = $tabCounts[(int)$row['id']] ?? ['count' => 0, 'saved_at' => null];
+                $row['tab_count_saved'] = (int)$tc['count'];
+                $row['tab_saved_at'] = $tc['saved_at'];
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

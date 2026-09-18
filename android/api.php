@@ -163,7 +163,7 @@ if ($act === 'forward') {
 
 if ($act === 'newtab') {
     $url = (string)($_POST['url'] ?? 'https://www.youtube.com');
-    $ctx = stream_context_create(['http' => ['timeout' => 3, 'ignore_errors' => true]]);
+    $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => 3, 'ignore_errors' => true]]);
     $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
     $t = json_decode((string)$raw, true);
     $newId = is_array($t) && !empty($t['id']) ? $t['id'] : null;

@@ -74,7 +74,8 @@ class AccountDataCollector
 
     private static function openTab(int $port, string $url): ?string
     {
-        $ctx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
+        // PUT: Chrome moi tra 405 cho GET /json/new
+        $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => 5, 'ignore_errors' => true]]);
         $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
         $t = json_decode((string)$raw, true);
         return is_array($t) && !empty($t['id']) ? (string)$t['id'] : null;

@@ -572,6 +572,13 @@ body {
 .sync-url-row { display: flex; gap: 10px; padding: 14px 16px; align-items: center; }
 .sync-label { font-size: 12px; color: var(--muted); font-weight: 600; }
 .sync-actions { display: flex; gap: 6px; }
+/* list tab (drawer tabs + preview) */
+.sync-tab-item { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+.sync-tab-item:last-child { border-bottom: none; }
+.sync-tab-info { flex: 1; min-width: 0; }
+.sync-tab-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sync-tab-url { font-size: 11.5px; color: var(--muted); font-family: Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sync-empty { color: var(--muted); text-align: center; padding: 20px; font-size: 13px; }
 
 /* ================= SETTINGS ================= */
 .settings-form { padding: 18px 20px; max-width: 620px; }

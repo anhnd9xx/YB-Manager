@@ -148,8 +148,12 @@ try {
             }
             if (!empty($b['confirmed'])) $opts['confirmed'] = true;
             if (!empty($b['dryRun'])) $opts['dryRun'] = true;
+            $tArrange = microtime(true);
             $r = $pids ? SyncWindowLayoutManager::arrange($pids, $opts)
                        : SyncWindowLayoutManager::arrangeRunning(null, $opts);
+            SyncLogger::info('layout_perf', '[PERF] arrange request: '
+                . (int)round((microtime(true) - $tArrange) * 1000) . 'ms'
+                . ' windows=' . count($r['session']['windows'] ?? []));
             $code = ($r['ok'] || ($r['partial'] ?? false) || !empty($r['dryRun'])) ? 200 : 400;
             $out = ['ok' => $r['ok'] || ($r['partial'] ?? false), 'partial' => $r['partial'] ?? false,
                     'message' => $r['message'], 'session' => $r['session'], 'results' => $r['results']];

@@ -166,9 +166,33 @@ class SyncWindowLayoutManager
                 SyncLogger::debug('layout_candidate', '[Layout] Candidate: ' . json_encode($c));
             }
         }
-        SyncLogger::info('layout_apply', '[Layout] Applying ' . count($plan['slots']) . ' slots');
+        SyncLogger::info('layout_apply', '[Layout] Applying ' . count($plan['slots']) . ' slots (1 batch)');
 
-        // 3) Apply tung slot (re-validate HWND truoc moi cai: window dong giua chung -> skip)
+        // 3) Apply 1 BATCH duy nhat (DeferWindowPos, khong cuop focus).
+        // Re-validate HWND ngay truoc batch qua discovery tuoi (window dong giua chung -> skip).
+        $tBatch = microtime(true);
+        $freshByHwnd = [];
+        try {
+            foreach (SyncWindowDiscovery::discover(false)['windows'] as $w) {
+                $freshByHwnd[$w->hwnd] = true;
+            }
+        } catch (Throwable $e) {
+        }
+        $batchIn = [];
+        $skipped = [];
+        foreach ($live as $i => $w) {
+            $slot = $plan['slots'][$i] ?? null;
+            if ($slot === null) break;
+            if (!isset($freshByHwnd[(int)$w['hwnd']])) {
+                $skipped[] = $i;
+                continue;
+            }
+            $batchIn[] = ['hwnd' => (int)$w['hwnd'], 'x' => (int)$slot['x'], 'y' => (int)$slot['y'],
+                          'w' => (int)$slot['w'], 'h' => (int)$slot['h']];
+        }
+        $batchOut = SyncWindowManager::applyLayoutBatch($batchIn);
+        $batchMs = (int)round((microtime(true) - $tBatch) * 1000);
+        SyncLogger::info('layout_perf', '[PERF] batch arrange ' . count($batchIn) . ' windows: ' . $batchMs . 'ms');
         $results = [];
         $okCount = 0;
         foreach ($live as $i => $w) {
@@ -176,26 +200,19 @@ class SyncWindowLayoutManager
             if ($slot === null) break;
             $res = ['profileId' => $w['profileId'], 'profileName' => $w['profileName'],
                     'hwnd' => $w['hwnd'], 'slot' => $slot, 'ok' => false, 'error' => null, 'rect' => null];
-            try {
-                $cur = SyncWindowManager::findWindow((int)$w['hwnd']);
-                if ($cur === null) {
-                    $res['error'] = 'HWND khong con (window da dong?)';
-                    SyncLogger::warn('layout_apply', "[Layout] Skip profile #{$w['profileId']}: HWND mat", (int)$w['profileId']);
+            if (in_array($i, $skipped, true)) {
+                $res['error'] = 'HWND khong con (window da dong?)';
+                SyncLogger::warn('layout_apply', "[Layout] Skip profile #{$w['profileId']}: HWND mat", (int)$w['profileId']);
+            } else {
+                $one = $batchOut[(string)(int)$w['hwnd']] ?? null;
+                if ($one !== null && !empty($one['ok'])) {
+                    $res['ok'] = true;
+                    $res['rect'] = $one['rect'];
+                    $okCount++;
                 } else {
-                    $r = SyncWindowManager::moveResize((int)$w['hwnd'],
-                        (int)$slot['x'], (int)$slot['y'], (int)$slot['w'], (int)$slot['h']);
-                    if ($r['ok']) {
-                        $res['ok'] = true;
-                        $res['rect'] = $r['rect'] ?? null;
-                        $okCount++;
-                    } else {
-                        $res['error'] = (string)($r['error'] ?? 'moveResize that bai');
-                        SyncLogger::warn('layout_apply', "[Layout] profile #{$w['profileId']}: " . $res['error'], (int)$w['profileId']);
-                    }
+                    $res['error'] = (string)(($one['error'] ?? null) ?: 'moveResize that bai');
+                    SyncLogger::warn('layout_apply', "[Layout] profile #{$w['profileId']}: " . $res['error'], (int)$w['profileId']);
                 }
-            } catch (Throwable $e) {
-                $res['error'] = mb_substr($e->getMessage(), 0, 200);
-                SyncLogger::error('layout_apply', "[Layout] profile #{$w['profileId']} exception", (int)$w['profileId'], $e);
             }
             $results[] = $res;
         }

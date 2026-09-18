@@ -66,6 +66,14 @@ try {
                 if (!$v['ok']) json_out(['ok' => false, 'message' => implode('; ', $v['errors'])], 400);
                 foreach ($v['normalized'] as $k => $sv) $b[$k] = $sv;
             }
+            // Validate nhom tab session (interval 10..3600s)
+            if (array_key_exists('tab_autosave_interval', $b)) {
+                $iv = (int)$b['tab_autosave_interval'];
+                if ($iv < 10 || $iv > 3600) {
+                    json_out(['ok' => false, 'message' => 'tab_autosave_interval phai 10..3600'], 400);
+                }
+                $b['tab_autosave_interval'] = (string)$iv;
+            }
             $update = db()->prepare(
                 'INSERT INTO settings (skey, svalue) VALUES (?, ?)
                  ON DUPLICATE KEY UPDATE svalue = VALUES(svalue)'
@@ -100,7 +108,7 @@ function default_settings(): array
         'home_url'      => 'https://www.google.com/',
         'proxy_timeout' => '5',
         'auto_refresh'  => '1',
-    ], SyncSettingsService::defaults());
+    ], SyncSettingsService::defaults(), SyncSettingsService::tabDefaults());
 }
 
 function normalize_setting(string $key, ?string $value)
@@ -118,6 +126,9 @@ function normalize_setting(string $key, ?string $value)
         case 'layout_keep_inside':
         case 'acc_eval_on_start':
         case 'acc_background':
+        case 'tab_autosave':
+        case 'tab_autorestore':
+        case 'tab_remember_active':
             return $value === '1' || $value === 'true';
         case 'proxy_timeout':
         case 'window_width':
@@ -145,6 +156,7 @@ function normalize_setting(string $key, ?string $value)
         case 'acc_w_youtube':
         case 'acc_w_rate':
         case 'acc_w_consec':
+        case 'tab_autosave_interval':
             return (int)$value;
         default:
             return $value;
