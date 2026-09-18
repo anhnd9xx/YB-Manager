@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260917y">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260918e">
 </head>
 <body>
 
@@ -22,32 +22,32 @@
 
     <nav class="side-nav">
       <div class="nav-label">Quản lý</div>
-      <button class="nav-btn active" data-view="dashboard">
+      <button class="nav-btn active" data-view="dashboard" data-tip="Tổng quan">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
         <span>Tổng quan</span>
       </button>
-      <button class="nav-btn" data-view="profiles">
+      <button class="nav-btn" data-view="profiles" data-tip="Kênh">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
         <span>Kênh</span>
         <span id="nav-profile-count" class="nav-count hidden"></span>
       </button>
-      <button class="nav-btn" data-view="proxies">
+      <button class="nav-btn" data-view="proxies" data-tip="Proxy">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-1.8C18 6.57 15.35 4 12 4s-6 2.57-6 6.2c0 2.34 1.95 5.44 6 9.14 4.05-3.7 6-6.8 6-9.14zM12 2c4.2 0 8 3.22 8 8.2 0 3.32-2.67 7.25-8 11.8-5.33-4.55-8-8.48-8-11.8C4 5.22 7.8 2 12 2z"/></svg>
         <span>Proxy</span>
         <span id="nav-proxy-count" class="nav-count hidden"></span>
       </button>
-      <button class="nav-btn" data-view="synchronize">
+      <button class="nav-btn" data-view="synchronize" data-tip="Synchronize">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8 11H5v2h3v3h2v-3h3v-2h-3V8H8v3zm8-8H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H4V5h12v12zm4-13v9h-2V6l-2 2V5l3.5-3L22 5v3l-2-2v7h-2z"/></svg>
         <span>Synchronize</span>
       </button>
-      <button class="nav-btn" data-view="logs">
+      <button class="nav-btn" data-view="logs" data-tip="Nhật ký">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
         <span>Nhật ký</span>
       </button>
     </nav>
 
     <div class="side-footer">
-      <button class="nav-btn" data-view="settings">
+      <button class="nav-btn" data-view="settings" data-tip="Cài đặt">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
         <span>Cài đặt</span>
       </button>
@@ -64,7 +64,7 @@
           <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
         </button>
         <button class="btn btn-sm" id="btn-refresh" title="Làm mới dữ liệu">
-          <span class="refresh-spin">⟳</span> Làm mới
+          <span class="refresh-spin">⟳</span><span class="lbl"> Làm mới</span>
         </button>
         <button class="btn btn-sm btn-icon" id="btn-theme" title="Đổi nền sáng/tối">🌙</button>
         <span id="server-status" class="badge badge-warn">Đang kiểm tra...</span>
@@ -96,39 +96,119 @@
             <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
             Tạo kênh
           </button>
-          <button class="btn" onclick="openAllProfiles()">Mở tất cả</button>
-          <button class="btn" onclick="closeAllProfiles()">Đóng tất cả</button>
+          <button class="btn btn-sm tb-sec" onclick="openAllProfiles()">Mở tất cả</button>
+          <button class="btn btn-sm tb-sec" onclick="closeAllProfiles()">Đóng tất cả</button>
           <div class="sel-divider"></div>
           <label class="sel-all-label"><span class="ck"><input type="checkbox" id="sel-all" onchange="toggleSelectAll(this.checked)"><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></span> Chọn tất cả</label>
           <button class="btn btn-sm" onclick="openSelected()">▶ Mở đã chọn</button>
           <button class="btn btn-sm" onclick="closeSelected()">■ Đóng đã chọn</button>
-          <button class="btn btn-sm" onclick="assignProxySelected()">⇄ Gán proxy</button>
-          <button class="btn btn-sm" onclick="evaluateSelected()" title="Đánh giá account đã chọn">✓ Đánh giá</button>
-          <button class="btn btn-sm" onclick="refreshAll(true)" title="Tải lại dữ liệu mới nhất">↻ Làm mới</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteSelected()">🗑 Xóa đã chọn</button>
-          <div class="dropdown">
-            <button class="btn btn-sm" id="arrange-btn" onclick="toggleArrangeMenu(event)">🧩 Sắp xếp ▾</button>
-            <div class="dropdown-menu hidden" id="arrange-menu">
-              <button onclick="arrangeSmart()">✨ Sắp xếp thông minh</button>
-              <button onclick="arrangeSelected()">☑ Xếp kênh đã chọn</button>
-              <button onclick="arrangeRunning()">▶ Xếp kênh đang chạy</button>
-              <div class="dropdown-sep"></div>
-              <button onclick="arrangeWithMode('grid')">▦ Lưới (Grid)</button>
-              <button onclick="arrangeWithMode('horizontal')">↔ Hàng ngang</button>
-              <button onclick="arrangeWithMode('vertical')">↕ Hàng dọc</button>
-              <button onclick="arrangeWithMode('cascade')">🗂 Xếp tầng (Cascade)</button>
-              <button onclick="arrangeWithMode('compact')">🗄 Xếp chồng (Compact)</button>
-              <div class="dropdown-sep"></div>
-              <button onclick="arrangeToMonitorMenu(event)">🖥 Xếp sang màn hình ▸</button>
-              <div class="dropdown-sep"></div>
-              <button onclick="arrangePreview()">🔍 Xem trước…</button>
-              <button onclick="gotoLayoutSettings()">⚙ Cài đặt sắp xếp…</button>
+          <button class="btn btn-sm tb-sec" onclick="assignProxySelected()">⇄ Gán proxy</button>
+          <button class="btn btn-sm tb-sec" onclick="evaluateSelected()" title="Đánh giá account đã chọn">✓ Đánh giá</button>
+          <button class="btn btn-sm btn-danger tb-sec" onclick="deleteSelected()">🗑 Xóa đã chọn</button>
+          <div class="arr-wrap">
+            <div class="dropdown">
+              <div class="split-btn">
+                <button class="btn btn-sm btn-primary" onclick="arrangeLast()" title="Áp dụng cấu hình sắp xếp gần nhất">⬚ Sắp xếp</button>
+                <button class="btn btn-sm btn-primary split-arrow" id="arrange-btn" onclick="openArrangeDrawer()" title="Tùy chọn sắp xếp">▼</button>
+              </div>
             </div>
-            <div class="dropdown-menu flyout hidden" id="arrange-mon-menu"></div>
           </div>
+              <div class="arr-panel hidden" id="arrange-menu">
+                <div class="arr-head">
+                  <h3>Sắp xếp cửa sổ</h3>
+                  <button class="modal-close" onclick="closeArrangeDrawer()">×</button>
+                </div>
+                <div class="arr-body">
+                <div class="arr-group">
+                  <div class="arr-gtitle">Phạm vi</div>
+                  <div id="arr-scope">
+                    <label class="radio-row"><input type="radio" name="arr-scope" value="visible" checked><span>Tất cả đang hiển thị (<b id="arr-n-visible">0</b>)</span></label>
+                    <label class="radio-row"><input type="radio" name="arr-scope" value="selected"><span>Kênh đã chọn (<b id="arr-n-selected">0</b>)</span></label>
+                    <label class="radio-row"><input type="radio" name="arr-scope" value="running"><span>Kênh đang chạy (<b id="arr-n-running">0</b>)</span></label>
+                  </div>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Bố cục</div>
+                  <div class="lay-cards" id="arr-layouts">
+                    <button class="lay-card" data-mode="smart_auto" onclick="arrSelectMode('smart_auto')"><span class="lay-ic">✨</span><span>Thông minh</span></button>
+                    <button class="lay-card" data-mode="grid" onclick="arrSelectMode('grid')"><span class="lay-ic">▦</span><span>Lưới</span></button>
+                    <button class="lay-card" data-mode="horizontal" onclick="arrSelectMode('horizontal')"><span class="lay-ic">☰</span><span>Hàng ngang</span></button>
+                    <button class="lay-card" data-mode="vertical" onclick="arrSelectMode('vertical')"><span class="lay-ic">⋮</span><span>Hàng dọc</span></button>
+                    <button class="lay-card" data-mode="cascade" onclick="arrSelectMode('cascade')"><span class="lay-ic">🗗</span><span>Bố cục tầng</span></button>
+                    <button class="lay-card" data-mode="compact" onclick="arrSelectMode('compact')"><span class="lay-ic">▤</span><span>Bố cục nén</span></button>
+                  </div>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Màn hình</div>
+                  <select id="arr-monitor" class="filter-select" style="width:100%"></select>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Tùy chọn</div>
+                  <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="arr-opt-taskbar" checked><span>Chừa taskbar</span></label>
+                  <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="arr-opt-uniform" checked><span>Kích thước đồng đều</span></label>
+                  <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="arr-opt-autofit" checked><span>Tự co giãn theo số lượng</span></label>
+                  <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="arr-opt-skipmin"><span>Bỏ qua cửa sổ chưa sẵn sàng</span></label>
+                  <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="arr-opt-focus" checked><span>Không giành focus</span></label>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Kích thước &amp; Mật độ</div>
+                  <div class="win-row">
+                    <div class="win-field"><label>Cỡ cửa sổ</label>
+                      <select id="arr-size" class="filter-select">
+                        <option value="auto" selected>Tự động</option>
+                        <option value="small">Nhỏ</option>
+                        <option value="medium">Vừa</option>
+                        <option value="large">Lớn</option>
+                      </select>
+                    </div>
+                    <div class="win-field"><label>Mật độ</label>
+                      <select id="arr-density" class="filter-select">
+                        <option value="balanced" selected>Cân bằng</option>
+                        <option value="relaxed">Thoáng</option>
+                        <option value="dense">Dày</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Preset nhanh</div>
+                  <div class="preset-row">
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(1)">1 cột</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(2)">2 cột</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(3)">3 cột</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(4)">4 cột</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(5)">5 cột</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCols(6)">6 cột</button>
+                  </div>
+                  <div class="preset-row">
+                    <button class="btn btn-sm" onclick="arrApplyPresetCells(4)">4 ô/màn</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCells(6)">6 ô/màn</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCells(8)">8 ô/màn</button>
+                    <button class="btn btn-sm" onclick="arrApplyPresetCells(12)">12 ô/màn</button>
+                  </div>
+                  <div class="preset-row" id="arr-presets"></div>
+                  <button class="btn btn-sm" onclick="arrSavePreset()">💾 Lưu preset hiện tại</button>
+                </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Xem trước</div>
+                  <div class="mini-preview" id="arr-preview"></div>
+                  <div class="preset-row" style="margin-top:7px">
+                    <button class="btn btn-sm" onclick="arrangePreviewPanel()">🔍 Xem trước chi tiết</button>
+                  </div>
+                  <button class="link-btn" onclick="gotoLayoutSettings()">Cài đặt nâng cao…</button>
+                </div>
+                </div>
+                <div class="arr-foot">
+                  <button class="btn" onclick="closeArrangeDrawer()">Hủy</button>
+                  <button class="btn btn-primary" onclick="arrApplyPanel()">✓ Áp dụng</button>
+                </div>
+              </div>
+              <div class="drawer-overlay hidden" id="arrange-overlay" onclick="closeArrangeDrawer()"></div>
           <span id="selected-count" class="sel-count"></span>
           <span id="arrange-result" class="sel-count"></span>
           <div class="spacer"></div>
+          <button class="btn btn-sm" id="filter-toggle" onclick="toggleFilterPanel()" title="Bộ lọc">Lọc ⚙</button>
+          <div id="filter-panel">
           <select id="profile-filter-platform" class="filter-select" onchange="reloadProfilesView()">
             <option value="">Tất cả nền tảng</option>
             <option value="youtube">YouTube</option>
@@ -164,6 +244,11 @@
             <option value="50">Tin cậy ≥ 50</option>
             <option value="70">Tin cậy ≥ 70</option>
           </select>
+            <div class="filter-actions">
+              <button class="btn btn-sm" onclick="resetFilters()">Đặt lại</button>
+              <button class="btn btn-sm btn-primary" onclick="toggleFilterPanel(false)">Áp dụng</button>
+            </div>
+          </div>
           <div class="search-box"><input type="text" id="profile-search" placeholder="Tìm kênh..." oninput="reloadProfilesView()"></div>
           <span id="profile-summary" class="summary-text"></span>
         </div>
@@ -852,6 +937,6 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260917y"></script>
+<script src="assets/js/app.js?v=20260918e"></script>
 </body>
 </html>

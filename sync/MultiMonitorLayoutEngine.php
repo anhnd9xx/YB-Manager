@@ -206,7 +206,10 @@ class MultiMonitorLayoutEngine
         array $win, string $distLabel, bool $debug): array
     {
         $one = $layout;
-        $one['mode'] = 'smart_auto';
+        // Preset so cot: giu grid+cols cho tung monitor (thay vi smart lai)
+        if (($layout['mode'] ?? '') !== 'grid' || (int)($layout['forceCols'] ?? 0) <= 0) {
+            $one['mode'] = 'smart_auto';
+        }
         $one['multi'] = false;
         $slots = [];
         $monitors = [];

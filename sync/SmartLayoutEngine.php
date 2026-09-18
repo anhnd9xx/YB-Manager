@@ -59,7 +59,8 @@ class SmartLayoutEngine
             case 'grid':
             case 'horizontal':
             case 'vertical':
-                return self::manualGrid($n, $areas[0], $mode, $gapX, $gapY, $minW, $minH, $setW, $setH, $layout, $debug);
+                $forceCols = ($mode === 'grid') ? max(0, min(12, (int)($layout['forceCols'] ?? 0))) : 0;
+                return self::manualGrid($n, $areas[0], $mode, $gapX, $gapY, $minW, $minH, $setW, $setH, $layout, $debug, $forceCols);
             case 'cascade':
                 return self::offsetPlan($n, $areas[0], $gapX, $gapY, $setW, $setH, 30, 30, $mode, $debug);
             case 'compact':
@@ -316,7 +317,7 @@ class SmartLayoutEngine
     // ---------------- MANUAL MODES ----------------
 
     private static function manualGrid(int $n, array $a, string $mode, int $gapX, int $gapY,
-        int $minW, int $minH, int $setW, int $setH, array $layout, bool $debug): array
+        int $minW, int $minH, int $setW, int $setH, array $layout, bool $debug, int $forceCols = 0): array
     {
         $W = (int)$a['w'];
         $H = (int)$a['h'];
@@ -326,11 +327,15 @@ class SmartLayoutEngine
         } elseif ($mode === 'vertical') {
             $cols = 1;
             $rows = $n;
-        } else { // grid: cot theo ty le area (giong LayoutManager::computeGrid)
+        } else { // grid: cot theo ty le area (giong LayoutManager::computeGrid), hoac ep so cot (preset)
             $cols = max(1, (int)round(sqrt($n * $W / max(1, $H))));
             $rows = (int)ceil($n / $cols);
             while ($cols > 1 && ($rows - 1) * $cols >= $n) $cols--;
             $rows = (int)ceil($n / $cols);
+            if ($forceCols > 0) {
+                $cols = min($forceCols, max(1, $n));
+                $rows = (int)ceil($n / $cols);
+            }
         }
         $cw = (int)floor(($W - $gapX * ($cols - 1)) / $cols);
         $ch = (int)floor(($H - $gapY * ($rows - 1)) / $rows);

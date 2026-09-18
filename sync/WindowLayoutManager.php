@@ -110,6 +110,42 @@ class SyncWindowLayoutManager
             ? (string)$opts['distribution'] : (string)($layout['distribution'] ?? 'smart');
         if (!in_array($dist, SyncSettingsService::LAYOUT_DISTRIBUTIONS, true)) $dist = 'smart';
         $layout['distribution'] = $dist;
+        // Options theo lan goi (panel Arrange, khong ghi settings):
+        // respectTaskbar=false -> mo rong work area ra full resolution (giu origin)
+        if (array_key_exists('respectTaskbar', $opts)) {
+            $layout['respectTaskbar'] = !empty($opts['respectTaskbar']);
+            if (empty($opts['respectTaskbar'])) {
+                foreach ($areas as &$ar) {
+                    $ar['w'] = max((int)$ar['w'], (int)($ar['resW'] ?? 0));
+                    $ar['h'] = max((int)$ar['h'], (int)($ar['resH'] ?? 0));
+                }
+                unset($ar);
+            }
+        }
+        if (isset($opts['sizeBalance']) && in_array($opts['sizeBalance'], ['similar', 'maximize'], true)) {
+            $layout['sizeBalance'] = $opts['sizeBalance'];
+        }
+        if (isset($opts['sizeMode']) && in_array($opts['sizeMode'], ['auto_fit', 'keep_size'], true)) {
+            $layout['sizeMode'] = $opts['sizeMode'];
+        }
+        if (isset($opts['cols'])) $layout['forceCols'] = max(0, min(12, (int)$opts['cols']));
+        // Size/density theo lan goi (drawer Sap xep): minW/minH/gapX/gapY override settings
+        if (isset($opts['minW'])) $layout['minW'] = min(4000, max(200, (int)$opts['minW']));
+        if (isset($opts['minH'])) $layout['minH'] = min(3000, max(150, (int)$opts['minH']));
+        if (isset($opts['gapX'])) $layout['gapX'] = min(100, max(0, (int)$opts['gapX']));
+        if (isset($opts['gapY'])) $layout['gapY'] = min(100, max(0, (int)$opts['gapY']));
+        $noActivate = !array_key_exists('noActivate', $opts) || !empty($opts['noActivate']);
+        // skipMinimized: bo qua cua so minimize (khong restore), chi xep dang hien
+        if (!empty($opts['skipMinimized'])) {
+            $live = array_values(array_filter($live, fn($w) => empty($w['minimized'])));
+            if (!$live) {
+                return ['ok' => false, 'partial' => false,
+                    'message' => 'Tat ca window dang minimize (bat "Bỏ qua" thi khong xep)',
+                    'missingMonitors' => $missingMonitors, 'disconnected' => (bool)$missingMonitors,
+                    'session' => self::session($sessionId, $ids, [], $areas, $layout, $win, []),
+                    'results' => []];
+            }
+        }
         $manual = self::manualAssignment($live, $areas, $opts);
         $manualCounts = $manual['counts'];
         if ($manualCounts !== null) {
@@ -190,7 +226,7 @@ class SyncWindowLayoutManager
             $batchIn[] = ['hwnd' => (int)$w['hwnd'], 'x' => (int)$slot['x'], 'y' => (int)$slot['y'],
                           'w' => (int)$slot['w'], 'h' => (int)$slot['h']];
         }
-        $batchOut = SyncWindowManager::applyLayoutBatch($batchIn);
+        $batchOut = SyncWindowManager::applyLayoutBatch($batchIn, $noActivate);
         $batchMs = (int)round((microtime(true) - $tBatch) * 1000);
         SyncLogger::info('layout_perf', '[PERF] batch arrange ' . count($batchIn) . ' windows: ' . $batchMs . 'ms');
         $results = [];

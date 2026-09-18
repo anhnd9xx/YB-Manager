@@ -104,11 +104,12 @@ class SyncWindowManager
 
     /**
      * Apply NHIEU rect trong 1 batch duy nhat (B5-B6): 1 process powershell,
-     * DeferWindowPos + NOACTIVATE (khong cuop focus). Loi 1 window khong lan.
+     * DeferWindowPos + NOACTIVATE mac dinh (khong cuop focus). Loi 1 window khong lan.
      * @param array $rects [{hwnd,x,y,w,h}, ...]
+     * @param bool $noActivate true = khong kich hoat window (mac dinh)
      * @return array hwnd(string) => ['ok'=>bool,'error'=>?string,'rect'=>?array]
      */
-    public static function applyLayoutBatch(array $rects): array
+    public static function applyLayoutBatch(array $rects, bool $noActivate = true): array
     {
         $out = [];
         $items = [];
@@ -129,7 +130,8 @@ class SyncWindowManager
             }
             $script = __DIR__ . '/win32_apply_layout.ps1';
             $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"'
-                . ' -InputFile "' . $tmp . '"';
+                . ' -InputFile "' . $tmp . '"'
+                . ($noActivate ? '' : ' -AllowFocus');
             $json = @shell_exec($cmd);
             $r = is_string($json) ? json_decode(trim($json), true) : null;
             if (!is_array($r) || !isset($r['results']) || !is_array($r['results'])) {

@@ -148,6 +148,16 @@ try {
             }
             if (!empty($b['confirmed'])) $opts['confirmed'] = true;
             if (!empty($b['dryRun'])) $opts['dryRun'] = true;
+            if (array_key_exists('respectTaskbar', $b)) $opts['respectTaskbar'] = !empty($b['respectTaskbar']);
+            if (isset($b['sizeBalance']) && $b['sizeBalance'] !== '') $opts['sizeBalance'] = (string)$b['sizeBalance'];
+            if (isset($b['sizeMode']) && $b['sizeMode'] !== '') $opts['sizeMode'] = (string)$b['sizeMode'];
+            if (!empty($b['skipMinimized'])) $opts['skipMinimized'] = true;
+            if (isset($b['cols'])) $opts['cols'] = (int)$b['cols'];
+            if (isset($b['minW'])) $opts['minW'] = (int)$b['minW'];
+            if (isset($b['minH'])) $opts['minH'] = (int)$b['minH'];
+            if (isset($b['gapX'])) $opts['gapX'] = (int)$b['gapX'];
+            if (isset($b['gapY'])) $opts['gapY'] = (int)$b['gapY'];
+            if (array_key_exists('noActivate', $b)) $opts['noActivate'] = !empty($b['noActivate']);
             $tArrange = microtime(true);
             $r = $pids ? SyncWindowLayoutManager::arrange($pids, $opts)
                        : SyncWindowLayoutManager::arrangeRunning(null, $opts);

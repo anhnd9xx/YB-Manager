@@ -11,7 +11,8 @@
 # KHONG co chuc nang dong/kill process.
 ###############################################################################
 param(
-    [Parameter(Mandatory = $true)][string]$InputFile
+    [Parameter(Mandatory = $true)][string]$InputFile,
+    [switch]$AllowFocus
 )
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -57,7 +58,9 @@ try {
 }
 
 $SW_RESTORE = 9
-$FLAGS = 0x0004 -bor 0x0010  # SWP_NOZORDER + SWP_NOACTIVATE (khong kich hoat, khong cuop focus)
+# Mac dinh NOACTIVATE (khong cuop focus); -AllowFocus thi bo co nay
+$FLAGS = 0x0004 # SWP_NOZORDER
+if (-not $AllowFocus) { $FLAGS = $FLAGS -bor 0x0010 }  # SWP_NOACTIVATE
 $valid = @()
 $results = @()
 

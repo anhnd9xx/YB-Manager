@@ -7,13 +7,20 @@ let pendingProxyAssignProfileId = null;
 let pendingProxyAssignProfileIds = null;
 let selectedProfileIds = new Set();
 let profilesPage = 1;
-let profilesPerPage = 10;
+let profilesPerPage = storedPerPage('ytm-perpage-profiles', 10);
 let profilesFiltered = [];
 let proxyPage = 1;
-let proxyPerPage = 10;
+let proxyPerPage = storedPerPage('ytm-perpage-proxies', 10);
 let selectedProxies = new Set();
 
 const $ = (id) => document.getElementById(id);
+function storedPerPage(key, fb) {
+  try {
+    const v = parseInt(localStorage.getItem(key), 10);
+    if ([5, 10, 20, 30, 50, 100].includes(v)) return v;
+  } catch (e) {}
+  return fb;
+}
 const api = 'api/';
 const VIEW_TITLES = {
   dashboard: 'Tổng quan', profiles: 'Kênh', proxies: 'Proxy',
@@ -340,30 +347,67 @@ function paginateProfiles() {
   return profilesFiltered.slice(start, start + profilesPerPage);
 }
 
+// ============ PAGINATION BAR DUNG CHUNG (kenh + proxy) ============
+// 3 vung: LEFT info | CENTER nut trang | RIGHT per-page. Khong reload UI,
+// chi render lai danh sach + bar (filter/search giu nguyen, paginate sau filter).
+function pgRange(page, totalPages) {
+  const keep = new Set();
+  for (let p = 1; p <= totalPages; p++) {
+    if (p === 1 || p === totalPages || Math.abs(p - page) <= 2) keep.add(p);
+  }
+  const arr = [...keep].sort((a, b) => a - b);
+  const out = [];
+  arr.forEach((p, i) => {
+    if (i > 0 && p - arr[i - 1] > 1) out.push('…');
+    out.push(p);
+  });
+  return out;
+}
+// Doi per-page giu vi tri du lieu (§7): newPage = floor(firstItem/newPer)+1
+function pgKeepPosition(page, oldPer, newPer, total) {
+  const firstItem = (Math.max(1, page) - 1) * Math.max(1, oldPer);
+  const tp = Math.max(1, Math.ceil(total / Math.max(1, newPer)));
+  return Math.max(1, Math.min(tp, Math.floor(firstItem / Math.max(1, newPer)) + 1));
+}
+function pgBarHTML(total, page, perPage, o) {
+  // o: {unit:'kênh', onpage:'goPage', onperpage:'setPerPage'}
+  const tp = Math.max(1, Math.ceil(total / Math.max(1, perPage)));
+  page = Math.max(1, Math.min(page, tp));
+  const start = total === 0 ? 0 : (page - 1) * perPage + 1;
+  const end = Math.min(page * perPage, total);
+  const info = total === 0 ? `0 ${o.unit}` : `Hiển thị ${start}–${end} / ${total} ${o.unit}`;
+  let center = `<button class="pg-btn pg-prev" title="Trang trước" ${page <= 1 ? 'disabled' : ''} onclick="${o.onpage}(${page - 1})">‹</button>`;
+  if (tp > 1) {
+    center += pgRange(page, tp).map(p =>
+      p === '…' ? `<span class="pg-dots">…</span>`
+        : `<button class="pg-btn${p === page ? ' active' : ''}" onclick="${o.onpage}(${p})">${p}</button>`
+    ).join('');
+  }
+  center += `<button class="pg-btn pg-next" title="Trang sau" ${page >= tp ? 'disabled' : ''} onclick="${o.onpage}(${page + 1})">›</button>`;
+  const opts = [5, 10, 20, 30, 50, 100].map(n =>
+    `<option value="${n}" ${n === perPage ? 'selected' : ''}>${n}</option>`).join('');
+  return `<div class="pgbar"><div class="pg-left">${info}</div>`
+    + `<div class="pg-center">${center}</div>`
+    + `<div class="pg-right"><span>Mỗi trang</span><select class="pg-perpage" onchange="${o.onperpage}(this.value)">${opts}</select></div></div>`;
+}
+
 function renderPagination(total) {
   const el = $('profiles-pagination');
   if (!el) return;
-  const perPageOpts = [5,10,20,30,50].map(n => `<option value="${n}" ${n === profilesPerPage ? 'selected' : ''}>${n}</option>`).join('');
-  const perPageSelect = `<label class="pg-label">Số kênh/trang
-    <select class="filter-select" onchange="setPerPage(this.value)">${perPageOpts}</select>
-  </label>`;
-  if (!total) { el.innerHTML = ''; return; }
-  const totalPages = Math.ceil(total / profilesPerPage);
-  if (totalPages <= 1) { el.innerHTML = perPageSelect; return; }
-  let html = `<span class="pg-info">Trang ${profilesPage}/${totalPages}</span>`;
-  html += `<button class="btn btn-sm" ${profilesPage <= 1 ? 'disabled' : ''} onclick="goPage(${profilesPage - 1})">‹ Trước</button>`;
-  html += `<button class="btn btn-sm" ${profilesPage >= totalPages ? 'disabled' : ''} onclick="goPage(${profilesPage + 1})">Sau ›</button>`;
-  html += perPageSelect;
-  el.innerHTML = html;
+  el.innerHTML = pgBarHTML(total, profilesPage, profilesPerPage,
+    { unit: 'kênh', onpage: 'goPage', onperpage: 'setPerPage' });
 }
 
 function goPage(n) {
-  profilesPage = n;
+  const tp = Math.max(1, Math.ceil(profilesFiltered.length / profilesPerPage));
+  profilesPage = Math.max(1, Math.min(n, tp));
   renderProfiles();
 }
 function setPerPage(val) {
-  profilesPerPage = parseInt(val, 10) || 10;
-  profilesPage = 1;
+  const np = [5, 10, 20, 30, 50, 100].includes(parseInt(val, 10)) ? parseInt(val, 10) : 10;
+  profilesPage = pgKeepPosition(profilesPage, profilesPerPage, np, profilesFiltered.length);
+  profilesPerPage = np;
+  try { localStorage.setItem('ytm-perpage-profiles', String(np)); } catch (e) {}
   renderProfiles();
 }
 function reloadProfilesView() {
@@ -406,17 +450,49 @@ function ckHtml(checked, extra = '', lg = false) {
 }
 
 // ============ ARRANGE (Smart Auto Arrange) ============
-function toggleArrangeMenu(e) {
-  if (e) e.stopPropagation();
+function openArrangeDrawer() {
   const m = $('arrange-menu');
-  if (m) m.classList.toggle('hidden');
+  const ov = $('arrange-overlay');
+  if (!m) return false;
+  if (ov) ov.classList.remove('hidden');
+  m.classList.remove('hidden');
+  arrEnsureCfg();
+  arrFillMonitors();
+  arrPaint();
   return false;
 }
-document.addEventListener('click', (e) => {
+function closeArrangeDrawer() {
   const m = $('arrange-menu');
-  if (m && !m.classList.contains('hidden')) {
-    const btn = $('arrange-btn');
-    if (!m.contains(e.target) && e.target !== btn && !(btn && btn.contains(e.target))) m.classList.add('hidden');
+  const ov = $('arrange-overlay');
+  if (m) m.classList.add('hidden');
+  if (ov) ov.classList.add('hidden');
+}
+// Can dropdown/popover theo viewport: thieu cho duoi -> mo len, sat mep phai -> lech trai
+function placeDropdown(menu) {
+  if (!menu) return;
+  menu.classList.remove('flip-up', 'align-right');
+  const r = menu.getBoundingClientRect();
+  if (r.bottom > window.innerHeight - 8) menu.classList.add('flip-up');
+  if (r.right > window.innerWidth - 8) menu.classList.add('align-right');
+}
+function toggleFilterPanel(force) {
+  const p = $('filter-panel');
+  if (!p) return;
+  const show = force === true ? true : force === false ? false : p.classList.contains('hidden') || !p.classList.contains('open');
+  p.classList.toggle('open', show);
+}
+function resetFilters() {
+  ['profile-filter-platform', 'profile-filter-stage', 'profile-filter-channel', 'profile-filter-stab', 'profile-filter-conf'].forEach(id => {
+    const el = $(id);
+    if (el) el.value = '';
+  });
+  const d = $('profile-filter-days');
+  if (d) d.value = '';
+  reloadProfilesView();
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeArrangeDrawer();
   }
 });
 function arrangeResultMsg(msg, ok) {
@@ -428,8 +504,7 @@ function arrangeResultMsg(msg, ok) {
   }
 }
 async function arrangeCall(payload) {
-  const m = $('arrange-menu');
-  if (m) m.classList.add('hidden');
+  closeArrangeDrawer();
   arrangeResultMsg('⏳ Đang xếp cửa sổ...', null);
   window.__ytmArranging = true;
   try {
@@ -454,67 +529,239 @@ async function arrangeCall(payload) {
   }
   window.__ytmArranging = false;
 }
-function arrangeSmart() {
-  const ids = Array.from(selectedProfileIds);
-  arrangeCall(ids.length ? { profileIds: ids } : {});
+// ============ ARRANGE PANEL (nhom: pham vi / bo cuc / man hinh / tuy chon) ============
+function arrDefaultCfg() {
+  return { scope: 'visible', mode: 'smart_auto', monitor: 'settings', taskbar: true, uniform: true, autofit: true, skipmin: false, focus: true, size: 'auto', density: 'balanced', cols: 0 };
 }
-function arrangeSelected() {
-  const ids = Array.from(selectedProfileIds);
-  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); arrangeResultMsg('✗ Chưa chọn kênh nào', false); return; }
-  arrangeCall({ profileIds: ids });
+let arrCfg = null;
+function arrEnsureCfg() {
+  if (!arrCfg) {
+    arrCfg = arrDefaultCfg();
+    try {
+      const s = JSON.parse(localStorage.getItem('ytm-arr-last') || 'null');
+      if (s && typeof s.mode === 'string') arrCfg = { ...arrCfg, ...s };
+    } catch (e) {}
+  }
+  return arrCfg;
 }
-function arrangeRunning() { arrangeCall({}); }
-function arrangeWithMode(mode) {
-  const ids = Array.from(selectedProfileIds);
-  arrangeCall(ids.length ? { profileIds: ids, mode } : { mode });
+function arrSaveLast() {
+  try { localStorage.setItem('ytm-arr-last', JSON.stringify(arrEnsureCfg())); } catch (e) {}
 }
-function gotoLayoutSettings() {
-  const m = $('arrange-menu');
-  if (m) m.classList.add('hidden');
-  switchView('settings');
+function arrScopeCounts() {
+  return {
+    visible: profilesFiltered.length,
+    selected: selectedProfileIds.size,
+    running: profiles.filter(p => p.status === 'running').length
+  };
 }
-function arrangeToMonitorMenu(e) {
-  if (e) e.stopPropagation();
-  const sub = $('arrange-mon-menu');
-  if (!sub) return;
-  const mons = cachedMonitors && cachedMonitors.length ? cachedMonitors : [];
-  let html = `<button onclick="arrangeToMonitors('__selected__')">Màn hình đã chọn (Settings)</button><div class="dropdown-sep"></div>`;
-  if (!mons.length) html += `<button onclick="arrangeToMonitors('__all__')">Tất cả màn hình</button>`;
-  mons.forEach(m => {
-    const name = (m.name || '').replace(/'/g, "\\'");
-    const res = m.resolution ? ` - ${m.resolution.w}x${m.resolution.h}` : '';
-    html += `<button onclick="arrangeToMonitors('${name}')">Màn hình ${m.id}${m.primary ? ' (chính)' : ''}${res}</button>`;
+function arrScopeIds() {
+  const cfg = arrEnsureCfg();
+  if (cfg.scope === 'selected') return [...selectedProfileIds];
+  if (cfg.scope === 'running') return profiles.filter(p => p.status === 'running').map(p => p.id);
+  return profilesFiltered.map(p => p.id);
+}
+function arrPaint() {
+  const cfg = arrEnsureCfg();
+  const c = arrScopeCounts();
+  const nv = $('arr-n-visible'), ns = $('arr-n-selected'), nr = $('arr-n-running');
+  if (nv) nv.textContent = c.visible;
+  if (ns) ns.textContent = c.selected;
+  if (nr) nr.textContent = c.running;
+  document.querySelectorAll('input[name="arr-scope"]').forEach(r => { r.checked = r.value === cfg.scope; });
+  document.querySelectorAll('#arr-layouts .lay-card').forEach(el => el.classList.toggle('active', el.dataset.mode === cfg.mode));
+  const ms = $('arr-monitor');
+  if (ms && ![...ms.options].some(o => o.value === cfg.monitor)) cfg.monitor = 'settings';
+  if (ms) ms.value = cfg.monitor;
+  const set = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  set('arr-opt-taskbar', cfg.taskbar);
+  set('arr-opt-uniform', cfg.uniform);
+  set('arr-opt-autofit', cfg.autofit);
+  set('arr-opt-skipmin', cfg.skipmin);
+  set('arr-opt-focus', cfg.focus);
+  if ($('arr-size')) $('arr-size').value = cfg.size || 'auto';
+  if ($('arr-density')) $('arr-density').value = cfg.density || 'balanced';
+  arrPaintPreview();
+  arrPaintPresets();
+}
+function arrPaintPreview() {
+  const box = $('arr-preview');
+  if (!box) return;
+  const cfg = arrEnsureCfg();
+  const n = Math.max(1, Math.min(arrScopeIds().length || 1, 12));
+  let html = '';
+  const cell = (cls) => `<span class="mp ${cls || ''}"></span>`;
+  if (cfg.mode === 'horizontal') {
+    for (let i = 0; i < n; i++) html += cell();
+  } else if (cfg.mode === 'vertical') {
+    html = `<span style="display:flex;flex-direction:column;gap:4px">${Array(n).fill(cell()).join('')}</span>`;
+  } else if (cfg.mode === 'cascade' || cfg.mode === 'compact') {
+    for (let i = 0; i < Math.min(n, 4); i++) html += `<span class="mp" style="width:${34 - i * 5}px;height:${30 - i * 3}px;margin-left:${i * 9}px;${i ? 'margin-top:-24px' : ''}"></span>`;
+  } else {
+    const cols = cfg.cols > 0 ? cfg.cols : Math.max(1, Math.ceil(Math.sqrt(n)));
+    for (let i = 0; i < n; i++) html += cell();
+    box.style.display = 'grid';
+    box.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    box.innerHTML = html;
+    return;
+  }
+  box.style.display = 'flex';
+  box.innerHTML = html;
+}
+function arrSelectMode(m) {
+  const cfg = arrEnsureCfg();
+  cfg.mode = m;
+  cfg.cols = 0;
+  arrSaveLast();
+  arrPaint();
+}
+function arrFillMonitors() {
+  const sel = $('arr-monitor');
+  if (!sel) return;
+  const cur = arrEnsureCfg().monitor;
+  sel.innerHTML = '<option value="settings">Theo cài đặt</option>'
+    + '<option value="primary">Màn hình chính</option>'
+    + '<option value="all">Tất cả màn hình</option>';
+  (cachedMonitors || []).forEach(m => {
+    const o = document.createElement('option');
+    const r = m.resolution ? ` - ${m.resolution.w}x${m.resolution.h}` : '';
+    o.value = 'name:' + (m.name || '');
+    o.textContent = `Màn hình ${m.id}${m.primary ? ' (chính)' : ''}${r}`;
+    sel.appendChild(o);
   });
-  sub.innerHTML = html;
-  sub.classList.toggle('hidden');
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'settings';
+  arrEnsureCfg().monitor = sel.value;
 }
-function selectedOrRunningIds() {
-  const ids = Array.from(selectedProfileIds);
-  return ids.length ? { profileIds: ids } : {};
+function arrReadPanel() {
+  const cfg = arrEnsureCfg();
+  const sc = document.querySelector('input[name="arr-scope"]:checked');
+  if (sc) cfg.scope = sc.value;
+  cfg.monitor = $('arr-monitor') ? $('arr-monitor').value : 'settings';
+  cfg.taskbar = $('arr-opt-taskbar') ? $('arr-opt-taskbar').checked : true;
+  cfg.uniform = $('arr-opt-uniform') ? $('arr-opt-uniform').checked : true;
+  cfg.autofit = $('arr-opt-autofit') ? $('arr-opt-autofit').checked : true;
+  cfg.skipmin = $('arr-opt-skipmin') ? $('arr-opt-skipmin').checked : false;
+  cfg.focus = $('arr-opt-focus') ? $('arr-opt-focus').checked : true;
+  cfg.size = $('arr-size') ? $('arr-size').value : 'auto';
+  cfg.density = $('arr-density') ? $('arr-density').value : 'balanced';
+  arrSaveLast();
+  return cfg;
 }
-function arrangeToMonitors(which) {
-  const m = $('arrange-mon-menu');
-  if (m) m.classList.add('hidden');
-  const base = selectedOrRunningIds();
-  if (which === '__selected__') arrangeCall(base);
-  else if (which === '__all__') arrangeCall({ ...base, monitors: [] });
-  else arrangeCall({ ...base, monitors: [which] });
+function arrBuildPayload(extra) {
+  const cfg = arrReadPanel();
+  const ids = arrScopeIds();
+  if (!ids.length) { toast('Không có kênh nào trong phạm vi đã chọn', 'error'); return null; }
+  const p = { profileIds: ids, mode: cfg.mode };
+  if (cfg.monitor && cfg.monitor !== 'settings') {
+    if (cfg.monitor === 'all' || cfg.monitor === 'primary') p.monitor = cfg.monitor;
+    else if (cfg.monitor.startsWith('name:')) p.monitors = [cfg.monitor.slice(5)];
+  }
+  p.respectTaskbar = cfg.taskbar;
+  p.sizeBalance = cfg.uniform ? 'similar' : 'maximize';
+  p.sizeMode = cfg.autofit ? 'auto_fit' : 'keep_size';
+  if (cfg.skipmin) p.skipMinimized = true;
+  p.noActivate = cfg.focus !== false;
+  // Kich thuoc & mat do -> min/gap override (auto/balanced = theo settings)
+  if (cfg.size === 'small') { p.minW = 400; p.minH = 300; }
+  else if (cfg.size === 'medium') { p.minW = 800; p.minH = 500; }
+  else if (cfg.size === 'large') { p.minW = 1100; p.minH = 650; }
+  if (cfg.density === 'relaxed') { p.gapX = 12; p.gapY = 12; }
+  else if (cfg.density === 'dense') { p.gapX = 0; p.gapY = 0; }
+  if (cfg.mode === 'grid' && cfg.cols > 0) p.cols = cfg.cols;
+  return { ...p, ...(extra || {}) };
 }
-let lastPreviewPayload = null;
-async function arrangePreview() {
-  const m = $('arrange-menu');
-  if (m) m.classList.add('hidden');
-  const ids = Array.from(selectedProfileIds);
-  const payload = ids.length ? { profileIds: ids, dryRun: true } : { dryRun: true };
+function arrApplyPanel() { const p = arrBuildPayload(); if (p) arrangeCall(p); }
+function arrApplyPresetCols(n) {
+  const cfg = arrEnsureCfg();
+  cfg.mode = 'grid';
+  cfg.cols = n;
+  const ids = arrScopeIds();
+  if (!ids.length) { toast('Không có kênh nào trong phạm vi đã chọn', 'error'); return; }
+  const base = arrBuildPayload();
+  if (!base) return;
+  base.mode = 'grid';
+  base.cols = n;
+  arrSaveLast();
+  arrPaint();
+  arrangeCall(base);
+}
+function arrApplyPresetCells(n) {
+  // "N o/man": grid voi so cot gan voi can bac 2 (4->2x2, 6->3x2, 8->4x2, 12->4x3)
+  const cols = n <= 4 ? 2 : (n <= 6 ? 3 : 4);
+  const cfg = arrEnsureCfg();
+  cfg.mode = 'grid';
+  cfg.cols = 0;
+  const ids = arrScopeIds();
+  if (!ids.length) { toast('Không có kênh nào trong phạm vi đã chọn', 'error'); return; }
+  const base = arrBuildPayload();
+  if (!base) return;
+  base.mode = 'grid';
+  base.cols = cols;
+  arrSaveLast();
+  arrPaint();
+  closeArrangeDrawer();
+  arrangeCall(base);
+}
+function arrangeLast() {
+  const cfg = arrEnsureCfg();
+  const base = arrBuildPayload();
+  if (!base) return;
+  if (cfg.mode === 'grid' && cfg.cols > 0) base.cols = cfg.cols;
+  else delete base.cols;
+  arrangeCall(base);
+}
+function arrGetPresets() {
+  try { return JSON.parse(localStorage.getItem('ytm-arr-presets') || '[]'); } catch (e) { return []; }
+}
+function arrPaintPresets() {
+  const box = $('arr-presets');
+  if (!box) return;
+  const list = arrGetPresets();
+  box.innerHTML = list.map((p, i) =>
+    `<span class="preset-chip">${escapeHtml(p.name)}<button title="Xóa preset" onclick="arrDelPreset(${i})">×</button></span>`
+  ).join('');
+  box.querySelectorAll('.preset-chip').forEach((el, i) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      arrApplyPresetObj(list[i].cfg);
+    });
+  });
+}
+function arrApplyPresetObj(cfg) {
+  if (!cfg) return;
+  arrCfg = { ...arrDefaultCfg(), ...cfg };
+  arrSaveLast();
+  arrPaint();
+  arrangeLast();
+}
+function arrSavePreset() {
+  const name = prompt('Tên preset:', 'Preset ' + (arrGetPresets().length + 1));
+  if (!name || !name.trim()) return;
+  const list = arrGetPresets();
+  list.push({ name: name.trim().slice(0, 30), cfg: arrReadPanel() });
+  try { localStorage.setItem('ytm-arr-presets', JSON.stringify(list)); } catch (e) {}
+  arrPaintPresets();
+  toast('Đã lưu preset', 'success');
+}
+function arrDelPreset(i) {
+  const list = arrGetPresets();
+  list.splice(i, 1);
+  try { localStorage.setItem('ytm-arr-presets', JSON.stringify(list)); } catch (e) {}
+  arrPaintPresets();
+}
+async function arrangePreviewPanel() {
+  const p = arrBuildPayload({ dryRun: true });
+  if (!p) return;
   arrangeResultMsg('⏳ Đang tính preview...', null);
   try {
-    const res = await sendJson(api + 'syncwin.php?action=arrange', payload);
+    const res = await sendJson(api + 'syncwin.php?action=arrange', p);
     if (!res.ok || !res.plan) {
       arrangeResultMsg('✗ ' + (res.message || 'Không tính được'), false);
       toast(res.message || 'Không tính được preview', 'error');
       return;
     }
-    lastPreviewPayload = ids.length ? { profileIds: ids } : {};
+    const ids = arrScopeIds();
+    lastPreviewPayload = { ...p };
+    delete lastPreviewPayload.dryRun;
     renderPreviewModal(res);
     showModal('preview-modal');
     arrangeResultMsg('Xem trước sẵn sàng', true);
@@ -522,6 +769,11 @@ async function arrangePreview() {
     arrangeResultMsg('✗ Lỗi kết nối', false);
   }
 }
+function gotoLayoutSettings() {
+  closeArrangeDrawer();
+  switchView('settings');
+}
+let lastPreviewPayload = null;
 function renderPreviewModal(res) {
   const plan = res.plan;
   const bd = plan.breakdown && plan.breakdown.length ? plan.breakdown
@@ -1262,18 +1514,8 @@ function renderProxies() {
 function renderProxiesPagination() {
   const el = $('proxies-pagination');
   if (!el) return;
-  if (!proxies.length) { el.innerHTML = ''; return; }
-  const totalPages = Math.max(1, Math.ceil(proxies.length / proxyPerPage));
-  const start = (proxyPage - 1) * proxyPerPage + 1;
-  const end = Math.min(proxyPage * proxyPerPage, proxies.length);
-  el.innerHTML = `
-    <span class="pg-info">Hiển thị ${start}–${end} / ${proxies.length}</span>
-    <button class="btn btn-sm" ${proxyPage <= 1 ? 'disabled' : ''} onclick="gotoProxyPage(${proxyPage - 1})">‹ Trước</button>
-    <span class="pg-info">Trang ${proxyPage}/${totalPages}</span>
-    <button class="btn btn-sm" ${proxyPage >= totalPages ? 'disabled' : ''} onclick="gotoProxyPage(${proxyPage + 1})">Sau ›</button>
-    <label class="pg-label">Mỗi trang <select class="filter-select" id="proxy-per-page" onchange="setProxyPerPage(this.value)">
-      ${[5, 10, 20, 30, 50].map(n => `<option value="${n}" ${n === proxyPerPage ? 'selected' : ''}>${n}</option>`).join('')}
-    </select></label>`;
+  el.innerHTML = pgBarHTML(proxies.length, proxyPage, proxyPerPage,
+    { unit: 'proxy', onpage: 'gotoProxyPage', onperpage: 'setProxyPerPage' });
 }
 
 function gotoProxyPage(page) {
@@ -1281,8 +1523,10 @@ function gotoProxyPage(page) {
   renderProxies();
 }
 function setProxyPerPage(n) {
-  proxyPerPage = Math.max(1, parseInt(n, 10) || 10);
-  proxyPage = 1;
+  const np = [5, 10, 20, 30, 50, 100].includes(parseInt(n, 10)) ? parseInt(n, 10) : 10;
+  proxyPage = pgKeepPosition(proxyPage, proxyPerPage, np, proxies.length);
+  proxyPerPage = np;
+  try { localStorage.setItem('ytm-perpage-proxies', String(np)); } catch (e) {}
   renderProxies();
 }
 
