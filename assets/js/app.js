@@ -336,7 +336,7 @@ function renderProfiles() {
             : `<button class="btn btn-sm btn-primary" onclick="openProfile(${p.id})">▶ Mở</button>`}
           ${st.state === 'running' ? `<button class="btn btn-sm btn-danger" onclick="closeProfile(${p.id})">■ Đóng</button>` : ''}
           <button class="btn btn-sm" title="Chạy đánh giá account cho kênh này" onclick="evaluateOneProfile(${p.id})">✓ Kiểm tra</button>
-          <button class="btn btn-sm" onclick="openProfileModalEdit(${p.id})">⚙</button>
+          <button class="btn btn-sm" title="Chỉnh sửa kênh" onclick="event.stopPropagation();openEditChannel(${p.id})">⚙</button>
           <button class="btn btn-sm btn-danger" onclick="deleteProfile(${p.id})">🗑</button>
         </div>
       </div>`;
@@ -1814,7 +1814,29 @@ function pfRefreshMonitorHint() {
   const last = p.last_monitor_device ? (' · Lần cuối: ' + p.last_monitor_device) : '';
   hint.textContent = (p.status === 'running' ? cur : ('Không chạy.' + last));
 }
-function openProfileModal() {
+// ============ CHANNEL MODAL: create / edit mode ro rang ============
+// profileModalMode: 'create' | 'edit'. Create MOI duoc thay tabs Tao don/nhieu.
+// Edit load draft tu stable ID, khong bao gio goi API tao moi.
+let profileModalMode = 'create';
+let profileDraftOriginal = null;
+function setProfileModalMode(mode) {
+  profileModalMode = mode;
+  const isCreate = mode === 'create';
+  $('pf-mode-tabs').classList.toggle('hidden', !isCreate);
+  $('pf-create-btn').classList.toggle('hidden', !isCreate);
+  $('pf-save-btn').classList.toggle('hidden', isCreate);
+  $('pf-error').classList.add('hidden');
+  $('pf-error').textContent = '';
+  $('pf-dirty-hint').textContent = '';
+}
+function pfShowSingleFields() {
+  // Edit luon dung single-fields; bulk chi o create
+  $('pf-single-fields').classList.remove('hidden');
+  $('pf-bulk-fields').classList.add('hidden');
+  $('pf-common-fields').classList.remove('hidden');
+}
+function openCreateChannel() {
+  setProfileModalMode('create');
   $('profile-modal-title').textContent = 'Tạo kênh mới';
   $('pf-id').value = '';
   $('pf-name').value = '';
@@ -1827,26 +1849,85 @@ function openProfileModal() {
   if ($('pf-monitor-mode')) $('pf-monitor-mode').value = 'LAST';
   pfFillMonitorSelect($('pf-monitor-fixed'), cachedMonitors, '');
   pfRefreshMonitorHint();
+  $('pf-launch-note').textContent = '';
+  $('pf-proxy-note').textContent = '';
   setProfileMode('single');
   populateProxySelect();
+  profileDraftOriginal = null;
+  refreshProfileSaveBtn();
   showModal('profile-modal');
 }
-function openProfileModalEdit(id) {
-  const p = profiles.find(x => x.id === id);
-  if (!p) return;
+function openProfileModal() { openCreateChannel(); }
+function collectProfileDraft() {
+  return {
+    name: $('pf-name').value.trim(),
+    platform: $('pf-platform').value,
+    channel_handle: $('pf-handle').value.trim() || null,
+    user_agent: $('pf-ua').value.trim() || null,
+    webrtc_protection: $('pf-webrtc').value,
+    proxy_id: $('pf-proxy').value ? Number($('pf-proxy').value) : null,
+    monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
+    fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : '',
+  };
+}
+function openEditChannel(id) {
+  // Load bang stable ID (khong index/title/vi tri), clone sang draft
+  const p = profiles.find(x => Number(x.id) === Number(id));
+  if (!p) { toast('Không tìm thấy kênh', 'error'); return; }
+  setProfileModalMode('edit');
   $('profile-modal-title').textContent = 'Sửa kênh: ' + p.name;
   $('pf-id').value = p.id;
-  $('pf-name').value = p.name;
-  $('pf-platform').value = p.platform;
+  $('pf-name').value = p.name || '';
+  $('pf-platform').value = p.platform || 'youtube';
   $('pf-handle').value = p.channel_handle || '';
   $('pf-ua').value = p.user_agent || '';
   $('pf-webrtc').value = p.webrtc_protection || 'default';
-  setProfileMode('single');
   populateProxySelect(p.proxy_id);
   if ($('pf-monitor-mode')) $('pf-monitor-mode').value = p.monitor_mode || 'LAST';
   pfFillMonitorSelect($('pf-monitor-fixed'), cachedMonitors, p.fixed_monitor_device || '');
   pfRefreshMonitorHint();
+  pfShowSingleFields();
+  // Note khi Chrome dang chay: thay doi ap dung lan mo tiep theo, khong restart am tham
+  const running = p.status === 'running';
+  $('pf-launch-note').textContent = running ? 'ⓘ Chrome đang chạy — đổi User-Agent/WebRTC sẽ áp dụng ở lần mở tiếp theo.' : '';
+  $('pf-proxy-note').textContent = running ? 'ⓘ Chrome đang chạy — đổi proxy sẽ áp dụng ở lần mở tiếp theo.' : '';
+  const mh = $('pf-monitor-hint');
+  if (mh && running) mh.textContent += ' (Áp dụng khi mở Chrome lần tiếp theo.)';
+  // Snapshot draft goc de so dirty; form khong bind truc tiep object goc
+  profileDraftOriginal = JSON.stringify(collectProfileDraft());
+  refreshProfileSaveBtn();
   showModal('profile-modal');
+}
+function openProfileModalEdit(id) { openEditChannel(id); }
+function profileDraftChanged() {
+  if (profileModalMode !== 'edit' || !profileDraftOriginal) return;
+  refreshProfileSaveBtn();
+}
+function refreshProfileSaveBtn() {
+  const btn = $('pf-save-btn');
+  if (!btn || profileModalMode !== 'edit') return;
+  const dirty = JSON.stringify(collectProfileDraft()) !== profileDraftOriginal;
+  btn.disabled = !dirty;
+  $('pf-dirty-hint').textContent = dirty ? 'Có thay đổi chưa lưu' : '';
+}
+['pf-name', 'pf-handle', 'pf-platform', 'pf-ua', 'pf-webrtc', 'pf-proxy', 'pf-monitor-fixed'].forEach(fid => {
+  document.addEventListener('change', (e) => { if (e.target && e.target.id === fid) profileDraftChanged(); });
+  document.addEventListener('input', (e) => { if (e.target && e.target.id === fid) profileDraftChanged(); });
+});
+function cancelProfileModal() {
+  // Cancel/X: dirty -> hoi, sach -> dong ngay. Draft bi huy, card giu nguyen.
+  if (profileModalMode === 'edit' && profileDraftOriginal
+      && JSON.stringify(collectProfileDraft()) !== profileDraftOriginal) {
+    const okBtn = $('confirm-ok-btn');
+    if (okBtn) okBtn.textContent = 'Bỏ thay đổi';
+    confirmDelete('Bạn có thay đổi chưa lưu. Đóng mà không lưu?<br><small>Bấm "Hủy" để tiếp tục chỉnh sửa.</small>', () => {
+      profileDraftOriginal = null;
+      closeModal('profile-modal');
+    });
+    return;
+  }
+  profileDraftOriginal = null;
+  closeModal('profile-modal');
 }
 function populateProxySelect(selectedId) {
   const sel = $('pf-proxy');
@@ -1855,38 +1936,96 @@ function populateProxySelect(selectedId) {
       `<option value="${p.id}" ${p.id == selectedId ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.host)}:${p.port})</option>`
     ).join('');
 }
+// Dispatch RO RANG theo modal mode (khong doan mo ho): create -> createChannel, edit -> updateChannel
 async function saveProfile() {
-  const id = $('pf-id').value;
+  if (profileModalMode === 'edit') { await updateChannel(); return; }
+  await createChannel();
+}
+// Tao kenh: noi DUY NHAT duoc phep goi add/add_bulk
+async function createChannel() {
   const platform = $('pf-platform').value;
   const proxy_id = $('pf-proxy').value || null;
-
-  // MODE BULK: tạo nhiều kênh
-  if (!id && profileMode === 'bulk') {
+  if (profileMode === 'bulk') {
     const count = parseInt($('pf-count').value, 10) || 0;
     const prefix = $('pf-prefix').value.trim() || 'Kênh';
     if (count < 1) { toast('Nhập số lượng kênh hợp lệ', 'error'); return; }
-    const res = await sendJson(api + 'profiles.php?action=add_bulk', { count, prefix, platform, proxy_id });
-    toast(res.ok ? `Đã tạo ${res.count || 0} kênh (${prefix})` : res.message || 'Lỗi', res.ok ? 'success' : 'error');
-    if (res.ok) { closeModal('profile-modal'); refreshAll(); }
+    const btn = $('pf-create-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '◌ Đang tạo...'; }
+    try {
+      const res = await sendJson(api + 'profiles.php?action=add_bulk', { count, prefix, platform, proxy_id });
+      toast(res.ok ? `Đã tạo ${res.count || 0} kênh (${prefix})` : res.message || 'Lỗi', res.ok ? 'success' : 'error');
+      if (res.ok) { closeModal('profile-modal'); refreshAll(); }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Tạo kênh'; }
+    }
     return;
   }
-
-  // MODE SINGLE
-  const data = {
-    id: id || undefined,
-    name: $('pf-name').value.trim(),
-    platform,
-    channel_handle: $('pf-handle').value.trim() || null,
-    user_agent: $('pf-ua').value.trim() || null,
-    webrtc_protection: $('pf-webrtc').value,
-    proxy_id,
-    monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
-    fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : ''
-  };
-  if (!data.name) { toast('Vui lòng nhập tên kênh', 'error'); return; }
-  const res = await sendJson(api + 'profiles.php?action=' + (id ? 'update' : 'add'), data);
-  toast(res.ok ? 'Đã lưu' : res.message || 'Lỗi', res.ok ? 'success' : 'error');
-  if (res.ok) { closeModal('profile-modal'); refreshAll(); }
+  const name = $('pf-name').value.trim();
+  if (!name) { toast('Vui lòng nhập tên kênh', 'error'); return; }
+  const btn = $('pf-create-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '◌ Đang tạo...'; }
+  try {
+    const res = await sendJson(api + 'profiles.php?action=add', {
+      name, platform,
+      channel_handle: $('pf-handle').value.trim() || null,
+      user_agent: $('pf-ua').value.trim() || null,
+      webrtc_protection: $('pf-webrtc').value,
+      proxy_id,
+      monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
+      fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : '',
+    });
+    toast(res.ok ? `Đã tạo kênh "${name}"` : res.message || 'Lỗi', res.ok ? 'success' : 'error');
+    if (res.ok) { closeModal('profile-modal'); refreshAll(); }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Tạo kênh'; }
+  }
+}
+function pfShowError(msg) {
+  const el = $('pf-error');
+  el.textContent = msg;
+  el.classList.toggle('hidden', !msg);
+}
+// Sua kenh: chi gui field duoc phep (dirty), KHONG BAO GIO goi add/add_bulk.
+// Backend update chi cham name/platform/handle/ua/webrtc/proxy/monitor;
+// debug_port, user_data_dir, tabs, runtime giu nguyen.
+async function updateChannel() {
+  const id = Number($('pf-id').value);
+  if (!(id > 0)) { pfShowError('Thiếu ID kênh — không thể lưu.'); return; }
+  const draft = collectProfileDraft();
+  if (!draft.name) { pfShowError('Vui lòng nhập tên kênh.'); toast('Vui lòng nhập tên kênh', 'error'); return; }
+  // Chi gui field thay doi (dirty) + id; backend giu nguyen field khong gui
+  const orig = JSON.parse(profileDraftOriginal || '{}');
+  const payload = { id };
+  for (const k of Object.keys(draft)) {
+    if (JSON.stringify(draft[k]) !== JSON.stringify(orig[k])) payload[k] = draft[k];
+  }
+  if (Object.keys(payload).length === 1) { toast('Không có thay đổi nào', ''); return; }
+  const btn = $('pf-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '◌ Đang lưu...'; }
+  pfShowError('');
+  try {
+    const res = await sendJson(api + 'profiles.php?action=update', payload);
+    if (!res.ok) {
+      // Loi: GIU modal + draft, hien error, khong dong
+      pfShowError(res.message || 'Không thể lưu thay đổi. Vui lòng thử lại.');
+      toast(res.message || 'Lỗi', 'error');
+      return;
+    }
+    // Patch store tai cho (khong doi runtime/tabs) + render card ngay
+    const p = profiles.find(x => Number(x.id) === id);
+    const newName = draft.name;
+    if (p) Object.assign(p, draft);
+    profileDraftOriginal = null;
+    closeModal('profile-modal');
+    renderProfiles();
+    toast(`Đã cập nhật "${newName}"`, 'success');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Lưu thay đổi'; refreshProfileSaveBtn(); }
+  }
+}
+function updateChannelInStore(id, fields) {
+  const p = profiles.find(x => Number(x.id) === Number(id));
+  if (p) Object.assign(p, fields);
 }
 
 // ============ PROXIES ============

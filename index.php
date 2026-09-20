@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260921c">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260921d">
 </head>
 <body>
 
@@ -869,30 +869,33 @@
   <div class="modal">
     <div class="modal-header">
       <h2 id="profile-modal-title">Tạo kênh mới</h2>
-      <button class="modal-close" onclick="closeModal('profile-modal')">&times;</button>
+      <button class="modal-close" onclick="cancelProfileModal()" title="Đóng">&times;</button>
     </div>
     <div class="modal-body">
       <input type="hidden" id="pf-id">
-      <div class="pf-mode-tabs">
+      <div class="pf-mode-tabs" id="pf-mode-tabs">
         <button type="button" class="btn btn-sm pf-mode-btn active" id="pf-mode-single" onclick="setProfileMode('single')">Tạo đơn</button>
         <button type="button" class="btn btn-sm pf-mode-btn" id="pf-mode-bulk" onclick="setProfileMode('bulk')">Tạo nhiều</button>
       </div>
 
       <div id="pf-single-fields">
+        <div class="form-group-title">Thông tin kênh</div>
         <label>Tên kênh *</label>
         <input type="text" id="pf-name" placeholder="Ví dụ: Kênh Ẩm Thực">
+        <label>Channel Handle (tùy chọn)</label>
+        <input type="text" id="pf-handle" placeholder="Ví dụ: @kênh-ẩm-thực hoặc channel ID">
+        <div class="form-group-title">Trình duyệt</div>
         <label>User-Agent (để trống = tự động đề xuất)</label>
         <div style="display:flex;gap:8px;align-items:center">
           <input type="text" id="pf-ua" style="flex:1" placeholder="VD: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...">
           <button type="button" class="btn btn-sm" onclick="randomUA()" title="Tạo User-Agent ngẫu nhiên">🎲 Tự động</button>
         </div>
+        <div class="hint" id="pf-launch-note"></div>
         <label>WebRTC (chống lộ IP)</label>
         <select id="pf-webrtc">
           <option value="default">Mặc định (không can thiệp)</option>
           <option value="disable_nonproxied_udp">Chỉ cho UDP qua proxy (đề xuất)</option>
         </select>
-        <label>Channel Handle (tùy chọn)</label>
-        <input type="text" id="pf-handle" placeholder="Ví dụ: @kênh-ẩm-thực hoặc channel ID">
       </div>
 
       <div id="pf-bulk-fields" class="hidden">
@@ -903,27 +906,35 @@
         <input type="number" id="pf-count" value="5" min="1" max="200">
       </div>
 
-      <label>Nền tảng</label>
-      <select id="pf-platform">
-        <option value="youtube">YouTube</option>
-        <option value="tiktok">TikTok</option>
-        <option value="facebook">Facebook</option>
-        <option value="other">Khác</option>
-      </select>
-      <label>Proxy</label>
-      <select id="pf-proxy"><option value="">Không dùng proxy</option></select>
-      <label>Màn hình</label>
-      <select id="pf-monitor-mode" onchange="pfRefreshMonitorHint()">
-        <option value="LAST">Nhớ màn hình lần cuối</option>
-        <option value="AUTO">Tự động</option>
-        <option value="FIXED">Màn hình cố định…</option>
-      </select>
-      <select id="pf-monitor-fixed" class="hidden" style="margin-top:6px"></select>
-      <div class="hint" id="pf-monitor-hint"></div>
+      <div id="pf-common-fields">
+        <label>Nền tảng</label>
+        <select id="pf-platform">
+          <option value="youtube">YouTube</option>
+          <option value="tiktok">TikTok</option>
+          <option value="facebook">Facebook</option>
+          <option value="other">Khác</option>
+        </select>
+        <div class="form-group-title">Kết nối</div>
+        <label>Proxy</label>
+        <select id="pf-proxy"><option value="">Không dùng proxy</option></select>
+        <div class="hint" id="pf-proxy-note"></div>
+        <div class="form-group-title">Hiển thị</div>
+        <label>Màn hình</label>
+        <select id="pf-monitor-mode" onchange="pfRefreshMonitorHint();profileDraftChanged()">
+          <option value="LAST">Nhớ màn hình lần cuối</option>
+          <option value="AUTO">Tự động</option>
+          <option value="FIXED">Màn hình cố định…</option>
+        </select>
+        <select id="pf-monitor-fixed" class="hidden" style="margin-top:6px"></select>
+        <div class="hint" id="pf-monitor-hint"></div>
+      </div>
+      <div class="form-error hidden" id="pf-error"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('profile-modal')">Hủy</button>
-      <button class="btn btn-primary" id="pf-save-btn" onclick="saveProfile()">Lưu</button>
+      <span class="summary-text" id="pf-dirty-hint"></span>
+      <button class="btn" onclick="cancelProfileModal()">Hủy</button>
+      <button class="btn btn-primary hidden" id="pf-create-btn" onclick="saveProfile()">Tạo kênh</button>
+      <button class="btn btn-primary" id="pf-save-btn" onclick="saveProfile()">Lưu thay đổi</button>
     </div>
   </div>
 </div>
@@ -1139,7 +1150,7 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260921c"></script>
+<script src="assets/js/app.js?v=20260921d"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
 </body>
 </html>
