@@ -71,12 +71,47 @@ function monSetRange(d) {
 }
 function monSetRangeCustom() {
   document.querySelectorAll('#mon-range button').forEach(b => b.classList.toggle('active', b.dataset.range === 'custom'));
-  $('mon-from').classList.remove('hidden'); $('mon-to').classList.remove('hidden');
+  $('mon-custom-wrap').classList.remove('hidden');
 }
 function monRangeCustomGo() {
   monCustomFrom = $('mon-from').value; monCustomTo = $('mon-to').value;
-  if (monCustomFrom) monLoadHistory(1);
+  $('mon-custom-wrap').classList.add('hidden');
+  if (monCustomFrom && monTabCur === 'history') monLoadHistory(1);
+  else if (monCustomFrom) { monTab('history'); }
 }
+// Friendly message: khong hien raw backend code cho user
+const MON_MSG = {
+  chrome_not_running: 'Chrome chưa chạy', login_required: 'Cần đăng nhập',
+  verification_required: 'Cần xác minh', security_challenge: 'Gặp kiểm tra bảo mật',
+  recovery_required: 'Cần khôi phục tài khoản', proxy_error: 'Proxy không kết nối được',
+  proxy_dead: 'Proxy không kết nối được', youtube_unreachable: 'Không truy cập được YouTube',
+  channel_unavailable: 'Không truy cập được', eval_failed: 'Lỗi kiểm tra, thử lại sau',
+};
+function monFriendly(code, fallback) {
+  if (!code) return fallback || 'Có vấn đề cần kiểm tra';
+  const k = String(code).toLowerCase();
+  if (MON_MSG[k]) return MON_MSG[k];
+  if (/challenge|verify/i.test(code)) return 'Cần xác minh';
+  if (/recover/i.test(code)) return 'Cần khôi phục tài khoản';
+  if (/proxy/i.test(code)) return 'Proxy không kết nối được';
+  if (/login|signin/i.test(code)) return 'Cần đăng nhập';
+  return fallback || 'Có vấn đề cần kiểm tra';
+}
+// Auto refresh OFF/1/5/15 + last-updated
+let monAutoTimer = null;
+function monAutoChange() {
+  clearInterval(monAutoTimer); monAutoTimer = null;
+  const m = parseInt(($('mon-auto') || {}).value || '0', 10);
+  if (m > 0) monAutoTimer = setInterval(() => { monRefresh(); }, m * 60000);
+}
+function monStampUpdated() {
+  const el = $('mon-updated');
+  if (el) el.textContent = 'Cập nhật lần cuối: vừa xong';
+}
+setInterval(() => {
+  const el = $('mon-updated');
+  if (el && el.dataset.ts) el.textContent = 'Cập nhật lần cuối: ' + accRelTime(el.dataset.ts);
+}, 30000);
 async function monRefresh(hard) {
   if (!$('view-monitoring').classList.contains('active') && !hard) return;
   ChannelStateStore.syncFromProfiles(profiles);
@@ -99,45 +134,70 @@ async function monBadgeTick() {
   } catch (e) {}
 }
 // ---- Overview ----
+const MON_HEALTH_ORDER = ['ACTIVE', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR', 'CHECKING', 'UNCHECKED'];
+const MON_HEALTH_CLS = { ACTIVE: 'ok', LOGIN_REQUIRED: 'mid', VERIFICATION_REQUIRED: 'mid', UNAVAILABLE: 'low', ERROR: 'low', CHECKING: '', UNCHECKED: '' };
 async function monLoadOverview(quiet) {
   try {
     const r = await getJson(api + 'monitoring.php?action=summary');
     if (!r.ok) throw new Error();
     const s = r.data.summary;
+    const tot = Math.max(1, s.total);
+    const pct = (v) => Math.round(100 * v / tot) + '% tổng số';
     const kpi = [
-      ['Tổng kênh', s.total, '', ''],
-      ['Hoạt động', s.active, 'green', 'ACTIVE'],
-      ['Có vấn đề', s.issues, s.issues ? 'red' : '', 'ISSUES'],
-      ['Chưa kiểm tra', s.unchecked, '', 'UNCHECKED'],
+      ['Tổng kênh', s.total, pct(s.total), '', ''],
+      ['Hoạt động', s.active, pct(s.active), 'st-healthy', 'ACTIVE'],
+      ['Có vấn đề', s.issues, pct(s.issues), s.issues ? 'st-critical' : '', 'ISSUES'],
+      ['Chưa kiểm tra', s.unchecked, pct(s.unchecked), '', 'UNCHECKED'],
+      ['Chrome đang chạy', s.running, pct(s.running), '', 'RUNNING'],
+      ['Có Proxy', s.withProxy, `${s.proxyDead} lỗi`, '', ''],
+      ['Đang đánh giá', s.checking, pct(s.checking), 'st-info', 'CHECKING'],
+      ['Cảnh báo mở', s.alerts, s.alertsCritical ? `${s.alertsCritical} nghiêm trọng` : 'không nghiêm trọng', s.alerts ? 'st-critical' : '', 'ALERTS'],
     ];
-    $('mon-kpi').innerHTML = kpi.map(([l, v, c, f]) =>
-      `<div class="stat-card mon-kpi" ${f ? `onclick="monKpiFilter('${f}')"` : ''}><div class="stat-value ${c}">${v}</div><div class="stat-label">${l}</div></div>`).join('');
-    const sub = [
-      ['Chrome đang chạy', s.running, 'RUNNING'],
-      ['Có Proxy', s.withProxy, ''],
-      ['Đang đánh giá', s.checking, 'CHECKING'],
-      ['Cảnh báo mới', s.alerts, s.alertsCritical ? 'red' : ''],
-    ];
-    $('mon-kpi-sub').innerHTML = sub.map(([l, v, f]) =>
-      `<div class="stat-card mon-kpi" ${f ? `onclick="monKpiFilter('${f}')"` : ''}><div class="stat-value">${v}</div><div class="stat-label">${l}</div></div>`).join('');
-    // Health bars
-    $('mon-health').innerHTML = r.data.distribution.map(d => {
-      const [label] = EVAL_STATUS[d.status] || [d.status];
-      const cls = d.status === 'ACTIVE' ? 'ok' : (['LOGIN_REQUIRED', 'VERIFICATION_REQUIRED'].includes(d.status) ? 'mid' : (d.status === 'UNCHECKED' || d.status === 'CHECKING' ? '' : 'low'));
-      return `<div class="mon-health-row" onclick="monKpiFilter('${d.status}')" title="Lọc kênh ${label}">`
-        + `<span class="mon-health-label">${label}</span>`
-        + `<span class="acc-bar" style="flex:1"><i class="${cls}" style="width:${d.pct}%"></i></span>`
-        + `<strong>${d.count}</strong><span class="muted">${d.pct}%</span></div>`;
+    $('mon-kpi').innerHTML = kpi.map(([l, v, sub, c, f]) =>
+      `<div class="mon-kpi" ${f ? `onclick="monKpiFilter('${f}')"` : ''}>`
+      + `<div class="mon-kpi-label">${l}</div><div class="mon-kpi-value ${c}">${v}</div>`
+      + `<div class="mon-kpi-sub2">${sub}</div></div>`).join('');
+    // Status strip nho
+    $('mon-strip').innerHTML = `<span><span class="st-healthy">●</span> Monitoring hoạt động</span>`
+      + `<span>Last sync: ${new Date().toTimeString().slice(0, 5)}</span>`
+      + `<span>${s.coverage ?? s.total} kênh được theo dõi</span>`
+      + `<span>${s.alerts} cảnh báo mở</span>`;
+    const upd = $('mon-updated');
+    if (upd) { upd.dataset.ts = new Date().toISOString().slice(0, 19).replace('T', ' '); upd.textContent = 'Cập nhật lần cuối: vừa xong'; }
+    // Health: label / count / pct RIENG + bar (khong bao gio "10100%")
+    const byStatus = {};
+    (r.data.distribution || []).forEach(d => { byStatus[d.status] = d; });
+    $('mon-health').innerHTML = MON_HEALTH_ORDER.map(k => {
+      const d = byStatus[k] || { count: 0, pct: 0 };
+      const [label] = EVAL_STATUS[k] || [k];
+      const c = Number(d.count) || 0, p = Number(d.pct) || 0;
+      return `<div class="mon-health-row" onclick="monKpiFilter('${k}')" title="Lọc kênh ${label}">`
+        + `<div class="mon-health-top"><span class="mon-health-label">${label}</span>`
+        + `<span class="mon-health-count">${c}</span><span class="mon-health-pct">${p}%</span></div>`
+        + `<span class="acc-bar"><i class="${MON_HEALTH_CLS[k] || ''}" style="width:${c ? p : 0}%"></i></span></div>`;
     }).join('');
+    monRenderSysinfo(s);
     monLoadAlertsMini();
     monLoadRecent();
+    monLoadMiniTrend();
     monLoadDist();
   } catch (e) {
     if (!quiet) $('mon-kpi').innerHTML = '<div class="empty-state">Không tải được dữ liệu <button class="btn btn-sm" onclick="monLoadOverview()">Thử lại</button></div>';
   }
 }
+function monRenderSysinfo(s) {
+  const kv = (k, v, tip) => `<div class="mon-kv"><span${tip ? ` title="${escapeAttr(tip)}"` : ''}>${k}</span><strong>${v}</strong></div>`;
+  $('mon-sysinfo').innerHTML =
+    kv('Monitoring coverage', `${s.coverage ?? s.total} / ${s.total}`, 'Số kênh đang bật theo dõi')
+    + kv('Đã kiểm tra gần đây', s.checkedRecent ?? '—')
+    + kv(`Quá hạn kiểm tra (>${s.staleHours ?? 72} giờ)`, s.stale ?? '—')
+    + kv('Proxy đang sử dụng', `${s.proxyOk ?? 0} / ${s.withProxy}`)
+    + kv('Proxy lỗi', s.proxyDead)
+    + kv('⭐ Watchlist', s.watchlist ?? 0);
+}
 function monKpiFilter(f) {
   // KPI click -> filter bang channel (khong reload page)
+  if (f === 'ALERTS') { monTab('alerts'); return; }
   monChipCur = '';
   document.querySelectorAll('#mon-chips .chip').forEach(c => c.classList.toggle('active', false));
   $('mon-f-eval').value = '';
@@ -145,32 +205,53 @@ function monKpiFilter(f) {
   $('mon-f-proxy').value = '';
   $('mon-f-watch').checked = false;
   $('mon-f-alert').checked = false;
-  if (f === 'ISSUES') { $('mon-f-eval').value = ''; monChipCur = 'ISSUES'; }
+  if (f === 'ISSUES') { monChipCur = 'ISSUES'; }
   else if (f === 'RUNNING') $('mon-f-chrome').value = 'running';
-  else if (f === 'CHECKING') $('mon-f-eval').value = 'CHECKING';
-  else if (['ACTIVE', 'UNCHECKED', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR'].includes(f)) $('mon-f-eval').value = f;
+  else if (['ACTIVE', 'CHECKING', 'UNCHECKED', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR'].includes(f)) $('mon-f-eval').value = f;
   monTab('channels');
   monLoadChannels(1);
 }
 async function monLoadAlertsMini() {
   try {
-    const r = await getJson(api + 'monitoring.php?action=alerts&status=OPEN&limit=5');
+    const r = await getJson(api + 'monitoring.php?action=alerts&status=OPEN&limit=3');
     const list = r.ok ? r.data.alerts : [];
-    $('mon-alerts-mini').innerHTML = list.length ? list.map(a => monAlertRow(a, true)).join('')
-      : '<div class="empty-state">Không có cảnh báo đang mở</div>';
-  } catch (e) { $('mon-alerts-mini').innerHTML = '<div class="empty-state">Không tải được dữ liệu</div>'; }
+    $('mon-alerts-mini').innerHTML = list.length ? list.map(a => monAlertCard(a)).join('')
+      : '<div class="empty-state">✓ Không có cảnh báo đang mở</div>';
+  } catch (e) { $('mon-alerts-mini').innerHTML = '<div class="empty-state">Không tải được dữ liệu <button class="btn btn-sm" onclick="monLoadAlertsMini()">Thử lại</button></div>'; }
+}
+function monAlertCard(a) {
+  const sev = a.severity || 'INFO';
+  return `<div class="mon-alert-card sev-${sev}">`
+    + `<div class="mon-alert-top"><span class="badge ${sev === 'CRITICAL' ? 'badge-danger' : (sev === 'WARNING' ? 'badge-warn' : 'badge-info')}">${sev}</span>`
+    + `<span class="mon-alert-ch">${escapeHtml(a.profile_name || ('Kênh #' + a.profile_id))}</span></div>`
+    + `<div class="mon-alert-msg">${escapeHtml(monFriendly(a.type, a.message))}</div>`
+    + `<div class="mon-alert-foot"><span class="muted"><small>${accRelTime(a.last_seen)}${a.seen_count > 1 ? ` · ×${a.seen_count}` : ''}</small></span><span class="spacer"></span>`
+    + `<button class="btn btn-xs" onclick="monOpenDrawer(${a.profile_id})">Xem chi tiết</button>`
+    + `<button class="btn btn-xs" onclick="monRowRecheck(${a.profile_id}, this)">Kiểm tra lại</button></div></div>`;
 }
 async function monLoadRecent() {
+  const cat = ($('mon-recent-filter') || {}).value || '';
   try {
-    const r = await getJson(api + 'monitoring.php?action=recent&limit=10');
-    const list = r.ok ? r.data : [];
-    $('mon-recent').innerHTML = list.length ? `<div class="timeline">` + list.map(h =>
+    const q = cat ? `&category=${cat}` : '';
+    const r = await getJson(api + `monitoring.php?action=recent&limit=8${q}`);
+    let list = r.ok ? r.data : [];
+    if (cat) list = list.filter(h => h.category === cat);
+    $('mon-recent').innerHTML = list.length ? `<div class="timeline">` + list.slice(0, 8).map(h =>
       `<div class="tl-item"><span class="mono muted">${escapeHtml((h.ts || '').slice(5, 16))}</span> `
       + `<strong>${escapeHtml(h.profile_name || ('#' + h.profile_id))}</strong> `
-      + `<span class="muted">${escapeHtml(h.category)}</span> `
-      + `${escapeHtml(h.old_value || '-')} → <strong>${escapeHtml(h.new_value || '-')}</strong></div>`).join('') + `</div>`
-      : '<div class="empty-state">Chưa có thay đổi</div>';
-  } catch (e) { $('mon-recent').innerHTML = '<div class="empty-state">Không tải được dữ liệu</div>'; }
+      + `<span>${escapeHtml(h.old_value || '-')} → <strong>${escapeHtml(h.new_value || '-')}</strong></span>`
+      + (h.reason ? `<span class="muted"><small>${escapeHtml(monFriendly(h.reason, h.reason))}</small></span>` : '') + `</div>`).join('') + `</div>`
+      : '<div class="empty-state">○ Chưa có thay đổi trong khoảng thời gian này.</div>';
+  } catch (e) { $('mon-recent').innerHTML = '<div class="empty-state">Không tải được dữ liệu <button class="btn btn-sm" onclick="monLoadRecent()">Thử lại</button></div>'; }
+}
+async function monLoadMiniTrend() {
+  const metric = ($('mon-mini-metric') || {}).value || 'active';
+  try {
+    const r = await getJson(api + `monitoring.php?action=trends&days=7&metric=${metric}`);
+    const pts = r.ok ? r.data.points : [];
+    $('mon-mini-empty').classList.toggle('hidden', pts.length > 1);
+    monDrawOn('mon-mini-chart', pts);
+  } catch (e) { monDrawOn('mon-mini-chart', []); }
 }
 async function monLoadDist() {
   const by = $('mon-dist-by').value;
@@ -280,15 +361,16 @@ async function monLoadAlerts() {
   } catch (e) { $('mon-alerts-tbody').innerHTML = '<tr><td colspan="8"><div class="empty-state">Không tải được dữ liệu</div></td></tr>'; }
 }
 function monAlertRow(a, mini) {
+  if (mini) return monAlertCard(a);
   const sev = `<span class="badge ${a.severity === 'CRITICAL' ? 'badge-danger' : (a.severity === 'WARNING' ? 'badge-warn' : 'badge-info')}">${a.severity}</span>`;
   return `<div class="mon-alert" style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--border-soft)">`
-    + (mini ? '' : `<span class="ck"><input type="checkbox" class="mon-alert-check" data-id="${a.id}" data-pid="${a.profile_id}"><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></span>`)
+    + `<span class="ck"><input type="checkbox" class="mon-alert-check" data-id="${a.id}" data-pid="${a.profile_id}"><span class="ck-box"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span></span>`
     + `<strong>${escapeHtml(a.profile_name || ('#' + a.profile_id))}</strong>${sev}`
-    + `<span>${escapeHtml(a.message)}</span><span class="muted"><small>${accRelTime(a.last_seen)}</small></span>`
+    + `<span>${escapeHtml(monFriendly(a.type, a.message))}</span><span class="muted"><small>${accRelTime(a.last_seen)}</small></span>`
     + `<span class="spacer"></span>`
     + `<button class="btn btn-xs" onclick="monOpenDrawer(${a.profile_id})">Xem</button>`
     + `<button class="btn btn-xs" onclick="monRowRecheck(${a.profile_id}, this)">Kiểm tra lại</button>`
-    + (mini || a.status !== 'OPEN' ? '' : `<button class="btn btn-xs" onclick="monResolveAlert(${a.id})">Đã xem</button>`) + `</div>`;
+    + (a.status !== 'OPEN' ? '' : `<button class="btn btn-xs" onclick="monResolveAlert(${a.id})">Đã xem</button>`) + `</div>`;
 }
 async function monResolveAlert(id) {
   await sendJson(api + 'monitoring.php?action=alert_resolve', { id });
@@ -333,29 +415,34 @@ async function monLoadTrends() {
     const r = await getJson(api + `monitoring.php?action=trends&days=${monTrendDays}&metric=${metric}`);
     const pts = r.ok ? r.data.points : [];
     $('mon-trend-empty').classList.toggle('hidden', pts.length > 1);
-    monDrawChart(pts);
-  } catch (e) { monDrawChart([]); }
+    monDrawOn('mon-chart', pts, 220);
+  } catch (e) { monDrawOn('mon-chart', [], 220); }
 }
-function monDrawChart(pts) {
-  const cv = $('mon-chart');
+function monDrawOn(cvId, pts, h) {
+  const cv = $(cvId);
+  if (!cv) return;
   const ctx = cv.getContext('2d');
-  const W = cv.parentElement.clientWidth - 32, H = 220;
+  const W = Math.max(200, cv.parentElement.clientWidth - 32), H = h || 160;
   cv.width = W; cv.height = H;
   ctx.clearRect(0, 0, W, H);
-  if (pts.length < 2) return;
+  if (!pts || pts.length < 2) return;
   const vs = pts.map(p => p.v);
   const max = Math.max(1, ...vs);
   const stepX = W / (pts.length - 1);
+  const maxV = Math.max(...vs), minV = Math.min(...vs);
+  const same = maxV === minV;
   ctx.strokeStyle = '#4da3ff'; ctx.lineWidth = 2; ctx.beginPath();
   pts.forEach((p, i) => {
-    const x = i * stepX, y = H - 12 - (p.v / max) * (H - 30);
+    const x = i * stepX;
+    const y = same ? H / 2 : H - 14 - ((p.v - minV) / Math.max(1, maxV - minV)) * (H - 34);
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   });
   ctx.stroke();
   ctx.fillStyle = '#888'; ctx.font = '11px sans-serif';
-  ctx.fillText(String(max), 4, 12);
-  ctx.fillText(pts[0].t.slice(0, 10), 4, H - 2);
-  ctx.fillText(pts[pts.length - 1].t.slice(0, 10), W - 70, H - 2);
+  ctx.fillText(String(maxV), 4, 12);
+  ctx.fillText(String(minV), 4, H - 4);
+  ctx.fillText(String(pts[0].t).slice(0, 10), 30, H - 4);
+  ctx.fillText(String(pts[pts.length - 1].t).slice(0, 10), W - 76, H - 4);
 }
 // ---- History ----
 async function monLoadHistory(page) {
@@ -401,7 +488,7 @@ async function monOpenDrawer(id) {
       + `<div class="sync-label">ĐÁNH GIÁ (tín hiệu thô)</div><div class="acc-grid">`
       + row('Đăng nhập', st.login_state || '—') + row('Phiên', st.session_state || '—')
       + row('YouTube', st.youtube_state || '—') + row('Kênh', st.channel_state || '—') + `</div>`
-      + `<div class="sync-label">ĐIỂM NỘI BỘ (tool tự tính, không phải của YouTube)</div><div class="acc-grid">`
+      + `<div class="sync-label" title="Điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube.">ĐIỂM NỘI BỘ ⓘ (tool tự tính, không phải của YouTube)</div><div class="acc-grid">`
       + row('Ổn định', `${st.stability ?? '-'} / 100`) + row('Tin cậy', `${st.confidence ?? '-'} / 100`) + `</div>`
       + `<div class="sync-label">RUNTIME / PROXY</div><div class="acc-grid">`
       + row('Chrome', p.status || '-') + row('Mở lúc', p.last_opened || '—') + `</div>`

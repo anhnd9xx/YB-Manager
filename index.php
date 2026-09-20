@@ -277,21 +277,29 @@
       <!-- ===== VIEW: MONITORING (Thong ke & Theo doi) ===== -->
       <section id="view-monitoring" class="view">
         <div class="mon-head">
-          <div>
-            <h2 class="mon-title">Thống kê & Theo dõi</h2>
-            <p class="mon-sub">Theo dõi trạng thái, sức khỏe và thay đổi của toàn bộ kênh</p>
-          </div>
+          <p class="mon-sub">Theo dõi trạng thái, sức khỏe và thay đổi của toàn bộ kênh</p>
           <div class="mon-actions">
-            <div class="seg" id="mon-range">
-              <button data-range="1" onclick="monSetRange(1)">24 giờ</button>
-              <button data-range="7" class="active" onclick="monSetRange(7)">7 ngày</button>
-              <button data-range="30" onclick="monSetRange(30)">30 ngày</button>
-              <button data-range="custom" onclick="monSetRangeCustom()">Tùy chỉnh</button>
-            </div>
-            <input type="date" id="mon-from" class="filter-select hidden" onchange="monRangeCustomGo()">
-            <input type="date" id="mon-to" class="filter-select hidden" onchange="monRangeCustomGo()">
             <button class="btn btn-sm" onclick="monRefresh(true)">↻ Làm mới</button>
+            <span class="muted" id="mon-updated">—</span>
+            <label class="muted">Tự động <select id="mon-auto" class="filter-select" onchange="monAutoChange()">
+              <option value="0">Tắt</option><option value="1">1 phút</option><option value="5">5 phút</option><option value="15">15 phút</option>
+            </select></label>
           </div>
+        </div>
+        <div class="mon-strip" id="mon-strip"><div class="skeleton skeleton-strip"></div></div>
+        <div class="mon-range-row">
+          <div class="seg" id="mon-range">
+            <button data-range="1" onclick="monSetRange(1)">24 giờ</button>
+            <button data-range="7" class="active" onclick="monSetRange(7)">7 ngày</button>
+            <button data-range="30" onclick="monSetRange(30)">30 ngày</button>
+            <button data-range="custom" onclick="monSetRangeCustom()">Tùy chỉnh</button>
+          </div>
+          <span id="mon-custom-wrap" class="hidden">
+            <input type="date" id="mon-from" class="filter-select">
+            <span class="muted">→</span>
+            <input type="date" id="mon-to" class="filter-select">
+            <button class="btn btn-sm btn-primary" onclick="monRangeCustomGo()">Áp dụng</button>
+          </span>
         </div>
         <div class="mon-tabs">
           <button class="mon-tab active" data-mtab="overview" onclick="monTab('overview')">Tổng quan</button>
@@ -302,24 +310,52 @@
         </div>
 
         <div class="mon-pane" id="mon-pane-overview">
-          <div class="stat-grid" id="mon-kpi"></div>
-          <div class="stat-grid mon-kpi-sub" id="mon-kpi-sub"></div>
-          <div class="panel">
-            <div class="panel-head"><h3>Tình trạng toàn bộ kênh</h3></div>
-            <div id="mon-health"><div class="skeleton"></div></div>
-          </div>
-          <div class="mon-cols">
-            <div class="panel">
-              <div class="panel-head"><h3>Cần chú ý</h3><button class="btn btn-sm" onclick="monTab('alerts')">Xem tất cả</button></div>
+          <div class="mon-kpi-grid" id="mon-kpi"></div>
+          <div class="mon-grid-row">
+            <div class="dashboard-card mon-span8">
+              <div class="dashboard-card-head"><h3>Tình trạng toàn bộ kênh</h3></div>
+              <div id="mon-health"><div class="skeleton"></div></div>
+            </div>
+            <div class="dashboard-card mon-span4">
+              <div class="dashboard-card-head"><h3>Cần chú ý</h3><button class="btn btn-sm" onclick="monTab('alerts')">Xem tất cả</button></div>
               <div id="mon-alerts-mini"><div class="skeleton"></div></div>
             </div>
-            <div class="panel">
-              <div class="panel-head"><h3>Thay đổi gần đây</h3><button class="btn btn-sm" onclick="monTab('history')">Xem tất cả</button></div>
-              <div id="mon-recent"><div class="skeleton"></div></div>
+          </div>
+          <div class="mon-grid-row">
+            <div class="dashboard-card mon-span8">
+              <div class="dashboard-card-head"><h3>Xu hướng</h3>
+                <select id="mon-mini-metric" class="filter-select" onchange="monLoadMiniTrend()">
+                  <option value="active">Hoạt động</option>
+                  <option value="issues">Có vấn đề</option>
+                  <option value="login">Cần đăng nhập</option>
+                  <option value="verify">Cần xác minh</option>
+                  <option value="proxy">Proxy lỗi</option>
+                  <option value="evalfail">Đánh giá thất bại</option>
+                </select>
+              </div>
+              <canvas id="mon-mini-chart" height="160"></canvas>
+              <div id="mon-mini-empty" class="empty-state hidden">Chưa đủ dữ liệu lịch sử để hiển thị xu hướng.</div>
+            </div>
+            <div class="dashboard-card mon-span4">
+              <div class="dashboard-card-head"><h3>Theo dõi hệ thống</h3></div>
+              <div id="mon-sysinfo"><div class="skeleton"></div></div>
             </div>
           </div>
-          <div class="panel">
-            <div class="panel-head"><h3>Phân bố</h3>
+          <div class="dashboard-card">
+            <div class="dashboard-card-head"><h3>Thay đổi gần đây</h3>
+              <select id="mon-recent-filter" class="filter-select" onchange="monLoadRecent()">
+                <option value="">Tất cả</option>
+                <option value="evaluation">Đánh giá</option>
+                <option value="runtime">Chrome</option>
+                <option value="proxy">Proxy</option>
+                <option value="monitoring">Theo dõi</option>
+              </select>
+              <button class="btn btn-sm" onclick="monTab('history')">Xem tất cả</button>
+            </div>
+            <div id="mon-recent"><div class="skeleton"></div></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-head"><h3>Phân bố</h3>
               <select id="mon-dist-by" class="filter-select" onchange="monLoadDist()">
                 <option value="stage">Theo giai đoạn</option>
                 <option value="platform">Theo nền tảng</option>

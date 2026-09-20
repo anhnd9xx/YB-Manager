@@ -76,10 +76,37 @@ class MonitoringService
         }
         $alerts = AlertManager::counts();
         self::maybeSnapshot($total, $active, $issues, $unchecked, $running, $proxyDead);
+        // Monitoring summary: coverage / check gan day / qua han / watchlist.
+        // Stale threshold lay tu config monitor interval (acc_max_data_age_h), khong hard-code.
+        $coverage = $total;
+        $watchlist = 0;
+        $checkedRecent = 0;
+        $stale = 0;
+        $staleH = 72;
+        try {
+            $staleH = max(1, (int)get_setting('acc_max_data_age_h', '72'));
+        } catch (Throwable $e) {
+        }
+        try {
+            if (self::hasMonCols()) {
+                $coverage = (int)db()->query('SELECT COUNT(*) FROM profiles WHERE monitor_enabled=1' . ($watchlistOnly ? ' AND watchlist=1' : ''))->fetchColumn();
+                $watchlist = (int)db()->query('SELECT COUNT(*) FROM profiles WHERE watchlist=1')->fetchColumn();
+            }
+            if (self::hasEvalCols()) {
+                $w = $watchlistOnly && self::hasMonCols() ? 'AND p.watchlist=1' : '';
+                $checkedRecent = (int)db()->query(
+                    "SELECT COUNT(*) FROM account_states s JOIN profiles p ON p.id=s.profile_id WHERE s.last_attempt_at >= DATE_SUB(NOW(), INTERVAL $staleH HOUR) $w")->fetchColumn();
+                $stale = max(0, $total - $checkedRecent);
+            }
+        } catch (Throwable $e) {
+        }
         return ['total' => $total, 'active' => $active, 'issues' => $issues,
             'unchecked' => $unchecked, 'checking' => $checking, 'running' => $running,
             'withProxy' => $withProxy, 'proxyDead' => $proxyDead,
-            'alerts' => $alerts['total'], 'alertsCritical' => $alerts['CRITICAL']];
+            'proxyOk' => max(0, $withProxy - $proxyDead),
+            'alerts' => $alerts['total'], 'alertsCritical' => $alerts['CRITICAL'],
+            'coverage' => $coverage, 'watchlist' => $watchlist,
+            'checkedRecent' => $checkedRecent, 'stale' => $stale, 'staleHours' => $staleH];
     }
 
     /** Phan bo eval status (count + percent). */

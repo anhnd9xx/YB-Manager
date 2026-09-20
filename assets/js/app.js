@@ -1466,7 +1466,7 @@ function evalBlockInner(p) {
   const err = (es === 'ERROR' && p.eval_error) ? `<div class="eval-prev" title="${escapeAttr(p.eval_error)}">⚠ Lần này thất bại</div>` : '';
   const stage = p.acc_stage || 'NEW';
   const [, , dot] = ACC_STAGES[stage] || ACC_STAGES.NEW;
-  const stabTip = `Ổn định: ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
+  const stabTip = `Ổn định (điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube): ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
   const ch = p.acc_channel === 'exists'
     ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
     : '';
