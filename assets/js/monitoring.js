@@ -502,7 +502,7 @@ async function monOpenDrawer(id) {
       + row('Thành công', st.last_successful_check_at ? relSpan(st.last_successful_check_at) : 'chưa có')
       + row('Biết gần nhất', st.last_known_status ? (EVAL_STATUS[st.last_known_status] || [])[0] : '-') + `</div>`
       + `<div class="sync-label">ĐÁNH GIÁ (tín hiệu thô)</div><div class="acc-grid">`
-      + row('Đăng nhập', st.login_state || '—') + row('Phiên', st.session_state || '—')
+      + row('Đăng nhập', typeof authBadge === 'function' ? authBadge(st.auth_status, st.login_state) : (st.login_state || '—')) + row('Phiên', st.session_state || '—')
       + row('YouTube', st.youtube_state || '—') + row('Kênh', st.channel_state || '—') + `</div>`
       + `<div class="sync-label" title="Điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube.">ĐIỂM NỘI BỘ ⓘ (tool tự tính, không phải của YouTube)</div><div class="acc-grid">`
       + row('Ổn định', `${st.stability ?? '-'} / 100`) + row('Tin cậy', `${st.confidence ?? '-'} / 100`) + `</div>`

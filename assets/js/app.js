@@ -1008,6 +1008,11 @@ function evalApplyResult(r) {
   p.eval_status = nw;
   p.eval_prev = (r.prev_status && r.prev_status !== 'CHECKING') ? r.prev_status : p.eval_prev;
   p.eval_known = r.last_known_status ?? p.eval_known;
+  p.auth_status = r.auth_status ?? p.auth_status;
+  p.channel_presence = r.channel_presence ?? p.channel_presence;
+  p.channel_verified_at = r.channel_verified_at || p.channel_verified_at;
+  p.last_known_presence = r.last_known_presence ?? p.last_known_presence;
+  if (r.channel_state) { p.acc_channel = r.channel_state; p.acc_channel_name = r.channel_name || null; }
   p.eval_attempt = r.checked_at || p.eval_attempt;
   // Patch ngay completed/success/changed (ISO kem offset) -> card doi tuc thi
   if (r.last_completed_at) { p.eval_completed = r.last_completed_at; p.eval_attempt = r.last_completed_at; }
@@ -1323,13 +1328,12 @@ async function openAccountDrawer(id, keepOpen) {
       + `<div class="sync-label">Lần kiểm tra gần nhất: ${completedTs ? relSpan(completedTs) : 'chưa có'}${attemptLine}</div>`
       + successLine + changedLine
       + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
-      + row('Đăng nhập', sig(st.login_state === 'ok' ? 'YES' : (st.login_state === 'failed' ? 'NO' : (st.login_state || 'NOT_CHECKED'))))
+      + row('Đăng nhập', authBadge(st.auth_status, st.login_state))
       + row('Phiên', sig(st.session_state === 'ok' ? 'VALID' : (st.session_state === 'failed' ? 'INVALID' : (st.session_state || 'NOT_CHECKED'))))
       + row('Bảo mật', st.security_challenge ? yn(true) : '<span class="badge badge-ok">✓ Bình thường</span>')
       + `</div><div class="sync-label" style="margin-top:6px">NỀN TẢNG</div><div class="acc-grid">`
-      + row('YouTube', sig(st.youtube_state === 'ok' ? 'AVAILABLE' : (st.youtube_state === 'failed' ? 'UNAVAILABLE' : (st.youtube_state || 'NOT_CHECKED'))))
-      + row('Kênh', st.channel_state === 'exists' ? `<span class="badge badge-ok">✓ Hoạt động${st.channel_name ? ' (' + escapeHtml(st.channel_name) + ')' : ''}</span>`
-        : (st.channel_state === 'none' ? '<span class="badge badge-review">Chưa có kênh</span>' : sig('NOT_CHECKED')))
+      + row('YouTube', (st.auth_status && st.auth_status !== 'LOGGED_IN') ? sig('NOT_CHECKED') : sig(st.youtube_state === 'ok' ? 'AVAILABLE' : (st.youtube_state === 'failed' ? 'UNAVAILABLE' : (st.youtube_state || 'NOT_CHECKED'))))
+      + row('Kênh', channelPresenceBadge(st))
       + row('Giai đoạn', `${sLabel}`) + row('Quản lý', `${st.managed_days ?? '-'} ngày`)
       + row('Ổn định', `${st.stability} / 100`) + row('Tin cậy', `${st.confidence} / 100`)
       + `</div><div class="sync-label" style="margin-top:6px">THỐNG KÊ</div><div class="acc-grid">`
@@ -1676,9 +1680,8 @@ function evalBlockInner(p) {
   const stage = p.acc_stage || 'NEW';
   const [, , dot] = ACC_STAGES[stage] || ACC_STAGES.NEW;
   const stabTip = `Ổn định (điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube): ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
-  const ch = p.acc_channel === 'exists'
-    ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
-    : '';
+  // Badge kenh uu tien auth truoc presence (§11): chua login thi khong bao gio "Da co kenh"
+  const ch = channelPresenceChip(p);
   return `<div class="acc-head"><span class="meta-label">Đánh giá · ${relSpan(completed, 'chưa kiểm tra')}</span>`
     + `<span class="acc-stage">${evalBadgeFor(p)}</span></div>`
     + sub + err
@@ -1689,6 +1692,46 @@ function evalBlockInner(p) {
 function buildAccountRow(p) {
   return `<div class="acc-block eval-block" onclick="openAccountDrawer(${p.id})" title="Xem chi tiết đánh giá">`
     + evalBlockInner(p) + `</div>`;
+}
+const AUTH_VN = { LOGGED_IN: 'Đã đăng nhập', LOGGED_OUT: 'Chưa đăng nhập', LOGIN_REQUIRED: 'Cần đăng nhập', VERIFICATION_REQUIRED: 'Cần xác minh', UNKNOWN: 'Chưa xác định', CHECK_FAILED: 'Không kiểm tra được' };
+function authBadge(auth, loginState) {
+  const a = auth || (loginState === 'ok' ? 'LOGGED_IN' : (loginState === 'failed' ? 'LOGIN_REQUIRED' : null));
+  if (a === 'LOGGED_IN') return '<span class="badge badge-ok">✓ Đã đăng nhập</span>';
+  if (a === 'LOGIN_REQUIRED') return '<span class="badge badge-review">⚠ Cần đăng nhập</span>';
+  if (a === 'VERIFICATION_REQUIRED') return '<span class="badge badge-warn">⚠ Cần xác minh</span>';
+  if (a === 'LOGGED_OUT') return '<span class="badge badge-review">○ Chưa đăng nhập</span>';
+  return '<span class="badge badge-muted">— Chưa xác định</span>';
+}
+function channelPresenceBadge(st) {
+  const auth = st.auth_status || null;
+  const pres = st.channel_presence || 'NOT_CHECKED';
+  if (auth === 'LOGIN_REQUIRED') return '<span class="badge badge-review">⚠ Cần đăng nhập</span>';
+  if (auth === 'VERIFICATION_REQUIRED') return '<span class="badge badge-warn">⚠ Cần xác minh</span>';
+  if (auth !== 'LOGGED_IN') return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
+  if (pres === 'HAS_CHANNEL') return `<span class="badge badge-ok">✓ Đã có kênh${st.channel_name ? ' (' + escapeHtml(st.channel_name) + ')' : ''}</span>`;
+  if (pres === 'NO_CHANNEL') return '<span class="badge badge-review">○ Chưa có kênh</span>';
+  return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
+}
+function channelPresenceChip(p) {
+  const auth = p.auth_status || null;
+  const pres = p.channel_presence || 'NOT_CHECKED';
+  const verifiedAt = p.channel_verified_at || null;
+  const known = p.last_known_presence || null;
+  if (auth === 'LOGIN_REQUIRED') return `<span class="acc-channel" title="Cần đăng nhập để xác minh kênh">⚠ Cần đăng nhập</span>`;
+  if (auth === 'VERIFICATION_REQUIRED') return `<span class="acc-channel" title="Cần xác minh">⚠ Cần xác minh</span>`;
+  if (auth !== 'LOGGED_IN') {
+    let sub = `<span class="acc-channel" title="Chưa xác minh kênh">— Chưa xác minh kênh</span>`;
+    if (known === 'HAS_CHANNEL') {
+      sub += `<div class="eval-prev">Lần xác nhận gần nhất: ✓ Đã có kênh${p.channel_verified_at ? ' · ' + formatRelativeTime(p.channel_verified_at) : ''}</div>`;
+    }
+    return sub;
+  }
+  if (pres === 'HAS_CHANNEL') {
+    const nm = (p.acc_channel_name || '').slice(0, 18);
+    return `<span class="acc-channel" title="Đã xác minh${verifiedAt ? ' · ' + formatAbsoluteTime(verifiedAt) : ''}">📺 ${escapeHtml(nm || 'Đã có kênh')}</span>`;
+  }
+  if (pres === 'NO_CHANNEL') return `<span class="acc-channel" title="Đã xác minh">○ Chưa có kênh</span>`;
+  return `<span class="acc-channel" title="Chưa xác định">? Chưa xác định</span>`;
 }
 function evalBadgeFor(p) {
   // Chua tung check thanh cong + attempt loi -> "Chua xac dinh" (khong ket luan hong)

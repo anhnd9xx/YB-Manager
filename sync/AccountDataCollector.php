@@ -346,13 +346,20 @@ class AccountDataCollector
         $u = (string)($d['u'] ?? '');
         $body = (string)($d['body'] ?? '');
         $out['restricted'] = (bool)preg_match('/restricted|bị hạn chế|account.*suspend|kênh.*vi phạm/i', $u . ' ' . mb_substr($body, 0, 1000));
+        // Placeholder @me/me/mine/current KHONG chung minh co channel
+        $isPlaceholder = (bool)preg_match('#/(@me|me|mine|current)([/?#]|$)#i', $u);
         $looksChannel = (bool)preg_match('#youtube\.com/(@|channel/|c/)#i', $u)
-            && !preg_match('#/signin|/signup#i', $u);
+            && !preg_match('#/signin|/signup#i', $u) && !$isPlaceholder;
         $createMarkers = (bool)preg_match('/create.*channel|tạo kênh|create a channel|tạo kênh/i', $body);
         if ($looksChannel && !$createMarkers) {
             $out['state'] = 'exists';
             if (preg_match('~youtube\.com/(@[^/?#]+)~i', $u, $m)) $out['name'] = urldecode($m[1]);
             elseif (preg_match('~youtube\.com/(channel|c)/([^/?#]+)~i', $u, $m)) $out['name'] = $m[2];
+            // Ten placeholder (@me/...) -> khong phai evidence, huy ket luan
+            if ($out['name'] !== null && preg_match('/^(@me|me|mine|current)$/i', ltrim($out['name'], '@'))) {
+                $out['state'] = 'unknown';
+                $out['name'] = null;
+            }
         } elseif ($createMarkers) {
             $out['state'] = 'none';
         }

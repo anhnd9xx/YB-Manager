@@ -41,7 +41,7 @@ try {
                 try {
                     require_once __DIR__ . '/../sync/ChannelEvaluationManager.php';
                     ChannelEvaluationManager::watchdog();
-                    $cols = 'profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error, infra_status, last_completed_at, last_status_changed_at';
+                    $cols = 'profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error, infra_status, last_completed_at, last_status_changed_at, auth_status, channel_presence, channel_verified_at, last_known_presence, channel_legacy';
                     try {
                         if (db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch()) {
                             $cols .= ', last_attempt_status, last_error_code, last_error_message, eval_stage';
@@ -73,6 +73,10 @@ try {
                 $row['eval_completed'] = $em && !empty($em['last_completed_at']) ? iso_ts($em['last_completed_at']) : null;
                 $row['eval_success_at'] = $em && !empty($em['last_successful_check_at']) ? iso_ts($em['last_successful_check_at']) : null;
                 $row['eval_changed_at'] = $em && !empty($em['last_status_changed_at']) ? iso_ts($em['last_status_changed_at']) : null;
+                $row['auth_status'] = $em ? ($em['auth_status'] ?? null) : null;
+                $row['channel_presence'] = $em ? ($em['channel_presence'] ?? 'NOT_CHECKED') : 'NOT_CHECKED';
+                $row['channel_verified_at'] = $em && !empty($em['channel_verified_at']) ? iso_ts($em['channel_verified_at']) : null;
+                $row['last_known_presence'] = $em ? ($em['last_known_presence'] ?? null) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

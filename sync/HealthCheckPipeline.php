@@ -222,21 +222,32 @@ class HealthCheckPipeline
             $ytEv = 'failed';
         }
 
-        // ---- CHECK_CHANNEL (5s) ----
-        $t = microtime(true);
-        $ch = AccountDataCollector::probeChannel($port, $tabId, $deadline, self::TIMEOUTS['CHECK_CHANNEL']);
-        $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
-        if (($ch['state'] ?? 'unknown') === 'unknown' && empty($ch['name'])) {
-            $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
+        // ---- AUTH gate: chi LOGGED_IN moi duoc check channel ----
+        // (ko suy tu cookie/page mo duoc; challenge/recovery/unknown -> dung)
+        $authOk = ($loginEv === 'ok');
+        $earlyChallenge = !empty($yt['ch']);
+        $earlyRecovery = !empty($yt['rc']);
+        if (!$authOk || $earlyChallenge || $earlyRecovery) {
+            $mark(self::stage('CHECK_CHANNEL', 'NOT_RUN', null, 'Doi LOGIN xac nhan', 0));
+            $ch = ['state' => 'unknown', 'name' => null, 'ch' => $earlyChallenge, 'rc' => $earlyRecovery, 'restricted' => false];
+            $timings['channel'] = 0;
         } else {
-            $mark(self::stage('CHECK_CHANNEL', 'PASS', null, null, $timings['channel']));
+            // ---- CHECK_CHANNEL (5s): chi khi auth LOGGED_IN ----
+            $t = microtime(true);
+            $ch = AccountDataCollector::probeChannel($port, $tabId, $deadline, self::TIMEOUTS['CHECK_CHANNEL']);
+            $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
+            if (($ch['state'] ?? 'unknown') === 'unknown' && empty($ch['name'])) {
+                $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
+            } else {
+                $mark(self::stage('CHECK_CHANNEL', 'PASS', null, null, $timings['channel']));
+            }
         }
 
         // ---- CHECK_SECURITY (3s): tu du lieu da thu (khong query them) ----
         $t = microtime(true);
         $challenge = !empty($yt['ch']) || !empty($ch['ch']);
         $recovery = !empty($yt['rc']) || !empty($ch['rc']);
-        $restricted = !empty($ch['restricted']);
+        $restricted = $authOk && !empty($ch['restricted']);
         if ($recovery || $challenge || $restricted) {
             $code = $recovery ? 'recovery_required' : ($restricted ? 'restricted' : 'security_challenge');
             $mark(self::stage('CHECK_SECURITY', 'FAIL', $code, 'Can xac minh', (int)round((microtime(true) - $t) * 1000)));
@@ -246,11 +257,32 @@ class HealthCheckPipeline
         AccountDataCollector::closeTab($port, $tabId);
 
         // ---- FINALIZE: inference evidence-only + confidence ----
+        // auth: LOGGED_IN / LOGIN_REQUIRED / VERIFICATION_REQUIRED / UNKNOWN / CHECK_FAILED
+        if ($loginEv === 'ok' && !$challenge && !$recovery) $auth = 'LOGGED_IN';
+        elseif ($challenge || $recovery) $auth = 'VERIFICATION_REQUIRED';
+        elseif ($loginEv === 'failed') $auth = 'LOGIN_REQUIRED';
+        elseif ($loginEv === 'unknown' && $pageOk) $auth = 'LOGGED_OUT';
+        else $auth = 'UNKNOWN';
+        // presence: CHI khi auth LOGGED_IN + evidence
+        $presence = 'NOT_CHECKED';
+        $presenceEv = null;
+        if ($auth === 'LOGGED_IN') {
+            if (($ch['state'] ?? 'unknown') === 'exists') {
+                $presence = 'HAS_CHANNEL';
+                $presenceEv = 'youtube_channel_identity_confirmed';
+            } elseif (($ch['state'] ?? 'unknown') === 'none') {
+                $presence = 'NO_CHANNEL';
+                $presenceEv = 'authenticated_account_without_channel';
+            } else {
+                $presence = 'UNKNOWN';
+            }
+        }
         $mark(self::stage('FINALIZE', 'PASS', null, null, 0));
         $signals = [
             'login' => $loginEv, 'session' => 'ok', 'youtube' => $ytEv,
             'channel' => $ch['state'] ?? 'unknown', 'channelName' => $ch['name'] ?? null,
             'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => $restricted,
+            'auth' => $auth, 'presence' => $presence, 'presence_evidence' => $presenceEv,
         ];
         if ($restricted) {
             return self::finish($stages, $signals, 'success', null, null, 'RESTRICTED', 'restricted', 'HIGH', null, $timings, $t0);

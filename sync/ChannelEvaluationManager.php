@@ -463,6 +463,22 @@ class ChannelEvaluationManager
         $ms = (int)round((microtime(true) - $t0) * 1000);
         $now = date('Y-m-d H:i:s');
         $isSuccessCheck = in_array($status, [self::ACTIVE, self::LOGIN_REQUIRED, self::VERIFICATION_REQUIRED, self::UNAVAILABLE, self::RESTRICTED], true);
+        // Auth/presence tu pipeline (verified-only): chua login -> channel NOT_CHECKED
+        $auth = (string)($signals['auth'] ?? 'UNKNOWN');
+        if (!in_array($auth, ['LOGGED_IN', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'LOGGED_OUT', 'UNKNOWN', 'CHECK_FAILED'], true)) {
+            $auth = 'UNKNOWN';
+        }
+        $presence = (string)($signals['presence'] ?? 'NOT_CHECKED');
+        if ($auth !== 'LOGGED_IN') $presence = 'NOT_CHECKED'; // luat cung: chua login thi khong ket luan kenh
+        if (!in_array($presence, ['HAS_CHANNEL', 'NO_CHANNEL', 'UNKNOWN', 'NOT_CHECKED'], true)) $presence = 'NOT_CHECKED';
+        $presenceEv = ($auth === 'LOGGED_IN' && isset($signals['presence_evidence'])) ? (string)$signals['presence_evidence'] : null;
+        $verifiedPresence = $auth === 'LOGGED_IN' && in_array($presence, ['HAS_CHANNEL', 'NO_CHANNEL'], true);
+        // Gate engine + persistence: chua verify -> channel 'unknown' (khong lifecycle HAS_CHANNEL gia)
+        $gated = $signals;
+        if (!$verifiedPresence) {
+            $gated['channel'] = 'unknown';
+            $gated['channelName'] = null;
+        }
         // Cap nhat scores cu (engine) NHUNG khong hard-code ACTIVE=100: dung engine that
         $stability = (int)($prev['stability'] ?? 0);
         $confidence = (int)($prev['confidence'] ?? 0);
@@ -480,11 +496,11 @@ class ChannelEvaluationManager
                     'daysObserved' => $daysObs,
                     'hoursSinceSuccess' => $outcome === 'success' ? 0.0 : null,
                 ];
-                $eval = AccountEvaluationEngine::evaluate($signals + ['channel' => 'unknown'], $counters, $policy);
+                $eval = AccountEvaluationEngine::evaluate($gated + ['channel' => 'unknown'], $counters, $policy);
                 $stability = (int)$eval['stability'];
                 $confidence = (int)$eval['confidence'];
                 $stage = (string)$eval['stage'];
-                AccountRepository::saveResult($profileId, $outcome, $signals, $eval);
+                AccountRepository::saveResult($profileId, $outcome, $gated, $eval);
             }
         } catch (Throwable $e) {
         }
@@ -496,8 +512,18 @@ class ChannelEvaluationManager
                 $attCols = $hasAttempt ? ', last_attempt_status=?, last_error_code=NULL, last_error_message=NULL' : '';
                 $attCols .= $hasInfra ? ', infra_status=NULL' : '';
                 $attCols .= $hasConf ? ', eval_confidence=?' : '';
-                $attParams = $hasAttempt ? [self::ATT_SUCCESS, null, null] : [];
+                $attParams = $hasAttempt ? [self::ATT_SUCCESS] : [];
                 if ($hasConf) $attParams[] = $confidence;
+                // Auth/presence (verified-only). last_known_presence chi khi verify that.
+                $hasAuth = self::hasCol('auth_status');
+                if ($hasAuth) {
+                    $attCols .= ', auth_status=?, auth_verified_at=?, channel_presence=?, channel_verified_at=?, last_known_presence=?';
+                    $attParams[] = $auth;
+                    $attParams[] = $auth === 'LOGGED_IN' ? $now : null;
+                    $attParams[] = $presence;
+                    $attParams[] = $verifiedPresence ? $now : null;
+                    $attParams[] = $verifiedPresence ? $presence : ($prev['last_known_presence'] ?? null);
+                }
                 // last_completed_at = moi lan xong; changed chi khi channel doi that
                 $fromCh = ($prevStatus !== self::CHECKING) ? $prevStatus : ($lastKnown ?? self::UNCHECKED);
                 if (self::hasCol('last_completed_at')) {
@@ -519,7 +545,7 @@ class ChannelEvaluationManager
             }
         }
         try {
-            SyncLogger::info('evaluation', "[EVAL RESULT] profile=$profileId channel_status=$status duration={$ms}ms" . ($reason ? " reason=$reason" : ''), $profileId);
+            SyncLogger::info('evaluation', "[EVAL RESULT] profile=$profileId channel_status=$status auth=$auth presence=$presence duration={$ms}ms" . ($reason ? " reason=$reason" : ''), $profileId);
             $pp = [];
             foreach (['precheck', 'connect', 'session', 'platform'] as $k) {
                 if (isset($perf[$k])) $pp[] = "$k={$perf[$k]}ms";
@@ -545,10 +571,16 @@ class ChannelEvaluationManager
             'error_code' => null, 'checked_at' => $now,
             'last_completed_at' => iso_ts($now),
             'last_successful_check_at' => iso_ts($isSuccessCheck ? $now : (($prev['last_successful_check_at'] ?? null))),
+            'channel_verified_at' => $verifiedPresence ? iso_ts($now) : null,
             'last_known_status' => $isSuccessCheck ? $status : $lastKnown,
+            'auth_status' => $auth, 'channel_presence' => $presence,
+            'presence_evidence' => $presenceEv,
+            'channel_name' => $verifiedPresence ? ($signals['channelName'] ?? null) : null,
+            'last_known_presence' => $verifiedPresence ? $presence : ($prev['last_known_presence'] ?? null),
             'login_state' => $signals['login'] ?? 'unknown', 'session_state' => $signals['session'] ?? 'unknown',
             'youtube_state' => $signals['youtube'] ?? 'unknown',
-            'security_challenge' => !empty($signals['challenge']), 'channel_state' => $signals['channel'] ?? 'unknown',
+            'security_challenge' => !empty($signals['challenge']),
+            'channel_state' => $verifiedPresence ? ($presence === 'HAS_CHANNEL' ? 'exists' : 'none') : 'unknown',
             'success_count' => (int)($row['success_count'] ?? 0), 'fail_count' => (int)($row['fail_count'] ?? 0),
             'consecutive_errors' => (int)($row['consec_fails'] ?? 0),
             'reason' => $reason, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
