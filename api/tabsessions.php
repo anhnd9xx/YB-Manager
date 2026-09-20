@@ -35,9 +35,9 @@ function tabs_profile(int $id): ?array
 /** Mo tab moi bang CDP /json/new (PUT - Chrome moi tra 405 cho GET). Tra ve target id hoac null. */
 function tabs_open_new(int $port, string $url): ?string
 {
-    $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => 5, 'ignore_errors' => true]]);
-    $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
-    $t = json_decode((string)$raw, true);
+    $r = cdp_http($port, 'PUT', '/json/new?' . urlencode($url), 3000);
+    if ($r === null) return null;
+    $t = json_decode($r['body'], true);
     return is_array($t) && !empty($t['id']) ? (string)$t['id'] : null;
 }
 

@@ -46,10 +46,9 @@ class CdpConnectionManager
     /** Lay browser webSocketDebuggerUrl tu /json/version (1 HTTP duy nhat/batch). */
     private static function browserWs(int $port): ?string
     {
-        $ctx = stream_context_create(['http' => ['timeout' => 2, 'ignore_errors' => true]]);
-        $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/version', false, $ctx);
-        if (!is_string($raw) || $raw === '') return null;
-        $j = json_decode($raw, true);
+        $r = cdp_http($port, 'GET', '/json/version', 1500);
+        if ($r === null || $r['body'] === '') return null;
+        $j = json_decode($r['body'], true);
         $ws = is_array($j) ? (string)($j['webSocketDebuggerUrl'] ?? '') : '';
         return $ws !== '' ? $ws : null;
     }

@@ -20,8 +20,30 @@ $CTRL  = $dir . '/ctrl.json';
 
 function tabs(int $port): array
 {
-    $ctx = stream_context_create(['http' => ['timeout' => 1, 'ignore_errors' => true]]);
-    $json = @file_get_contents('http://127.0.0.1:' . $port . '/json/list', false, $ctx);
+    // Raw socket thay file_get_contents (wrapper ton 2x timeout moi call DevTools)
+    $fp = @stream_socket_client('tcp://127.0.0.1:' . $port, $errno, $errstr, 1);
+    $json = false;
+    if ($fp) {
+        stream_set_blocking($fp, false);
+        fwrite($fp, "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
+        $buf = '';
+        $dl = microtime(true) + 1.5;
+        while (microtime(true) < $dl) {
+            $r = [$fp];
+            $w = null;
+            $e = null;
+            if (@stream_select($r, $w, $e, 0, 200000) !== 1) continue;
+            $c = @fread($fp, 65536);
+            if ($c === false || $c === '') break;
+            $buf .= $c;
+            if (($p = strpos($buf, "\r\n\r\n")) !== false) {
+                if (preg_match('#Content-Length:\s*(\d+)#i', substr($buf, 0, $p), $m)
+                    && strlen($buf) >= $p + 4 + (int)$m[1]) break;
+            }
+        }
+        fclose($fp);
+        if (($p = strpos($buf, "\r\n\r\n")) !== false) $json = substr($buf, $p + 4);
+    }
     if ($json === false) return [];
     $arr = json_decode($json, true);
     if (!is_array($arr)) return [];

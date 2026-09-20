@@ -155,10 +155,10 @@ class AccountDataCollector
 
     private static function openTab(int $port, string $url, int $timeoutSec = 3): ?string
     {
-        // PUT: Chrome moi tra 405 cho GET /json/new
-        $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => $timeoutSec, 'ignore_errors' => true]]);
-        $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
-        $t = json_decode((string)$raw, true);
+        // PUT: Chrome moi tra 405 cho GET /json/new (raw socket, ~ms)
+        $r = cdp_http($port, 'PUT', '/json/new?' . urlencode($url), max(1000, $timeoutSec * 1000));
+        if ($r === null) return null;
+        $t = json_decode($r['body'], true);
         return is_array($t) && !empty($t['id']) ? (string)$t['id'] : null;
     }
 
@@ -205,8 +205,7 @@ class AccountDataCollector
 
     public static function closeTab(int $port, string $tabId): void
     {
-        $ctx = stream_context_create(['http' => ['timeout' => 3, 'ignore_errors' => true]]);
-        @file_get_contents('http://127.0.0.1:' . $port . '/json/close/' . $tabId, false, $ctx);
+        cdp_http($port, 'GET', '/json/close/' . $tabId, 1500);
     }
 
     /** Tim WS tu snapshot co san; thieu thi fetch lai 1 lan (khong moi eval). */
@@ -231,15 +230,50 @@ class AccountDataCollector
     /** Evaluate JS tren tab, tra ve value da decode (array) hoac null. */
     public static function eval(int $port, string $tabId, string $js, ?array $cached = null): ?array
     {
+        $r = self::evalRaw($port, $tabId, $js, $cached);
+        if (!$r['ok']) return null;
+        return $r['value'];
+    }
+
+    /**
+     * Evaluate phan biet loi CDP (vd tab moi chua co execution context)
+     * voi mat ket noi. Tra ve ['ok'=>bool,'value'=>?array,'error'=>?string].
+     */
+    public static function evalRaw(int $port, string $tabId, string $js, ?array $cached = null): array
+    {
         $ws = self::wsFor($port, $tabId, $cached);
-        if ($ws === null) return null;
+        if ($ws === null) return ['ok' => false, 'value' => null, 'error' => 'no-target'];
         $v = cdp_ws_batch($port, $ws, [
             json_encode(['id' => 7, 'method' => 'Runtime.evaluate',
                 'params' => ['expression' => $js, 'returnByValue' => true]]),
         ], 7);
-        if (!is_string($v)) return null;
+        if (!is_string($v)) return ['ok' => false, 'value' => null, 'error' => 'no-response'];
+        if (str_starts_with($v, 'ERR:')) return ['ok' => false, 'value' => null, 'error' => $v];
+        // cdp_ws_batch tra RAW value: object -> JSON string; scalar -> tran (string)
+        // hoac bare ('complete' khong quotes). Ca 3 deu la ket qua hop le.
         $d = json_decode($v, true);
-        return is_array($d) ? $d : null;
+        if (json_last_error() === JSON_ERROR_NONE) {
+            return ['ok' => true, 'value' => is_array($d) ? $d : ['value' => $d], 'error' => null];
+        }
+        return ['ok' => true, 'value' => ['value' => $v], 'error' => null];
+    }
+
+    /**
+     * Doi execution context san sang (tab moi can vai tram ms).
+     * Poll nhe 200ms toi da $budgetMs (mac dinh 2000ms), khong sleep mu.
+     */
+    public static function waitContext(int $port, string $tabId, int $budgetMs = 2000): bool
+    {
+        $deadline = microtime(true) + max(200, $budgetMs) / 1000;
+        do {
+            // readyState tra string -> evalRaw ok:true; chua context -> error chua 'context'
+            $r = self::evalRaw($port, $tabId, 'document.readyState', null);
+            if ($r['ok']) return true;
+            // Chi doi khi context chua co; loi khac (mat target) -> dung ngay
+            if (!str_contains((string)($r['error'] ?? ''), 'context')) return false;
+            usleep(200000);
+        } while (microtime(true) < $deadline);
+        return false;
     }
 
     /** Cho tab load (title xuat hien), poll 250ms toi da $waitSec (khong sleep mu). */
@@ -299,7 +333,7 @@ class AccountDataCollector
         cdp_ws_send($port, $ws, json_encode(['id' => 8, 'method' => 'Page.navigate',
             'params' => ['url' => 'https://www.youtube.com/@me']]));
         self::waitLoad($port, $tabId, $deadline, $waitSec);
-        self::waitUrlChange($port, $tabId, '/@me', $deadline, 4);
+        self::waitUrlChange($port, $tabId, '/@me', $deadline, 2);
         $d = self::eval($port, $tabId,
             "(()=>{try{const u=location.href,t=document.title||'';"
             . "const body=(document.body?document.body.innerText.slice(0,3000):'');"
@@ -317,8 +351,8 @@ class AccountDataCollector
         $createMarkers = (bool)preg_match('/create.*channel|tạo kênh|create a channel|tạo kênh/i', $body);
         if ($looksChannel && !$createMarkers) {
             $out['state'] = 'exists';
-            if (preg_match('#youtube\.com/(@[^/?#]+)#i', $u, $m)) $out['name'] = urldecode($m[1]);
-            elseif (preg_match('#youtube\.com/(channel|c)/([^/?#]+)#i', $u, $m)) $out['name'] = $m[2];
+            if (preg_match('~youtube\.com/(@[^/?#]+)~i', $u, $m)) $out['name'] = urldecode($m[1]);
+            elseif (preg_match('~youtube\.com/(channel|c)/([^/?#]+)~i', $u, $m)) $out['name'] = $m[2];
         } elseif ($createMarkers) {
             $out['state'] = 'none';
         }

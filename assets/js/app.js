@@ -970,9 +970,16 @@ const EVAL_STATUS = {
 const EVAL_ERR_VN = {
   CHROME_NOT_RUNNING: 'Chrome chưa chạy — cần mở Chrome để kiểm tra',
   CHROME_START_TIMEOUT: 'Mở Chrome quá chậm',
+  BROWSER_NOT_RUNNING: 'Chrome chưa chạy',
   DEBUG_PORT_UNAVAILABLE: 'Không lấy được cổng kiểm tra',
+  DEBUG_PORT_NOT_LISTENING: 'Cổng kiểm tra trình duyệt chưa sẵn sàng',
+  DEVTOOLS_HTTP_UNAVAILABLE: 'Không kết nối được trình duyệt',
   CDP_UNAVAILABLE: 'Không kết nối được trình duyệt',
   CDP_CONNECT_FAILED: 'Không kết nối được trình duyệt',
+  CDP_CONNECT_TIMEOUT: 'Không kết nối được trình duyệt',
+  CDP_WEBSOCKET_FAILED: 'Không kết nối được trình duyệt',
+  CDP_COMMAND_TIMEOUT: 'Trình duyệt phản hồi chậm',
+  CDP_DISCONNECTED: 'Mất kết nối với trình duyệt',
   CDP_TIMEOUT: 'Trình duyệt phản hồi quá thời gian',
   PROXY_ERROR: 'Proxy không kết nối được',
   NETWORK_TIMEOUT: 'Kết nối mạng quá thời gian',
@@ -1279,7 +1286,7 @@ async function openAccountDrawer(id, keepOpen) {
         const s = byName[n];
         const cell = s ? stageIcon(s.result) + (s.code ? ` <small class="muted">${escapeHtml(s.code)}</small>` : '')
           : (live ? '<span class="st-info">◌ Checking</span>' : '<span class="muted">— Chưa chạy</span>');
-        return `<tr><td>${STAGE_VN_SHORT[n]}</td><td>${cell}</td></tr>`;
+        return `<tr><td>${STAGE_VN_SHORT[n]}</td><td title="${escapeAttr(s && s.detail ? s.detail : '')}">${cell}</td></tr>`;
       }).join('') + `</tbody></table>`;
     };
     $('acc-drawer-title').textContent = 'ACCOUNT EVALUATION — ' + (p.name || ('#' + id));

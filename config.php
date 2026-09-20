@@ -458,13 +458,69 @@ function cdp_reachable(int $port): bool
     return false;
 }
 
+/**
+ * DevTools HTTP qua raw socket (thay file_get_contents).
+ * LY DO: PHP http wrapper ton dung 2x`timeout` moi call DevTools (server giu
+ * connection, wrapper doi EOF roi request lai) - do thuc te: /json/list 2s,
+ * /json/new 12s. Raw socket + doc dung Content-Length: ~1-5ms.
+ * Ket noi truc tiep 127.0.0.1, KHONG qua proxy (loopback bypass).
+ * @return array{code:int, body:string}|null (null = loi transport/timeout)
+ */
+function cdp_http(int $port, string $method, string $path, int $timeoutMs = 1500): ?array
+{
+    if ($port <= 0) return null;
+    $method = strtoupper($method) === 'PUT' ? 'PUT' : 'GET';
+    $deadline = microtime(true) + max(200, $timeoutMs) / 1000;
+    $fp = @stream_socket_client('tcp://127.0.0.1:' . $port, $errno, $errstr, 0.5);
+    if (!$fp) return null;
+    stream_set_blocking($fp, false);
+    $req = "$method $path HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n";
+    if (@fwrite($fp, $req) === false) {
+        fclose($fp);
+        return null;
+    }
+    $buf = '';
+    $hdrEnd = false;
+    $code = 0;
+    $clen = null;
+    while (microtime(true) < $deadline) {
+        $r = [$fp];
+        $w = null;
+        $e = null;
+        $msLeft = (int)max(0, ($deadline - microtime(true)) * 1000000);
+        if (@stream_select($r, $w, $e, 0, min($msLeft, 200000)) !== 1) continue;
+        $c = @fread($fp, 65536);
+        if ($c === false || $c === '') break;
+        $buf .= $c;
+        if (!$hdrEnd) {
+            $p = strpos($buf, "\r\n\r\n");
+            if ($p === false) {
+                if (strlen($buf) > 16384) break;
+                continue;
+            }
+            $hdrEnd = true;
+            $hdr = substr($buf, 0, $p);
+            $buf = substr($buf, $p + 4);
+            if (preg_match('#^HTTP/\S+\s+(\d+)#m', $hdr, $m)) $code = (int)$m[1];
+            if (preg_match('#Content-Length:\s*(\d+)#i', $hdr, $m)) $clen = (int)$m[1];
+            if ($clen === 0) break;
+        }
+        if ($clen !== null && strlen($buf) >= $clen) {
+            $buf = substr($buf, 0, $clen);
+            break;
+        }
+    }
+    fclose($fp);
+    if (!$hdrEnd) return null;
+    return ['code' => $code, 'body' => $clen !== null ? substr($buf, 0, $clen) : $buf];
+}
+
 /** CDP: lay danh sach page targets cua debug port (/json/list) */
 function cdp_page_targets(int $port): array
 {
-    $ctx = stream_context_create(['http' => ['timeout' => 1, 'ignore_errors' => true]]);
-    $json = @file_get_contents('http://127.0.0.1:' . $port . '/json/list', false, $ctx);
-    if ($json === false) return [];
-    $arr = json_decode($json, true);
+    $r = cdp_http($port, 'GET', '/json/list', 1500);
+    if ($r === null) return [];
+    $arr = json_decode($r['body'], true);
     if (!is_array($arr)) return [];
     $out = [];
     foreach ($arr as $t) {

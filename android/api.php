@@ -163,9 +163,8 @@ if ($act === 'forward') {
 
 if ($act === 'newtab') {
     $url = (string)($_POST['url'] ?? 'https://www.youtube.com');
-    $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => 3, 'ignore_errors' => true]]);
-    $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
-    $t = json_decode((string)$raw, true);
+    $r = cdp_http($port, 'PUT', '/json/new?' . urlencode($url), 3000);
+    $t = $r !== null ? json_decode($r['body'], true) : null;
     $newId = is_array($t) && !empty($t['id']) ? $t['id'] : null;
     if ($newId !== null) {
         file_put_contents(frame_dir($id) . '/ctrl.json', json_encode(['tab' => $newId, 'ts' => microtime(true)]));
@@ -177,8 +176,7 @@ if ($act === 'newtab') {
 
 if ($act === 'closetab') {
     if ($tab === '') json_out(['error' => 'no tab']);
-    $ctx = stream_context_create(['http' => ['timeout' => 3, 'ignore_errors' => true]]);
-    @file_get_contents('http://127.0.0.1:' . $port . '/json/close/' . $tab, false, $ctx);
+    cdp_http($port, 'GET', '/json/close/' . $tab, 1500);
     // Neu dong dung tab daemon dang theo -> xoa ctrl de daemon tu bam tab con lai
     $cf = frame_dir($id) . '/ctrl.json';
     $c = is_file($cf) ? json_decode((string)file_get_contents($cf), true) : null;

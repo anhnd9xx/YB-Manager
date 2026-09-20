@@ -14,6 +14,7 @@ declare(strict_types=1);
  */
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/AccountDataCollector.php';
+require_once __DIR__ . '/BrowserProbe.php';
 
 class HealthCheckPipeline
 {
@@ -64,7 +65,7 @@ class HealthCheckPipeline
             return microtime(true) > $deadline;
         };
 
-        // ---- PRECHECK_BROWSER (2s): profile + runtime ----
+        // ---- PRECHECK_BROWSER: profile ton tai + runtime (khong page load) ----
         $t = microtime(true);
         try {
             $st = db()->prepare('SELECT id, name, status, debug_port, user_data_dir, proxy_id FROM profiles WHERE id=?');
@@ -85,30 +86,50 @@ class HealthCheckPipeline
             return self::finish($stages, [], 'precondition', 'CHROME_NOT_RUNNING', 'Can mo Chrome de kiem tra', null, null, 'LOW', null, $timings, $t0);
         }
         $mark(self::stage('PRECHECK_BROWSER', 'PASS', null, null, $timings['browser']));
-
-        // ---- CHECK_CDP (3s): port + reachable + khop process ----
-        $t = microtime(true);
         $port = (int)($prof['debug_port'] ?? 0);
-        $cdpFail = null;
-        if ($port <= 0) $cdpFail = ['CHECK_CDP', 'FAIL', 'CDP_UNAVAILABLE', 'Thieu debug port'];
-        elseif (!cdp_reachable($port)) $cdpFail = ['CHECK_CDP', 'TIMEOUT', 'CDP_TIMEOUT', 'CDP khong phan hoi'];
-        else {
-            $udir = (string)($prof['user_data_dir'] ?? '');
-            if ($udir !== '') {
-                $cmd = chrome_main_cmdline($udir);
-                if (is_string($cmd) && strpos($cmd, 'remote-debugging-port=' . $port) === false) {
-                    $cdpFail = ['CHECK_CDP', 'FAIL', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh'];
-                }
+        if ($port <= 0) {
+            $mark(self::stage('CHECK_CDP', 'FAIL', 'CDP_UNAVAILABLE', 'Thieu debug port', 0));
+            self::notRun($stages, array_slice(self::STAGES, 2, 6));
+            return self::finish($stages, [], 'precondition', 'CDP_UNAVAILABLE', 'Thieu debug port', null, null, 'LOW', null, $timings, $t0);
+        }
+
+        // ---- CHECK_CDP: BrowserProbe layered (port 500ms / http 1s / ws+cmd 1.5s) ----
+        $probe = BrowserProbe::probe($profileId, $port, (string)($prof['user_data_dir'] ?? ''));
+        $timings['cdp'] = array_sum($probe['timings'] ?? []);
+        $timings['probe'] = $probe['timings'] ?? [];
+        if (empty($probe['ready'])) {
+            $code = (string)($probe['code'] ?? 'CDP_CONNECT_TIMEOUT');
+            // Map ve error classification + ownership check (port thuoc profile?)
+            if ($code === 'BROWSER_NOT_RUNNING') {
+                $mark(self::stage('CHECK_CDP', 'FAIL', $code, $probe['message'] ?? '', $timings['cdp']));
+                self::notRun($stages, array_slice(self::STAGES, 2, 6));
+                return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+            }
+            if (in_array($code, ['DEBUG_PORT_NOT_LISTENING', 'DEVTOOLS_HTTP_UNAVAILABLE', 'CDP_WEBSOCKET_FAILED', 'CDP_COMMAND_TIMEOUT'], true)) {
+                $res = $code === 'DEBUG_PORT_NOT_LISTENING' ? 'FAIL' : 'TIMEOUT';
+                $mark(self::stage('CHECK_CDP', $res, $code, $probe['message'] ?? '', $timings['cdp']));
+                self::notRun($stages, array_slice(self::STAGES, 2, 6));
+                return self::finish($stages, [], 'tool_error', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+            }
+            // PROFILE_MISMATCH tuong lai: giu kenh
+            $mark(self::stage('CHECK_CDP', 'FAIL', $code, $probe['message'] ?? '', $timings['cdp']));
+            self::notRun($stages, array_slice(self::STAGES, 2, 6));
+            return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+        }
+        // Ownership: port phai thuoc Chrome cua profile (chong query nham port)
+        $udir = (string)($prof['user_data_dir'] ?? '');
+        if ($udir !== '') {
+            $cmd = chrome_main_cmdline($udir);
+            if (is_string($cmd) && strpos($cmd, 'remote-debugging-port=' . $port) === false) {
+                $mark(self::stage('CHECK_CDP', 'FAIL', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh', $timings['cdp']));
+                self::notRun($stages, array_slice(self::STAGES, 2, 6));
+                return self::finish($stages, [], 'precondition', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh', null, null, 'LOW', null, $timings, $t0);
             }
         }
-        $timings['cdp'] = (int)round((microtime(true) - $t) * 1000);
-        if ($cdpFail !== null) {
-            $mark(self::stage($cdpFail[0], $cdpFail[1], $cdpFail[2], $cdpFail[3], $timings['cdp']));
-            self::notRun($stages, array_slice(self::STAGES, 2, 6));
-            $pre = $cdpFail[2] === 'PROFILE_MISMATCH' ? 'precondition' : 'tool_error';
-            return self::finish($stages, [], $pre, $cdpFail[2], $cdpFail[3], null, null, 'LOW', null, $timings, $t0);
-        }
-        $mark(self::stage('CHECK_CDP', 'PASS', null, null, $timings['cdp']));
+        $pt = $probe['timings'] ?? [];
+        $detail = 'port ' . ($pt['tcp'] ?? '?') . 'ms / http ' . ($pt['http'] ?? '?') . 'ms / ws '
+            . ($pt['ws'] ?? '?') . 'ms / cmd ' . ($pt['cmd'] ?? '?') . 'ms';
+        $mark(self::stage('CHECK_CDP', 'PASS', null, $detail, $timings['cdp']));
 
         // ---- CHECK_PROXY_NETWORK (4s): proxy kenh con di duoc khong ----
         $t = microtime(true);
@@ -140,23 +161,17 @@ class HealthCheckPipeline
             return self::finish($stages, [], 'tool_error', 'TIMEOUT', 'Evaluation timeout', null, null, 'LOW', null, $timings, $t0);
         }
 
-        // ---- CHECK_SESSION (3s): mo tab + evaluate duoc ----
+        // ---- CHECK_SESSION: mo tab + doi execution context (poll 200ms, toi da ~2.5s) ----
         $t = microtime(true);
         $tabId = AccountDataCollector::openCheckTab($port);
         if ($tabId === null && !$over()) {
-            usleep(500000); // retry 1 lan cho transient
+            usleep(400000); // retry 1 lan cho transient
             if (!$over()) $tabId = AccountDataCollector::openCheckTab($port);
         }
-        $targets = $tabId !== null ? cdp_page_targets($port) : [];
         $sessOk = false;
         if ($tabId !== null) {
-            $v = AccountDataCollector::eval($port, $tabId, 'document.readyState', $targets);
-            $sessOk = $v !== null;
-            if (!$sessOk && !$over()) {
-                usleep(500000);
-                $v = AccountDataCollector::eval($port, $tabId, 'document.readyState', null);
-                $sessOk = $v !== null;
-            }
+            // Tab moi chua co context ngay -> poll nhe thay vi fail ngay
+            $sessOk = AccountDataCollector::waitContext($port, $tabId, 2000);
         }
         $timings['session'] = (int)round((microtime(true) - $t) * 1000);
         if (!$sessOk) {
