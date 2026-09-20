@@ -93,6 +93,9 @@ const MON_MSG = {
   PAGE_TIMEOUT: 'Trang tải quá chậm', TIMEOUT: 'Kiểm tra quá thời gian',
   PROFILE_MISMATCH: 'Nhầm phiên Chrome', LOGIN_REQUIRED: 'Cần đăng nhập',
   SECURITY_CHALLENGE: 'Cần xác minh', YOUTUBE_UNAVAILABLE: 'Không truy cập được YouTube',
+  CDP_UNAVAILABLE: 'Không kết nối được trình duyệt', PROXY_ERROR: 'Proxy không kết nối được',
+  NETWORK_TIMEOUT: 'Kết nối mạng quá thời gian', PAGE_TIMEOUT: 'Trang phản hồi quá chậm',
+  TIMEOUT: 'Kiểm tra quá thời gian', EVALUATOR_ERROR: 'Lỗi công cụ kiểm tra', EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra',
   EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra',
 };
 function monFriendly(code, fallback) {
@@ -142,8 +145,8 @@ async function monBadgeTick() {
   } catch (e) {}
 }
 // ---- Overview ----
-const MON_HEALTH_ORDER = ['ACTIVE', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR', 'CHECKING', 'UNCHECKED'];
-const MON_HEALTH_CLS = { ACTIVE: 'ok', LOGIN_REQUIRED: 'mid', VERIFICATION_REQUIRED: 'mid', UNAVAILABLE: 'low', ERROR: 'low', CHECKING: '', UNCHECKED: '' };
+const MON_HEALTH_ORDER = ['ACTIVE', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'CHANNEL_UNAVAILABLE', 'ERROR', 'CHECKING', 'UNCHECKED'];
+const MON_HEALTH_CLS = { ACTIVE: 'ok', LOGIN_REQUIRED: 'mid', VERIFICATION_REQUIRED: 'mid', CHANNEL_UNAVAILABLE: 'low', ERROR: 'low', CHECKING: '', UNCHECKED: '' };
 async function monLoadOverview(quiet) {
   try {
     const r = await getJson(api + 'monitoring.php?action=summary');
@@ -215,7 +218,7 @@ function monKpiFilter(f) {
   $('mon-f-alert').checked = false;
   if (f === 'ISSUES') { monChipCur = 'ISSUES'; }
   else if (f === 'RUNNING') $('mon-f-chrome').value = 'running';
-  else if (['ACTIVE', 'CHECKING', 'UNCHECKED', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR'].includes(f)) $('mon-f-eval').value = f;
+  else if (['ACTIVE', 'CHECKING', 'UNCHECKED', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'CHANNEL_UNAVAILABLE', 'ERROR'].includes(f)) $('mon-f-eval').value = f;
   monTab('channels');
   monLoadChannels(1);
 }

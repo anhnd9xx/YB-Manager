@@ -84,7 +84,7 @@ class AlertManager
                 self::resolve($profileId, 'login_required');
                 self::resolve($profileId, 'channel_unavailable');
                 break;
-            case 'UNAVAILABLE':
+            case 'CHANNEL_UNAVAILABLE':
                 if ($onChange) self::open($profileId, self::CRITICAL, 'channel_unavailable', $reason ?: 'Khong truy cap duoc');
                 self::resolve($profileId, 'login_required');
                 self::resolve($profileId, 'verification_required');

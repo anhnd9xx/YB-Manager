@@ -131,7 +131,7 @@ class MonitoringService
         } catch (Throwable $e) {
         }
         $out = [];
-        foreach (['ACTIVE', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'UNAVAILABLE', 'ERROR', 'CHECKING', 'UNCHECKED'] as $k) {
+        foreach (['ACTIVE', 'LOGIN_REQUIRED', 'VERIFICATION_REQUIRED', 'CHANNEL_UNAVAILABLE', 'ERROR', 'CHECKING', 'UNCHECKED'] as $k) {
             $c = $k === 'ACTIVE' ? $s['active'] : ($detail[$k] ?? 0);
             if ($k === 'UNCHECKED') $c = $s['unchecked'];
             if ($k === 'CHECKING') $c = $s['checking'];
@@ -191,7 +191,7 @@ class MonitoringService
         $hasEval = self::hasEvalCols();
         if (!empty($f['eval']) && $hasEval) {
             if ($f['eval'] === 'ISSUES') {
-                $w[] = "COALESCE(s.eval_status,'UNCHECKED') IN ('LOGIN_REQUIRED','VERIFICATION_REQUIRED','UNAVAILABLE','ERROR')";
+                $w[] = "COALESCE(s.eval_status,'UNCHECKED') IN ('LOGIN_REQUIRED','VERIFICATION_REQUIRED','CHANNEL_UNAVAILABLE','ERROR')";
             } else {
                 $w[] = "COALESCE(s.eval_status,'UNCHECKED')=?";
                 $p[] = $f['eval'];
@@ -317,7 +317,7 @@ class MonitoringService
                 . ($hasEval ? " AND (s.eval_status IS NULL OR s.eval_status<>'CHECKING')" : '')
                 . ' ORDER BY '
                 . ($hasMon ? 'p.watchlist DESC,' : '')
-                . ($hasEval ? " FIELD(COALESCE(s.eval_status,'UNCHECKED'),'LOGIN_REQUIRED','VERIFICATION_REQUIRED','UNAVAILABLE','ERROR','UNCHECKED','ACTIVE') ASC," : '')
+                . ($hasEval ? " FIELD(COALESCE(s.eval_status,'UNCHECKED'),'LOGIN_REQUIRED','VERIFICATION_REQUIRED','CHANNEL_UNAVAILABLE','ERROR','UNCHECKED','ACTIVE') ASC," : '')
                 . ' s.last_attempt_at ASC LIMIT ' . $concurrency;
             $st = db()->prepare($q);
             $st->execute([$intervalMin]);

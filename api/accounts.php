@@ -98,6 +98,22 @@ try {
             break;
         }
 
+        case 'eval_all': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = ChannelEvaluationManager::evaluate_all((int)($b['concurrency'] ?? ChannelEvaluationManager::CONCURRENCY_DEFAULT));
+            if (empty($r['ok'])) json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], 400);
+            json_out(['ok' => true, 'data' => $r]);
+            break;
+        }
+
+        case 'eval_due': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = ChannelEvaluationManager::evaluate_due((int)($b['concurrency'] ?? ChannelEvaluationManager::CONCURRENCY_DEFAULT));
+            if (empty($r['ok'])) json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], 400);
+            json_out(['ok' => true, 'data' => $r]);
+            break;
+        }
+
         case 'eval_chunk': {
             $b = $method === 'GET' ? $_GET : json_body();
             $bid = (string)($b['batch_id'] ?? $b['batch'] ?? ($_GET['batch_id'] ?? ''));

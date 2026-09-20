@@ -153,16 +153,57 @@ class AccountDataCollector
                 'channel' => 'unknown', 'channelName' => null, 'challenge' => false, 'recovery' => false];
     }
 
-    private static function openTab(int $port, string $url): ?string
+    private static function openTab(int $port, string $url, int $timeoutSec = 3): ?string
     {
         // PUT: Chrome moi tra 405 cho GET /json/new
-        $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => 5, 'ignore_errors' => true]]);
+        $ctx = stream_context_create(['http' => ['method' => 'PUT', 'timeout' => $timeoutSec, 'ignore_errors' => true]]);
         $raw = @file_get_contents('http://127.0.0.1:' . $port . '/json/new?' . urlencode($url), false, $ctx);
         $t = json_decode((string)$raw, true);
         return is_array($t) && !empty($t['id']) ? (string)$t['id'] : null;
     }
 
-    private static function closeTab(int $port, string $tabId): void
+    public static function openCheckTab(int $port, string $url = 'https://www.youtube.com'): ?string
+    {
+        return self::openTab($port, $url, 2);
+    }
+
+    /**
+     * CHECK_PROXY_NETWORK (4s): proxy kenh con di duoc khong.
+     * Khong proxy -> NOT_APPLICABLE. Auth sai/timeout/conn -> PROXY_ERROR.
+     * @return array{result:PASS|TIMEOUT|FAIL|NOT_APPLICABLE, code?:string, ms:int}
+     */
+    public static function checkProxyNetwork(?array $proxyCfg, int $timeoutSec = 4): array
+    {
+        $t0 = microtime(true);
+        $ms = fn() => (int)round((microtime(true) - $t0) * 1000);
+        if (empty($proxyCfg) || empty($proxyCfg['host'])) {
+            return ['result' => 'NOT_APPLICABLE', 'ms' => $ms()];
+        }
+        $ch = curl_init('http://www.google.com/generate_204');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeoutSec,
+            CURLOPT_CONNECTTIMEOUT => $timeoutSec,
+            CURLOPT_NOBODY => true,
+        ]);
+        proxy_curl_apply($ch, [
+            'host' => $proxyCfg['host'], 'port' => (int)($proxyCfg['port'] ?? 0),
+            'protocol' => $proxyCfg['protocol'] ?? 'http',
+            'username' => $proxyCfg['username'] ?? null, 'password' => $proxyCfg['password'] ?? null,
+        ]);
+        curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $errno = curl_errno($ch);
+        curl_close($ch);
+        if ($errno === 0 && $code >= 200 && $code < 400) {
+            return ['result' => 'PASS', 'ms' => $ms()];
+        }
+        if ($errno === 28) return ['result' => 'TIMEOUT', 'code' => 'PROXY_ERROR', 'detail' => 'proxy timeout', 'ms' => $ms()];
+        if ($errno === 67) return ['result' => 'FAIL', 'code' => 'PROXY_ERROR', 'detail' => 'proxy auth failed', 'ms' => $ms()];
+        return ['result' => 'FAIL', 'code' => 'PROXY_ERROR', 'detail' => 'proxy unreachable', 'ms' => $ms()];
+    }
+
+    public static function closeTab(int $port, string $tabId): void
     {
         $ctx = stream_context_create(['http' => ['timeout' => 3, 'ignore_errors' => true]]);
         @file_get_contents('http://127.0.0.1:' . $port . '/json/close/' . $tabId, false, $ctx);
@@ -188,7 +229,7 @@ class AccountDataCollector
     }
 
     /** Evaluate JS tren tab, tra ve value da decode (array) hoac null. */
-    private static function eval(int $port, string $tabId, string $js, ?array $cached = null): ?array
+    public static function eval(int $port, string $tabId, string $js, ?array $cached = null): ?array
     {
         $ws = self::wsFor($port, $tabId, $cached);
         if ($ws === null) return null;
@@ -202,7 +243,7 @@ class AccountDataCollector
     }
 
     /** Cho tab load (title xuat hien), poll 250ms toi da $waitSec (khong sleep mu). */
-    private static function waitLoad(int $port, string $tabId, float $deadline, int $waitSec = 8): void
+    public static function waitLoad(int $port, string $tabId, float $deadline, int $waitSec = 8): void
     {
         $until = min($deadline, microtime(true) + $waitSec);
         while (microtime(true) < $until) {
@@ -214,7 +255,7 @@ class AccountDataCollector
     }
 
     /** Cho URL doi (redirect @me), poll 250ms thay vi sleep cung 1.5s. */
-    private static function waitUrlChange(int $port, string $tabId, string $fromPart, float $deadline, int $waitSec = 4): void
+    public static function waitUrlChange(int $port, string $tabId, string $fromPart, float $deadline, int $waitSec = 4): void
     {
         $until = min($deadline, microtime(true) + $waitSec);
         while (microtime(true) < $until) {
@@ -227,7 +268,7 @@ class AccountDataCollector
         }
     }
 
-    private static function probeYoutube(int $port, string $tabId, float $deadline, int $waitSec, array $targets): ?array
+    public static function probeYoutube(int $port, string $tabId, float $deadline, int $waitSec, array $targets): ?array
     {
         self::waitLoad($port, $tabId, $deadline, $waitSec);
         $d = self::eval($port, $tabId,
@@ -250,9 +291,9 @@ class AccountDataCollector
      * Kiem tra channel qua https://www.youtube.com/@me (redirect ve channel neu co)
      * + doi chieu markers tao-kenh. Mo ho -> 'unknown' (khong doan mo).
      */
-    private static function probeChannel(int $port, string $tabId, float $deadline, int $waitSec): array
+    public static function probeChannel(int $port, string $tabId, float $deadline, int $waitSec): array
     {
-        $out = ['state' => 'unknown', 'name' => null, 'ch' => false, 'rc' => false];
+        $out = ['state' => 'unknown', 'name' => null, 'ch' => false, 'rc' => false, 'restricted' => false];
         $ws = self::wsFor($port, $tabId);
         if ($ws === null) return $out;
         cdp_ws_send($port, $ws, json_encode(['id' => 8, 'method' => 'Page.navigate',
@@ -270,6 +311,7 @@ class AccountDataCollector
         $out['rc'] = !empty($d['rc']);
         $u = (string)($d['u'] ?? '');
         $body = (string)($d['body'] ?? '');
+        $out['restricted'] = (bool)preg_match('/restricted|bị hạn chế|account.*suspend|kênh.*vi phạm/i', $u . ' ' . mb_substr($body, 0, 1000));
         $looksChannel = (bool)preg_match('#youtube\.com/(@|channel/|c/)#i', $u)
             && !preg_match('#/signin|/signup#i', $u);
         $createMarkers = (bool)preg_match('/create.*channel|tạo kênh|create a channel|tạo kênh/i', $body);

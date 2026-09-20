@@ -27,7 +27,7 @@ class ChannelEvaluationManager
     public const ACTIVE = 'ACTIVE';
     public const LOGIN_REQUIRED = 'LOGIN_REQUIRED';
     public const VERIFICATION_REQUIRED = 'VERIFICATION_REQUIRED';
-    public const UNAVAILABLE = 'UNAVAILABLE';
+    public const UNAVAILABLE = 'CHANNEL_UNAVAILABLE';
     public const RESTRICTED = 'RESTRICTED';
     public const ERROR = 'ERROR';
 
@@ -47,7 +47,7 @@ class ChannelEvaluationManager
         'ACTIVE' => 'Hoạt động',
         'LOGIN_REQUIRED' => 'Cần đăng nhập',
         'VERIFICATION_REQUIRED' => 'Cần xác minh',
-        'UNAVAILABLE' => 'Không truy cập được',
+        'CHANNEL_UNAVAILABLE' => 'Không truy cập được',
         'RESTRICTED' => 'Bị hạn chế',
         'ERROR' => 'Lỗi kiểm tra',
     ];
@@ -146,7 +146,7 @@ class ChannelEvaluationManager
                 'channelUi' => $ch === 'exists' ? 'AVAILABLE' : ($ch === 'none' ? 'NO' : 'NOT_CHECKED')];
         }
         if ($yt === 'failed') {
-            return ['status' => self::UNAVAILABLE, 'reason' => 'youtube_unreachable',
+            return ['status' => self::CHANNEL_UNAVAILABLE, 'reason' => 'youtube_unreachable',
                 'loginUi' => $yn($login === 'ok', 'YES', 'NO'), 'sessionUi' => $yn($session === 'ok', 'VALID', 'INVALID'),
                 'youtubeUi' => 'UNAVAILABLE', 'channelUi' => 'NOT_CHECKED'];
         }
@@ -155,7 +155,7 @@ class ChannelEvaluationManager
                 'loginUi' => 'YES', 'sessionUi' => 'VALID', 'youtubeUi' => 'AVAILABLE',
                 'channelUi' => $ch === 'exists' ? 'AVAILABLE' : ($ch === 'none' ? 'NO' : 'AVAILABLE')];
         }
-        return ['status' => self::UNAVAILABLE, 'reason' => 'signals_incomplete',
+        return ['status' => self::CHANNEL_UNAVAILABLE, 'reason' => 'signals_incomplete',
             'loginUi' => $login === 'ok' ? 'YES' : 'CHECK_FAILED',
             'sessionUi' => $session === 'ok' ? 'VALID' : 'CHECK_FAILED',
             'youtubeUi' => $yt === 'ok' ? 'AVAILABLE' : 'CHECK_FAILED',
@@ -219,102 +219,109 @@ class ChannelEvaluationManager
             SyncLogger::info('evaluation', "[EVAL START] profile=$profileId", $profileId);
         } catch (Throwable $e) {
         }
-        // PRECHECK (ma loi rieng, khong gom "evaluation failed")
-        self::setStage($profileId, 'PRECHECK');
-        $t = microtime(true);
-        $pre = AccountDataCollector::precheck($profileId);
-        $perf = ['precheck' => (int)round((microtime(true) - $t) * 1000)];
-        try {
-            if (!empty($pre['ok'])) {
-                SyncLogger::info('evaluation', "[EVAL PRECHECK] profile=$profileId chrome=RUNNING debug_port=" . ($pre['port'] ?? '?') . ' cdp=OK', $profileId);
-            }
-        } catch (Throwable $e) {
-        }
+        // Staged pipeline: PRECHECK -> CDP -> PROXY -> SESSION -> LOGIN ->
+        // YOUTUBE -> CHANNEL -> SECURITY -> FINALIZE (short-circuit + retry + 20s).
+        // Stage nao xong -> setStage ngay (UI live). Chi evidence moi doi channel.
+        require_once __DIR__ . '/HealthCheckPipeline.php';
+        $runPipe = function () use ($profileId) {
+            return HealthCheckPipeline::run($profileId, function (array $s) use ($profileId) {
+                self::setStage($profileId, $s['stage']);
+                if (self::hasEvalCols()) {
+                    try {
+                        db()->prepare('UPDATE account_states SET eval_stage=? WHERE profile_id=?')
+                            ->execute([$s['stage'], $profileId]);
+                    } catch (Throwable $e) {
+                    }
+                }
+            });
+        };
+        $pipe = $runPipe();
+        $perf = (array)($pipe['timings'] ?? []);
+        self::saveStageSnapshot($profileId, (array)($pipe['stages'] ?? []));
         $autoStarted = false;
-        if (!$pre['ok']) {
-            $code = (string)($pre['code'] ?? AccountDataCollector::E_INTERNAL);
-            // Chrome dung + autoStart bat -> tu mo (poll ready, khong sleep mu)
-            if ($code === AccountDataCollector::E_CHROME_NOT_RUNNING && !empty($policy['autoStart'])) {
-                self::setStage($profileId, 'CONNECTING');
-                $st = self::autoStartChrome($profileId, $policy);
-                $perf['autostart'] = $st['ms'] ?? 0;
-                if (!$st['ok']) {
-                    return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0, $st['code'], $st['message'], $perf);
-                }
-                $autoStarted = !empty($st['was_stopped']);
-                $pre = AccountDataCollector::precheck($profileId);
-                if (!$pre['ok']) {
-                    return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0,
-                        (string)($pre['code'] ?? $code), (string)($pre['message'] ?? ''), $perf, $autoStarted);
-                }
-            } else {
-                // REQUIRE_RUNNING (default): dieu kien thieu, KHONG ket luan channel hong,
-                // KHONG cham counters/scores
-                return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0, $code,
-                    (string)($pre['message'] ?? ''), $perf);
+        // Chrome dung + autoStart bat -> tu mo roi chay pipeline lai 1 lan
+        if ($pipe['outcome'] === 'precondition'
+            && ($pipe['error_code'] ?? '') === AccountDataCollector::E_CHROME_NOT_RUNNING
+            && !empty($policy['autoStart'])) {
+            self::setStage($profileId, 'CONNECTING');
+            $st = self::autoStartChrome($profileId, $policy);
+            $perf['autostart'] = $st['ms'] ?? 0;
+            if (empty($st['ok'])) {
+                return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0,
+                    (string)($st['code'] ?? 'CHROME_START_TIMEOUT'), (string)($st['message'] ?? ''), $perf);
             }
+            $autoStarted = !empty($st['was_stopped']);
+            $pipe = $runPipe();
+            $perf = array_merge($perf, (array)($pipe['timings'] ?? []));
+            self::saveStageSnapshot($profileId, (array)($pipe['stages'] ?? []));
         }
         if (self::isCancelled($profileId)) {
             self::clearCancel($profileId);
             if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
             return self::finishCancelled($profileId, $prevStatus, $lastKnown, $t0);
         }
-        // CONNECTING + CHECK (deadline tong 30s; retry transient 1 lan, delay 500ms)
-        self::setStage($profileId, 'CONNECTING');
-        self::setStage($profileId, 'CHECKING_SESSION');
-        $col = AccountDataCollector::collect($profileId, 25, ['session' => 5, 'platform' => 8]);
-        $code = (string)($col['error_code'] ?? '');
-        if (($col['status'] ?? '') !== 'success' && AccountDataCollector::isTransient($code)) {
-            usleep(500000); // retry delay 300-800ms theo spec (1 lan)
-            if (microtime(true) - $t0 < self::WATCHDOG_SEC) {
-                $col = AccountDataCollector::collect($profileId, 25, ['session' => 5, 'platform' => 8]);
-            }
-        }
-        $perf = array_merge($perf, (array)($col['timings'] ?? []));
         if (microtime(true) - $t0 > self::WATCHDOG_SEC) {
             if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
             return self::finishToolError($profileId, $prevStatus, $lastKnown, $t0,
                 'Evaluation timeout', 'TIMEOUT', $perf);
         }
-        if (self::isCancelled($profileId)) {
-            self::clearCancel($profileId);
+        if ($pipe['outcome'] === 'precondition') {
             if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
-            return self::finishCancelled($profileId, $prevStatus, $lastKnown, $t0);
+            return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0,
+                (string)($pipe['error_code'] ?? AccountDataCollector::E_INTERNAL),
+                (string)($pipe['error'] ?? ''), $perf, $autoStarted);
         }
-        self::setStage($profileId, 'CHECKING_LOGIN');
-        self::setStage($profileId, 'CHECKING_PLATFORM');
-        self::setStage($profileId, 'CHECKING_CHANNEL');
-        self::setStage($profileId, 'FINALIZING');
-        if (($col['status'] ?? '') === 'skipped') {
-            $code = (string)($col['error_code'] ?? AccountDataCollector::E_INTERNAL);
-            if (in_array($code, [AccountDataCollector::E_CHROME_NOT_RUNNING, AccountDataCollector::E_DEBUG_PORT,
-                    AccountDataCollector::E_PROFILE_MISMATCH], true)) {
-                if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
-                return self::finishPrecondition($profileId, $prevStatus, $lastKnown, $t0, $code,
-                    (string)($col['error'] ?? ''), $perf, $autoStarted);
-            }
+        if ($pipe['outcome'] === 'tool_error') {
             if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
             return self::finishToolError($profileId, $prevStatus, $lastKnown, $t0,
-                (string)($col['error'] ?? 'collect_failed'), $code, $perf);
+                (string)($pipe['error'] ?? 'check_failed'),
+                (string)($pipe['error_code'] ?? AccountDataCollector::E_INTERNAL), $perf,
+                (string)($pipe['infra'] ?? ''));
         }
-        $toolErr = ($col['status'] ?? '') === 'success' ? null : (string)($col['error'] ?? 'collect_failed');
-        $toolCode = ($col['status'] ?? '') === 'success' ? null : (string)($col['error_code'] ?? AccountDataCollector::E_INTERNAL);
-        $mapped = self::mapSignals((array)($col['signals'] ?? []), $toolErr);
-        if ($mapped['status'] === self::ERROR) {
-            if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
-            return self::finishToolError($profileId, $prevStatus, $lastKnown, $t0,
-                (string)$mapped['reason'], $toolCode, $perf);
-        }
+        // success: chi HIGH/MEDIUM duoc overwrite last_known (LOW khong bao gio toi day)
+        $signals = (array)($pipe['signals'] ?? []);
         $res = self::finishAccount($profileId, $prev, $prevStatus, $lastKnown, $t0,
-            (string)$mapped['status'], $mapped['reason'], (array)($col['signals'] ?? []), $perf);
-        $res['loginUi'] = $mapped['loginUi'];
-        $res['sessionUi'] = $mapped['sessionUi'];
-        $res['youtubeUi'] = $mapped['youtubeUi'];
-        $res['channelUi'] = $mapped['channelUi'];
+            (string)($pipe['channel_status'] ?? self::ACTIVE), $pipe['reason'] ?? null, $signals, $perf,
+            (string)($pipe['confidence'] ?? 'HIGH'));
+        $ui = self::uiLabels($signals);
+        $res['loginUi'] = $ui['loginUi'];
+        $res['sessionUi'] = $ui['sessionUi'];
+        $res['youtubeUi'] = $ui['youtubeUi'];
+        $res['channelUi'] = $ui['channelUi'];
+        $res['confidence'] = (string)($pipe['confidence'] ?? 'HIGH');
+        $res['stages'] = array_values((array)($pipe['stages'] ?? []));
         if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
         self::setStage($profileId, 'SUCCESS');
         $res['run_state'] = 'SUCCESS';
         return $res;
+    }
+
+    /** Snapshot stages cho drawer (doc sau khi xong, khong can DB). */
+    private static function saveStageSnapshot(int $profileId, array $stages): void
+    {
+        @file_put_contents(rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalstages_' . $profileId . '.json',
+            json_encode(['stages' => array_values($stages), 'ts' => microtime(true)], JSON_UNESCAPED_UNICODE));
+    }
+
+    public static function getStageSnapshot(int $profileId): array
+    {
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalstages_' . $profileId . '.json';
+        if (!is_file($f)) return [];
+        $j = json_decode((string)@file_get_contents($f), true);
+        return is_array($j) && isset($j['stages']) ? $j['stages'] : [];
+    }
+
+    private static function uiLabels(array $signals): array
+    {
+        $yn = fn(bool $b, string $y, string $n) => $b ? $y : $n;
+        $login = (string)($signals['login'] ?? 'unknown');
+        $session = (string)($signals['session'] ?? 'unknown');
+        $yt = (string)($signals['youtube'] ?? 'unknown');
+        $ch = (string)($signals['channel'] ?? 'unknown');
+        return ['loginUi' => $yn($login === 'ok', 'YES', $login === 'failed' ? 'NO' : 'NOT_CHECKED'),
+            'sessionUi' => $yn($session === 'ok', 'VALID', $session === 'failed' ? 'INVALID' : 'NOT_CHECKED'),
+            'youtubeUi' => $yn($yt === 'ok', 'AVAILABLE', $yt === 'failed' ? 'UNAVAILABLE' : 'NOT_CHECKED'),
+            'channelUi' => $ch === 'exists' ? 'AVAILABLE' : ($ch === 'none' ? 'NO' : 'NOT_CHECKED')];
     }
 
     /** Tu mo Chrome cho evaluation (poll CDP ready 500ms toi da 10s). */
@@ -422,6 +429,7 @@ class ChannelEvaluationManager
         self::setStage($profileId, 'FAILED');
         return ['profileId' => $profileId, 'status' => $back, 'attempt_status' => self::ATT_FAILED,
             'error_code' => $code, 'checked_at' => $now,
+            'stages' => self::getStageSnapshot($profileId),
             'login_state' => 'unknown', 'session_state' => 'unknown', 'youtube_state' => 'unknown',
             'security_challenge' => false, 'channel_state' => 'unknown',
             'reason' => $message ?: $code, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
@@ -431,9 +439,9 @@ class ChannelEvaluationManager
             'youtubeUi' => 'NOT_CHECKED', 'channelUi' => 'NOT_CHECKED'];
     }
 
-    /** Ket qua account that (ghi de eval_status + last_known neu thanh cong that). */
+    /** Ket qua account that (chi HIGH/MEDIUM duoc overwrite last_known). */
     private static function finishAccount(int $profileId, ?array $prev, string $prevStatus, ?string $lastKnown,
-        float $t0, string $status, ?string $reason, array $signals, array $perf = []): array
+        float $t0, string $status, ?string $reason, array $signals, array $perf = [], string $confidence = 'HIGH'): array
     {
         $ms = (int)round((microtime(true) - $t0) * 1000);
         $now = date('Y-m-d H:i:s');
@@ -466,9 +474,14 @@ class ChannelEvaluationManager
         if (self::hasEvalCols()) {
             try {
                 $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
+                $hasInfra = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'infra_status'")->fetch();
+                $hasConf = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'eval_confidence'")->fetch();
                 $attCols = $hasAttempt ? ', last_attempt_status=?, last_error_code=NULL, last_error_message=NULL' : '';
+                $attCols .= $hasInfra ? ', infra_status=NULL' : '';
+                $attCols .= $hasConf ? ', eval_confidence=?' : '';
                 $attParams = $hasAttempt ? [self::ATT_SUCCESS, null, null] : [];
-                db()->prepare('UPDATE account_states SET eval_status=?, last_known_status=?, last_successful_check_at=IF(? IN (\'ACTIVE\',\'LOGIN_REQUIRED\',\'VERIFICATION_REQUIRED\',\'UNAVAILABLE\',\'RESTRICTED\'),?,last_successful_check_at), last_attempt_at=?, last_error=NULL, last_duration_ms=?, eval_stage=?' . $attCols . ' WHERE profile_id=?')
+                if ($hasConf) $attParams[] = $confidence;
+                db()->prepare('UPDATE account_states SET eval_status=?, last_known_status=?, last_successful_check_at=IF(? IN (\'ACTIVE\',\'LOGIN_REQUIRED\',\'VERIFICATION_REQUIRED\',\'CHANNEL_UNAVAILABLE\',\'RESTRICTED\'),?,last_successful_check_at), last_attempt_at=?, last_error=NULL, last_duration_ms=?, eval_stage=?' . $attCols . ' WHERE profile_id=?')
                     ->execute(array_merge([$status, $isSuccessCheck ? $status : $lastKnown, $status, $now, $now, $ms, 'SUCCESS'], $attParams, [$profileId]));
                 db()->prepare('INSERT INTO account_history (profile_id, checked_at, stability, confidence, stage, reasons, warnings, eval_status, prev_status, duration_ms, reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
                     ->execute([$profileId, $now, $stability, $confidence, $stage, json_encode([]), json_encode([]), $status, $prevStatus !== self::CHECKING ? $prevStatus : null, $ms, $reason]);
@@ -514,9 +527,9 @@ class ChannelEvaluationManager
             'tool_error' => false, 'perf' => $perf, 'run_state' => 'SUCCESS'];
     }
 
-    /** Loi tool: GIU channel status + last_known + scores cu, chi ghi attempt. */
+    /** Loi tool: GIU channel status + last_known + scores cu, chi ghi attempt + infra. */
     private static function finishToolError(int $profileId, string $prevStatus, ?string $lastKnown, float $t0,
-        string $err, ?string $code = null, array $perf = []): array
+        string $err, ?string $code = null, array $perf = [], string $infra = ''): array
     {
         $ms = (int)round((microtime(true) - $t0) * 1000);
         $now = date('Y-m-d H:i:s');
@@ -525,10 +538,13 @@ class ChannelEvaluationManager
         $back = $lastKnown ?? ($prevStatus !== self::CHECKING ? $prevStatus : self::UNCHECKED);
         if (self::hasEvalCols()) {
             try {
+                $hasInfra = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'infra_status'")->fetch();
+                $infraCol = $hasInfra ? ', infra_status=?' : '';
+                $infraParam = $hasInfra ? [$infra !== '' ? $infra : null] : [];
                 $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
                 if ($hasAttempt) {
-                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=? WHERE profile_id=?')
-                        ->execute([$back, $now, $attempt, $code, mb_substr($err, 0, 500), mb_substr($err, 0, 500), $ms, 'FAILED', $profileId]);
+                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=?' . $infraCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, $now, $attempt, $code, mb_substr($err, 0, 500), mb_substr($err, 0, 500), $ms, 'FAILED'], $infraParam, [$profileId]));
                 } else {
                     db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_error=?, last_duration_ms=?, eval_stage=? WHERE profile_id=?')
                         ->execute([$back, $now, mb_substr($err, 0, 500), $ms, 'FAILED', $profileId]);
@@ -554,6 +570,8 @@ class ChannelEvaluationManager
         }
         self::setStage($profileId, 'FAILED');
         return ['profileId' => $profileId, 'status' => $back, 'attempt_status' => $attempt,
+            'infra_status' => $infra !== '' ? $infra : null,
+            'stages' => self::getStageSnapshot($profileId),
             'error_code' => $code, 'checked_at' => $now,
             'reason' => $err, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
             'last_known_status' => $lastKnown, 'tool_error' => true,
@@ -616,7 +634,47 @@ class ChannelEvaluationManager
             foreach ($ids as $pid) SyncLogger::debug('evaluation', "[EVAL QUEUED] profile=$pid batch=$batchId", $pid);
         } catch (Throwable $e) {
         }
-        return ['ok' => true, 'batch_id' => $batchId, 'total' => count($ids), 'concurrency' => $concurrency];
+        return ['ok' => true, 'batch_id' => $batchId, 'total' => count($ids), 'concurrency' => $concurrency, 'ids' => $ids];
+    }
+
+    /** Tat ca profiles (cho mode "danh gia tat ca"). */
+    public static function evaluate_all(int $concurrency = self::CONCURRENCY_DEFAULT): array
+    {
+        try {
+            $ids = array_map('intval', db()->query('SELECT id FROM profiles ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
+        } catch (Throwable $e) {
+            $ids = [];
+        }
+        return self::evaluate_many($ids, $concurrency);
+    }
+
+    /**
+     * Profiles "can cap nhat": UNCHECKED, STALE (qua maxAge), attempt FAILED/TIMEOUT,
+     * hoac co alert OPEN. Dung cho mode dropdown + scheduler.
+     */
+    public static function evaluate_due(int $concurrency = self::CONCURRENCY_DEFAULT): array
+    {
+        $ids = [];
+        try {
+            $policy = SyncSettingsService::getAccountPolicy();
+            $maxAge = max(1, (int)($policy['maxAgeH'] ?? 72));
+            AccountRepository::ensureAll();
+            $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
+            $attCond = $hasAttempt ? "OR s.last_attempt_status IN ('FAILED','TIMEOUT')" : '';
+            $st = db()->prepare(
+                "SELECT DISTINCT s.profile_id FROM account_states s LEFT JOIN profiles p ON p.id=s.profile_id
+                 WHERE COALESCE(s.eval_status,'UNCHECKED')='UNCHECKED'
+                    OR s.last_attempt_at IS NULL
+                    OR s.last_attempt_at < DATE_SUB(NOW(), INTERVAL $maxAge HOUR)
+                    $attCond
+                    OR EXISTS (SELECT 1 FROM channel_alerts a WHERE a.profile_id=s.profile_id AND a.status='OPEN')"
+            );
+            $st->execute();
+            $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+        } catch (Throwable $e) {
+        }
+        if (!$ids) return ['ok' => false, 'message' => 'Khong co kenh nao can cap nhat'];
+        return self::evaluate_many($ids, $concurrency);
     }
 
     /** Xu ly chunk tiep theo (<= $limit, mac dinh 4). Moi profile xong doc lap. */
@@ -642,10 +700,24 @@ class ChannelEvaluationManager
         $doneIds = json_decode((string)($batch['done_ids'] ?? '[]'), true);
         if (!is_array($doneIds)) $doneIds = [];
         $doneSet = array_flip(array_map('intval', $doneIds));
+        // Per-proxy cap: toi da 2 profile/proxy moi chunk (tranh timeout gia do don request)
+        $proxyOf = [];
+        try {
+            $in = implode(',', array_fill(0, count($ids), '?'));
+            $ps = db()->prepare("SELECT id, COALESCE(proxy_id,0) AS px FROM profiles WHERE id IN ($in)");
+            $ps->execute($ids);
+            foreach ($ps->fetchAll() as $row) $proxyOf[(int)$row['id']] = (int)$row['px'];
+        } catch (Throwable $e) {
+        }
         $todo = [];
+        $pxCount = [];
         foreach ($ids as $pid) {
             $pid = (int)$pid;
-            if ($pid > 0 && !isset($doneSet[$pid])) $todo[] = $pid;
+            if ($pid <= 0 || isset($doneSet[$pid])) continue;
+            $px = $proxyOf[$pid] ?? 0;
+            if ($px > 0 && ($pxCount[$px] ?? 0) >= 2) continue; // de chunk sau
+            $pxCount[$px] = ($pxCount[$px] ?? 0) + 1;
+            $todo[] = $pid;
             if (count($todo) >= $limit) break;
         }
         // Cancel? -> TAT CA pending con lai -> cancelled ngay (khong kill running)
@@ -877,6 +949,7 @@ class ChannelEvaluationManager
             }
         }
         $row['eval_stage_live'] = self::getStage($profileId);
+        $row['eval_stages'] = self::getStageSnapshot($profileId);
         return $row;
     }
 

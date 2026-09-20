@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260921e">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260921f">
 </head>
 <body>
 
@@ -108,7 +108,17 @@
           <button class="btn btn-sm" onclick="openSelected()">▶ Mở đã chọn</button>
           <button class="btn btn-sm" onclick="closeSelected()">■ Đóng đã chọn</button>
           <button class="btn btn-sm tb-sec" onclick="assignProxySelected()">⇄ Gán proxy</button>
-          <button class="btn btn-sm tb-sec" id="btn-eval-bulk" onclick="evaluateSelected()" title="Đánh giá các kênh đã chọn (chọn ít nhất một kênh)">✓ Đánh giá</button>
+          <div class="dropdown">
+            <div class="split-btn">
+              <button class="btn btn-sm tb-sec" id="btn-eval-bulk" onclick="evaluateSelected()" title="Đánh giá các kênh đã chọn">✓ Đánh giá</button>
+              <button class="btn btn-sm tb-sec split-arrow" onclick="toggleEvalMenu(event)" title="Chế độ đánh giá">▼</button>
+            </div>
+            <div class="dropdown-menu hidden" id="eval-menu">
+              <button onclick="evaluateSelected()">✓ Đánh giá đã chọn <span class="muted" id="eval-menu-count"></span></button>
+              <button onclick="evaluateAll()">✓ Đánh giá tất cả</button>
+              <button onclick="evaluateDue()">✓ Đánh giá kênh cần cập nhật</button>
+            </div>
+          </div>
           <button class="btn btn-sm tb-sec hidden" id="btn-eval-cancel" onclick="evalCancelBatch()" title="Hủy batch đang chạy">✕ Hủy</button>
           <button class="btn btn-sm btn-danger tb-sec" onclick="deleteSelected()">🗑 Xóa đã chọn</button>
           <div class="arr-wrap">
@@ -240,7 +250,7 @@
             <option value="CHECKING">Đang kiểm tra</option>
             <option value="LOGIN_REQUIRED">Cần đăng nhập</option>
             <option value="VERIFICATION_REQUIRED">Cần xác minh</option>
-            <option value="UNAVAILABLE">Không truy cập được</option>
+            <option value="CHANNEL_UNAVAILABLE">Không truy cập được</option>
             <option value="ERROR">Lỗi kiểm tra</option>
           </select>
           <select id="profile-filter-channel" class="filter-select" onchange="reloadProfilesView()" title="Lọc theo kênh YouTube">
@@ -380,7 +390,7 @@
           </div>
           <div class="toolbar mon-filters">
             <div class="search-box"><input type="text" id="mon-search" placeholder="Tìm kênh..." oninput="monSearch()"></div>
-            <select id="mon-f-eval" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi ĐG</option><option value="ACTIVE">Hoạt động</option><option value="UNCHECKED">Chưa kiểm tra</option><option value="CHECKING">Đang kiểm tra</option><option value="LOGIN_REQUIRED">Cần đăng nhập</option><option value="VERIFICATION_REQUIRED">Cần xác minh</option><option value="UNAVAILABLE">Không truy cập được</option><option value="ERROR">Lỗi kiểm tra</option></select>
+            <select id="mon-f-eval" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi ĐG</option><option value="ACTIVE">Hoạt động</option><option value="UNCHECKED">Chưa kiểm tra</option><option value="CHECKING">Đang kiểm tra</option><option value="LOGIN_REQUIRED">Cần đăng nhập</option><option value="VERIFICATION_REQUIRED">Cần xác minh</option><option value="CHANNEL_UNAVAILABLE">Không truy cập được</option><option value="ERROR">Lỗi kiểm tra</option></select>
             <select id="mon-f-chrome" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi Chrome</option><option value="running">Đang chạy</option><option value="stopped">Dừng</option></select>
             <select id="mon-f-stage" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi giai đoạn</option><option value="NEW">Mới</option><option value="OBSERVING">Theo dõi</option><option value="STABLE">Ổn định</option><option value="READY_FOR_CHANNEL">Sẵn sàng</option><option value="CHANNEL_EXISTS">Có kênh</option><option value="REVIEW_REQUIRED">Cần xem</option><option value="ACTION_REQUIRED">Cần xử lý</option><option value="UNAVAILABLE">Mất kết nối</option></select>
             <select id="mon-f-platform" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi nền tảng</option><option value="youtube">YouTube</option><option value="tiktok">TikTok</option><option value="facebook">Facebook</option><option value="other">Khác</option></select>
@@ -1196,7 +1206,7 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260921e"></script>
+<script src="assets/js/app.js?v=20260921f"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
 </body>
 </html>

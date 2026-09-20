@@ -11,50 +11,41 @@ require_once __DIR__ . '/AccountDataCollector.php';
 require_once __DIR__ . '/AccountEvaluation.php';
 require_once __DIR__ . '/SettingsService.php';
 require_once __DIR__ . '/SyncLogger.php';
+require_once __DIR__ . '/ChannelEvaluationManager.php';
 
 class AccountService
 {
     /**
+     * Legacy wrapper (monitor worker + API cu): di qua staged pipeline de
+     * TIMEOUT/CDP loi khong bao gio thanh UNAVAILABLE. Tra ve shape cu.
      * @return array{profileId:int,status:ok|failed|skipped,stage?:string,stability?:int,
      *               confidence?:int,reasons?:array,warnings?:array,message?:string}
      */
     public static function evaluateProfile(int $profileId): array
     {
-        $st = AccountRepository::ensure($profileId);
-        if (!$st) return ['profileId' => $profileId, 'status' => 'failed', 'message' => 'Khong co state'];
-        $policy = SyncSettingsService::getAccountPolicy();
-        $col = AccountDataCollector::collect($profileId);
-        if ($col['status'] === 'skipped') {
+        try {
+            $r = ChannelEvaluationManager::evaluate_one($profileId);
+        } catch (Throwable $e) {
+            return ['profileId' => $profileId, 'status' => 'failed',
+                    'message' => mb_substr($e->getMessage(), 0, 200)];
+        }
+        if (!empty($r['already_running'])) {
+            return ['profileId' => $profileId, 'status' => 'skipped', 'message' => 'ALREADY_RUNNING'];
+        }
+        if (($r['status'] ?? '') === 'CANCELLED') {
+            return ['profileId' => $profileId, 'status' => 'skipped', 'message' => 'cancelled'];
+        }
+        if (($r['attempt_status'] ?? '') !== 'SUCCESS') {
+            // Precondition/tool loi: skipped (khong phai channel hong)
             return ['profileId' => $profileId, 'status' => 'skipped',
-                    'message' => $col['error'] ?? 'skipped', 'stage' => (string)$st['stage']];
+                    'message' => ($r['error_code'] ?? '') . ': ' . ($r['reason'] ?? ''),
+                    'stage' => (string)(AccountRepository::load($profileId)['stage'] ?? 'NEW')];
         }
-        $outcome = $col['status'] === 'success' ? 'success' : 'failed';
-        $daysObs = max(0.0, (time() - strtotime((string)$st['imported_at'])) / 86400);
-        $hss = $st['last_success_at'] !== null && $outcome === 'success'
-            ? 0.0
-            : ($st['last_success_at'] !== null
-                ? max(0.0, (time() - strtotime((string)$st['last_success_at'])) / 3600) : null);
-        // counters SAU check nay (engine danh gia trang thai moi)
-        $counters = [
-            'success' => (int)$st['success_count'] + ($outcome === 'success' ? 1 : 0),
-            'fail' => (int)$st['fail_count'] + ($outcome === 'failed' ? 1 : 0),
-            'consecFails' => $outcome === 'success' ? 0 : (int)$st['consec_fails'] + 1,
-            'daysObserved' => $daysObs,
-            'hoursSinceSuccess' => $outcome === 'success' ? 0.0 : $hss,
-        ];
-        $eval = AccountEvaluationEngine::evaluate($col['signals'], $counters, $policy);
-        $row = AccountRepository::saveResult($profileId, $outcome, $col['signals'], $eval);
-        if ($outcome === 'success') {
-            SyncLogger::info('acc_check', "[Acc] #$profileId {$eval['stage']} stab={$eval['stability']} conf={$eval['confidence']}", $profileId);
-        } else {
-            SyncLogger::warn('acc_check', "[Acc] #$profileId check failed (" . ($col['error'] ?? '') . ")", $profileId);
-        }
-        log_action($profileId, 'acc_evaluate', $eval['stage'] . " s={$eval['stability']} c={$eval['confidence']}");
-        return ['profileId' => $profileId, 'status' => $outcome, 'stage' => $eval['stage'],
-                'stability' => $eval['stability'], 'confidence' => $eval['confidence'],
-                'reasons' => $eval['reasons'], 'warnings' => $eval['warnings'],
-                'managedDays' => $row ? (int)($row['managed_days'] ?? 0) : 0]
-            + ($outcome === 'failed' && isset($col['error']) ? ['message' => $col['error']] : []);
+        $st = AccountRepository::load($profileId);
+        return ['profileId' => $profileId, 'status' => 'ok', 'stage' => (string)($r['stage'] ?? $st['stage'] ?? 'NEW'),
+                'stability' => (int)($r['stability'] ?? 0), 'confidence' => (int)($r['confidence'] ?? 0),
+                'reasons' => [], 'warnings' => [],
+                'managedDays' => $st ? (int)(floor((time() - strtotime((string)$st['imported_at'])) / 86400)) : 0];
     }
 
     /**

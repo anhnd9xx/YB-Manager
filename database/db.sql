@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS account_states (
     confidence INT NOT NULL DEFAULT 0,
     stage VARCHAR(30) NOT NULL DEFAULT 'NEW',
     eval_status VARCHAR(24) NOT NULL DEFAULT 'UNCHECKED',
+    infra_status VARCHAR(24) DEFAULT NULL,
+    eval_confidence VARCHAR(8) DEFAULT NULL,
     last_known_status VARCHAR(24) DEFAULT NULL,
     last_successful_check_at DATETIME DEFAULT NULL,
     last_attempt_at DATETIME DEFAULT NULL,

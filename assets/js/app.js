@@ -440,8 +440,15 @@ function getSelectedIds() {
 function updateSelectedCount() {
   const ids = $('selected-count');
   if (!ids) return;
-  if (!selectedProfileIds.size) { ids.innerHTML = ''; return; }
+  const eb0 = $('btn-eval-bulk');
+  if (!selectedProfileIds.size) {
+    ids.innerHTML = '';
+    if (eb0 && !evalRunning) eb0.innerHTML = '✓ Đánh giá';
+    return;
+  }
   ids.innerHTML = `<span class="sel-pill">Đã chọn ${selectedProfileIds.size}<button class="sel-clear" title="Bỏ chọn hết" onclick="clearProfileSelection()">×</button></span>`;
+  const eb = $('btn-eval-bulk');
+  if (eb && !evalRunning) eb.innerHTML = `✓ Đánh giá ${selectedProfileIds.size}`;
 }
 function clearProfileSelection() {
   selectedProfileIds.clear();
@@ -955,7 +962,7 @@ const EVAL_STATUS = {
   ACTIVE: ['Hoạt động', 'badge-ok', '●'],
   LOGIN_REQUIRED: ['Cần đăng nhập', 'badge-review', '!'],
   VERIFICATION_REQUIRED: ['Cần xác minh', 'badge-warn', '!'],
-  UNAVAILABLE: ['Không truy cập được', 'badge-danger', '●'],
+  CHANNEL_UNAVAILABLE: ['Không truy cập được', 'badge-danger', '●'],
   RESTRICTED: ['Bị hạn chế', 'badge-warn', '!'],
   ERROR: ['Lỗi kiểm tra', 'badge-muted', '!'],
 };
@@ -964,13 +971,16 @@ const EVAL_ERR_VN = {
   CHROME_NOT_RUNNING: 'Chrome chưa chạy — cần mở Chrome để kiểm tra',
   CHROME_START_TIMEOUT: 'Mở Chrome quá chậm',
   DEBUG_PORT_UNAVAILABLE: 'Không lấy được cổng kiểm tra',
+  CDP_UNAVAILABLE: 'Không kết nối được trình duyệt',
   CDP_CONNECT_FAILED: 'Không kết nối được trình duyệt',
-  CDP_TIMEOUT: 'Trình duyệt phản hồi quá chậm',
-  NETWORK_TIMEOUT: 'Mạng quá chậm', PAGE_TIMEOUT: 'Trang tải quá chậm',
+  CDP_TIMEOUT: 'Trình duyệt phản hồi quá thời gian',
+  PROXY_ERROR: 'Proxy không kết nối được',
+  NETWORK_TIMEOUT: 'Kết nối mạng quá thời gian',
+  PAGE_TIMEOUT: 'Trang phản hồi quá chậm',
   TIMEOUT: 'Kiểm tra quá thời gian', PROFILE_MISMATCH: 'Nhầm phiên Chrome',
   LOGIN_REQUIRED: 'Cần đăng nhập', SECURITY_CHALLENGE: 'Cần xác minh',
   YOUTUBE_UNAVAILABLE: 'Không truy cập được YouTube',
-  EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra',
+  EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra', EVALUATOR_ERROR: 'Lỗi công cụ kiểm tra',
 };
 function evalErrVN(code, fallback) {
   if (!code) return fallback || '';
@@ -1037,11 +1047,39 @@ function evalQueuePaint(r) {
     evalPendingPaint.clear();
   }, 75);
 }
+function toggleEvalMenu(e) {
+  e.stopPropagation();
+  const m = $('eval-menu');
+  m.classList.toggle('hidden');
+  const c = $('eval-menu-count');
+  if (c) c.textContent = selectedProfileIds.size ? `(${selectedProfileIds.size})` : '';
+}
+document.addEventListener('click', () => { const m = $('eval-menu'); if (m) m.classList.add('hidden'); });
+async function evaluateAll() {
+  $('eval-menu').classList.add('hidden');
+  if (evalRunning) { monEvalPopover(); return; }
+  const st = await sendJson(api + 'accounts.php?action=eval_all', {});
+  if (!st.ok) { toast(st.message || 'Lỗi', 'error'); return; }
+  toast(`Đánh giá tất cả ${st.data.total} kênh...`, '');
+  await runEvalBatchId(st.data.batch_id, st.data.total, st.data.ids || []);
+}
+async function evaluateDue() {
+  $('eval-menu').classList.add('hidden');
+  if (evalRunning) { monEvalPopover(); return; }
+  const st = await sendJson(api + 'accounts.php?action=eval_due', {});
+  if (!st.ok) { toast(st.message || 'Không có kênh nào cần cập nhật', ''); return; }
+  toast(`Đánh giá ${st.data.total} kênh cần cập nhật...`, '');
+  await runEvalBatchId(st.data.batch_id, st.data.total, st.data.ids || []);
+}
 async function evaluateSelected() {
   if (evalRunning) { monEvalPopover(); return; } // click khi running -> popover trang thai
   // Snapshot selection luc bat dau (bo chon sau khong anh huong batch)
   const ids = Array.from(selectedProfileIds).map(Number).filter(x => x > 0);
   if (!ids.length) { toast('Chọn ít nhất một kênh để đánh giá', 'error'); return; }
+  await runEvalBatchIds(ids);
+}
+// Chung cho selected/all/due: optimistic QUEUED + chunk + patch tung card
+async function runEvalBatchIds(ids) {
   // Bo qua kenh dang CHECKING (profile lock) thay vi duplicate
   const fresh = ids.filter(id => {
     const p = profiles.find(x => Number(x.id) === id);
@@ -1049,12 +1087,22 @@ async function evaluateSelected() {
   });
   if (!fresh.length) { toast('Các kênh đã chọn đang được kiểm tra', 'error'); return; }
   if (fresh.length < ids.length) toast(`Bỏ qua ${ids.length - fresh.length} kênh đang kiểm tra`, '');
+  const st = await sendJson(api + 'accounts.php?action=eval_start', { ids: fresh, concurrency: 4 });
+  if (!st.ok) { toast(st.message || 'Lỗi tạo batch', 'error'); return; }
+  await runEvalBatchId(st.data.batch_id, fresh.length, fresh);
+}
+async function runEvalBatchId(batchId, total, knownIds) {
+  // Dung batch server co san (khong tao batch moi). Optimistic QUEUED cho ids da biet.
+  const fresh = (knownIds || []).filter(id => {
+    const p = profiles.find(x => Number(x.id) === id);
+    return !(p && p.eval_status === 'CHECKING');
+  });
   evalRunning = true;
   const btn = $('btn-eval-bulk');
   const cancelBtn = $('btn-eval-cancel');
   if (cancelBtn) cancelBtn.classList.remove('hidden');
   const oldBtn = btn ? btn.innerHTML : '';
-  // 1) QUEUED/CHECKING optimistic ngay cho ca batch (giu previous)
+  // 1) QUEUED/CHECKING optimistic ngay (giu previous)
   fresh.forEach(id => {
     const p = profiles.find(x => Number(x.id) === id);
     if (p) { p.eval_prev = p.eval_status || 'UNCHECKED'; p.eval_status = 'CHECKING'; p.eval_stage = 'QUEUED'; }
@@ -1062,15 +1110,13 @@ async function evaluateSelected() {
   renderProfiles();
   const conc = (settings && [2, 4, 6, 8].includes(Number(settings.acc_concurrency))) ? Number(settings.acc_concurrency) : 4;
   const counts = {};
-  let done = 0, failed = 0;
+  let done = 0, failed = 0, techErr = 0;
   try {
-    // 2) Tao batch server (dedupe + mark CHECKING 1 UPDATE)
-    const st = await sendJson(api + 'accounts.php?action=eval_start', { ids: fresh, concurrency: conc });
-    if (!st.ok) { toast(st.message || 'Lỗi tạo batch', 'error'); throw new Error('start'); }
-    evalBatch = { batch_id: st.data.batch_id, total: fresh.length, done: 0, failed: 0, pending: fresh.length };
+    // 2) Batch server da tao san
+    evalBatch = { batch_id: batchId, total, done: 0, failed: 0, pending: total };
     // Poll stage 2s cho card dang CHECKING (hien thi "Dang kiem tra YouTube...")
     const stageTimer = setInterval(async () => {
-      const checking = profiles.filter(p => p.eval_status === 'CHECKING' && fresh.includes(Number(p.id))).slice(0, 8);
+      const checking = profiles.filter(p => p.eval_status === 'CHECKING' && (!fresh.length || fresh.includes(Number(p.id)))).slice(0, 8);
       for (const p of checking) {
         try {
           const s = await getJson(api + `accounts.php?action=eval_stage&id=${p.id}`);
@@ -1086,24 +1132,24 @@ async function evaluateSelected() {
     // 3) Chunk theo concurrency, kenh nao xong update card do ngay (buffer 75ms)
     let finished = false;
     while (!finished) {
-      if (btn) btn.innerHTML = `◌ ${done}/${fresh.length}`;
-      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = fresh.length - done;
+      if (btn) btn.innerHTML = `◌ ${done}/${total}`;
+      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = total - done;
       const ch = await sendJson(api + 'accounts.php?action=eval_chunk', { batch_id: evalBatch.batch_id, limit: conc });
       if (!ch.ok) { toast(ch.message || 'Lỗi batch', 'error'); break; }
       for (const r of (ch.data.results || [])) {
         if (r.already_running) { continue; }
         done++;
         if ((r.attempt_status || '') === 'SUCCESS') { if (r.status) counts[r.status] = (counts[r.status] || 0) + 1; }
-        else failed++;
+        else { failed++; if (r.tool_error) techErr++; }
         evalQueuePaint(r);
       }
-      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = fresh.length - done;
-      if (btn) btn.innerHTML = `◌ ${done}/${fresh.length}`;
+      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = total - done;
+      if (btn) btn.innerHTML = `◌ ${done}/${total}`;
       finished = !!ch.data.done;
       if (!finished && !(ch.data.results || []).length) break;
     }
   } catch (e) {
-    if (e.message !== 'start') toast('Lỗi kết nối khi đánh giá', 'error');
+    toast('Lỗi kết nối khi đánh giá', 'error');
   } finally {
     clearTimeout(evalFlushTimer);
     if (evalBatch && evalBatch.stageTimer) clearInterval(evalBatch.stageTimer);
@@ -1111,7 +1157,7 @@ async function evaluateSelected() {
     evalPendingPaint.clear();
     // Tra CHECKING treo (cancel/mang rot) ve previous
     profiles.forEach(p => {
-      if (p.eval_status === 'CHECKING' && fresh.includes(Number(p.id))) {
+      if (p.eval_status === 'CHECKING' && (!fresh.length || fresh.includes(Number(p.id)))) {
         p.eval_status = p.eval_prev || 'UNCHECKED';
       }
     });
@@ -1124,7 +1170,7 @@ async function evaluateSelected() {
     evalBatch = null;
   }
   const sum = Object.entries(counts).map(([s, c]) => `${(EVAL_STATUS[s] || [])[0] || s}: ${c}`).join(' · ');
-  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}${failed ? ` · lỗi thử: ${failed}` : ''}`, done === fresh.length ? 'success' : 'error');
+  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}${techErr ? ` · lỗi kỹ thuật: ${techErr}` : ''}`, done === total ? 'success' : 'error');
 }
 // Mini popover trang thai batch (click toolbar khi running)
 function monEvalPopover() {
@@ -1137,8 +1183,10 @@ function monEvalPopover() {
   }
   if (!evalBatch) { pop.classList.add('hidden'); return; }
   const b = evalBatch;
+  const conc = (settings && [2, 4, 6, 8].includes(Number(settings.acc_concurrency))) ? Number(settings.acc_concurrency) : 4;
   pop.innerHTML = `<strong>Đánh giá hàng loạt</strong>`
-    + `<div>Hoàn tất: ${b.done || 0}</div><div>Đang chạy: ${Math.min(4, (b.total || 0) - (b.done || 0))}</div>`
+    + `<div>Tổng: ${b.total || 0}</div>`
+    + `<div>Hoàn tất: ${b.done || 0}</div><div>Đang chạy: ${Math.min(conc, (b.total || 0) - (b.done || 0))}</div>`
     + `<div>Đang chờ: ${b.pending || 0}</div><div>Thất bại: ${b.failed || 0}</div>`
     + `<button class="btn btn-sm" onclick="evalCancelBatch()">Hủy các mục đang chờ</button>`;
   const btn = $('btn-eval-bulk');
@@ -1196,7 +1244,7 @@ function closeAccountDrawer() {
   const w = $('acc-drawer-wrap');
   if (w) w.classList.add('hidden');
 }
-const EVAL_STAGE_VN = { INITIALIZING: 'Đang khởi tạo...', QUEUED: 'Đang chờ...', PRECHECK: 'Đang kiểm tra điều kiện...', CONNECTING: 'Đang kết nối trình duyệt...', CHECKING_SESSION: 'Đang kiểm tra phiên...', CHECKING_LOGIN: 'Đang kiểm tra đăng nhập...', CHECKING_PLATFORM: 'Đang kiểm tra YouTube...', CHECKING_CHANNEL: 'Đang kiểm tra kênh...', FINALIZING: 'Đang tổng hợp...', DONE: 'Hoàn tất', SUCCESS: 'Hoàn tất', FAILED: 'Thất bại', CANCELLED: 'Đã hủy' };
+const EVAL_STAGE_VN = { INITIALIZING: 'Đang khởi tạo...', QUEUED: 'Đang chờ...', PRECHECK: 'Đang kiểm tra điều kiện...', PRECHECK_BROWSER: 'Đang kiểm tra trình duyệt...', CONNECTING: 'Đang kết nối trình duyệt...', CHECK_CDP: 'Đang kết nối CDP...', CHECK_PROXY_NETWORK: 'Đang kiểm tra proxy...', CHECKING_SESSION: 'Đang kiểm tra phiên...', CHECK_SESSION: 'Đang kiểm tra phiên...', CHECKING_LOGIN: 'Đang kiểm tra đăng nhập...', CHECK_LOGIN: 'Đang kiểm tra đăng nhập...', CHECKING_PLATFORM: 'Đang kiểm tra YouTube...', CHECK_YOUTUBE: 'Đang kiểm tra YouTube...', CHECKING_CHANNEL: 'Đang kiểm tra kênh...', CHECK_CHANNEL: 'Đang kiểm tra kênh...', CHECK_SECURITY: 'Đang kiểm tra bảo mật...', FINALIZING: 'Đang tổng hợp...', FINALIZE: 'Đang tổng hợp...', DONE: 'Hoàn tất', SUCCESS: 'Hoàn tất', FAILED: 'Thất bại', CANCELLED: 'Đã hủy' };
 async function openAccountDrawer(id, keepOpen) {
   accDrawerId = Number(id);
   try {
@@ -1216,14 +1264,35 @@ async function openAccountDrawer(id, keepOpen) {
       return `<span class="badge ${ok ? 'badge-ok' : (v === 'NOT_CHECKED' || v === 'CHECK_FAILED' ? 'badge-muted' : 'badge-review')}">${ok ? '✓' : '•'} ${escapeHtml(lbl)}</span>`;
     };
     const lastTxt = st.last_attempt_at || st.last_checked_at;
+    const STAGE_ORDER = ['PRECHECK_BROWSER', 'CHECK_CDP', 'CHECK_PROXY_NETWORK', 'CHECK_SESSION', 'CHECK_LOGIN', 'CHECK_YOUTUBE', 'CHECK_CHANNEL', 'CHECK_SECURITY'];
+    const STAGE_VN_SHORT = { PRECHECK_BROWSER: 'Browser', CHECK_CDP: 'CDP', CHECK_PROXY_NETWORK: 'Proxy', CHECK_SESSION: 'Session', CHECK_LOGIN: 'Login', CHECK_YOUTUBE: 'YouTube', CHECK_CHANNEL: 'Channel', CHECK_SECURITY: 'Security' };
+    const stageIcon = (r) => r === 'PASS' ? '<span class="st-healthy">✓ Pass</span>' : (r === 'FAIL' ? '<span class="st-critical">! Fail</span>' : (r === 'TIMEOUT' ? '<span class="st-warning">◌ Timeout</span>' : (r === 'NOT_APPLICABLE' ? '<span class="muted">— N/A</span>' : '<span class="muted">— Chưa chạy</span>')));
+    const renderStages = (list, live) => {
+      const byName = {};
+      (list || []).forEach(s => { byName[s.stage] = s; });
+      return `<table class="data-table"><tbody>` + STAGE_ORDER.map(n => {
+        const s = byName[n];
+        const cell = s ? stageIcon(s.result) + (s.code ? ` <small class="muted">${escapeHtml(s.code)}</small>` : '')
+          : (live ? '<span class="st-info">◌ Checking</span>' : '<span class="muted">— Chưa chạy</span>');
+        return `<tr><td>${STAGE_VN_SHORT[n]}</td><td>${cell}</td></tr>`;
+      }).join('') + `</tbody></table>`;
+    };
     $('acc-drawer-title').textContent = 'ACCOUNT EVALUATION — ' + (p.name || ('#' + id));
-    // Chrome runtime GIU NGUYEN tai card; panel chi danh gia
-    let head = `<div class="acc-head" style="margin-bottom:10px"><span class="meta-label">Chrome: ${p.status === 'running' ? '● Đang chạy' : '● Dừng'}</span>`
-      + `<span class="acc-stage">${evalBadge(ev)}</span></div>`;
+    // Runtime rieng, Main last-known, Latest attempt + confidence
+    const knownLbl = st.last_known_status ? ((EVAL_STATUS[st.last_known_status] || [])[0] || st.last_known_status) : 'Chưa xác định';
+    const attLbl = st.last_attempt_status ? ` · Lần thử: ${st.last_attempt_status}` : '';
+    const confLbl = st.eval_confidence ? ` · Tin cậy: ${st.eval_confidence}` : '';
+    let head = `<div class="acc-head" style="margin-bottom:6px"><span class="meta-label">Runtime: Chrome ${p.status === 'running' ? '● Đang chạy' : '● Dừng'}${p.proxy_host ? ' · Proxy ' + escapeHtml(p.proxy_host) : ''}</span></div>`
+      + `<div class="acc-head" style="margin-bottom:6px"><span class="meta-label">Kênh: <strong>${escapeHtml(knownLbl)}</strong></span>`
+      + `<span class="acc-stage">${evalBadge(ev)}</span></div>`
+      + `<div class="sync-label">Lần thử gần nhất${attLbl}${confLbl}</div>`;
     if (ev === 'CHECKING') {
       const live = st.eval_stage_live && EVAL_STAGE_VN[st.eval_stage_live] ? EVAL_STAGE_VN[st.eval_stage_live] : 'Đang kiểm tra...';
       head += `<div class="eval-live" id="eval-live-stage">◌ ${escapeHtml(live)}</div>`;
+      head += `<div class="sync-label" style="margin-top:6px">STAGES</div><div id="eval-live-stages">${renderStages(st.eval_stages, true)}</div>`;
       pollEvalStage(id);
+    } else if (st.eval_stages && st.eval_stages.length) {
+      head += `<div class="sync-label" style="margin-top:6px">STAGES (lần chạy cuối)</div>` + renderStages(st.eval_stages, false);
     }
     if (ev === 'ERROR' && st.last_known_status) {
       head += `<div class="eval-prev">Trạng thái gần nhất: ${(EVAL_STATUS[st.last_known_status] || [])[0] || st.last_known_status}`
