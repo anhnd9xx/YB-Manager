@@ -290,6 +290,17 @@ class ChannelEvaluationManager
             log_action($profileId, 'eval_result', "$status" . ($reason ? " ($reason)" : ''));
         } catch (Throwable $e) {
         }
+        // Monitoring hooks: alert + state history (khong lam hong danh gia chinh)
+        try {
+            require_once __DIR__ . '/AlertManager.php';
+            require_once __DIR__ . '/StateHistory.php';
+            require_once __DIR__ . '/MonitoringService.php';
+            $prefs = MonitoringService::getSettings($profileId);
+            AlertManager::syncFromEval($profileId, $status, $reason, $prefs);
+            $from = ($prevStatus !== self::CHECKING) ? $prevStatus : ($lastKnown ?? self::UNCHECKED);
+            StateHistory::record($profileId, StateHistory::CAT_EVAL, $from, $status, $reason);
+        } catch (Throwable $e) {
+        }
         self::setStage($profileId, 'DONE');
         $row = AccountRepository::load($profileId);
         return ['profileId' => $profileId, 'status' => $status, 'checked_at' => $now,
@@ -323,6 +334,13 @@ class ChannelEvaluationManager
         }
         try {
             SyncLogger::error('evaluation', "[EVALUATION ERROR] profile=$profileId reason=$err", $profileId);
+        } catch (Throwable $e) {
+        }
+        try {
+            require_once __DIR__ . '/AlertManager.php';
+            require_once __DIR__ . '/MonitoringService.php';
+            $prefs = MonitoringService::getSettings($profileId);
+            AlertManager::syncFromEval($profileId, self::ERROR, $err, $prefs);
         } catch (Throwable $e) {
         }
         self::setStage($profileId, 'DONE');

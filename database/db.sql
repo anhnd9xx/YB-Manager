@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS profiles (
     user_agent VARCHAR(255) DEFAULT NULL,
     webrtc_protection ENUM('default','disable_nonproxied_udp') NOT NULL DEFAULT 'default',
     proxy_id INT DEFAULT NULL,
+    monitor_enabled TINYINT(1) NOT NULL DEFAULT 1,
+    watchlist TINYINT(1) NOT NULL DEFAULT 0,
+    alert_on_status_change TINYINT(1) NOT NULL DEFAULT 1,
+    alert_on_login_required TINYINT(1) NOT NULL DEFAULT 1,
+    alert_on_proxy_error TINYINT(1) NOT NULL DEFAULT 1,
     user_data_dir VARCHAR(255) NOT NULL,
     status ENUM('running','stopped','error') DEFAULT 'stopped',
     sync_role ENUM('NONE','MAIN','CONTROLLED') NOT NULL DEFAULT 'NONE',
@@ -138,6 +143,50 @@ CREATE TABLE IF NOT EXISTS account_history (
     reason VARCHAR(200) DEFAULT NULL,
     INDEX idx_profile_time (profile_id, checked_at),
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS channel_alerts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    profile_id INT NOT NULL,
+    severity ENUM('CRITICAL','WARNING','INFO') NOT NULL DEFAULT 'WARNING',
+    type VARCHAR(40) NOT NULL,
+    message VARCHAR(255) NOT NULL DEFAULT '',
+    first_seen DATETIME NOT NULL,
+    last_seen DATETIME NOT NULL,
+    seen_count INT NOT NULL DEFAULT 1,
+    resolved_at DATETIME DEFAULT NULL,
+    status ENUM('OPEN','RESOLVED') NOT NULL DEFAULT 'OPEN',
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_open_alert (profile_id, type, status),
+    INDEX idx_status_seen (status, last_seen)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS state_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    profile_id INT NOT NULL,
+    ts DATETIME NOT NULL,
+    category ENUM('evaluation','runtime','proxy','monitoring') NOT NULL,
+    old_value VARCHAR(40) DEFAULT NULL,
+    new_value VARCHAR(40) DEFAULT NULL,
+    reason VARCHAR(200) DEFAULT NULL,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    INDEX idx_profile_ts (profile_id, ts),
+    INDEX idx_ts (ts)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS monitor_snapshots (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    taken_at DATETIME NOT NULL,
+    total INT NOT NULL DEFAULT 0,
+    active INT NOT NULL DEFAULT 0,
+    issues INT NOT NULL DEFAULT 0,
+    unchecked INT NOT NULL DEFAULT 0,
+    running INT NOT NULL DEFAULT 0,
+    proxy_dead INT NOT NULL DEFAULT 0,
+    eval_failed INT NOT NULL DEFAULT 0,
+    login_required INT NOT NULL DEFAULT 0,
+    verification_required INT NOT NULL DEFAULT 0,
+    INDEX idx_taken (taken_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS eval_batches (

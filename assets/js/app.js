@@ -23,7 +23,7 @@ function storedPerPage(key, fb) {
 }
 const api = 'api/';
 const VIEW_TITLES = {
-  dashboard: 'Tổng quan', profiles: 'Kênh', proxies: 'Proxy',
+  dashboard: 'Tổng quan', profiles: 'Kênh', monitoring: 'Thống kê & Theo dõi', proxies: 'Proxy',
   synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt'
 };
 
@@ -108,6 +108,7 @@ function switchView(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
   $('view-title').textContent = VIEW_TITLES[view] || view;
   if (view === 'dashboard') renderDashboard();
+  if (view === 'monitoring' && typeof monRefresh === 'function') monRefresh();
   if (view === 'logs') loadLogs();
   if (view === 'synchronize') { loadSyn(true); synLoadDebug(); synLoadLogs(); }
   if (view === 'settings') loadSettings();

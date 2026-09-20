@@ -31,6 +31,11 @@
         <span>Kênh</span>
         <span id="nav-profile-count" class="nav-count hidden"></span>
       </button>
+      <button class="nav-btn" data-view="monitoring" data-tip="Thống kê & Theo dõi">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 3v18h18v-2H5V3H3zm4 12v-6h3v6H7zm5 0V7h3v8h-3zm5 0v-4h3v4h-3z"/></svg>
+        <span>Thống kê & Theo dõi</span>
+        <span id="nav-alert-count" class="nav-count hidden"></span>
+      </button>
       <button class="nav-btn" data-view="proxies" data-tip="Proxy">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-1.8C18 6.57 15.35 4 12 4s-6 2.57-6 6.2c0 2.34 1.95 5.44 6 9.14 4.05-3.7 6-6.8 6-9.14zM12 2c4.2 0 8 3.22 8 8.2 0 3.32-2.67 7.25-8 11.8-5.33-4.55-8-8.48-8-11.8C4 5.22 7.8 2 12 2z"/></svg>
         <span>Proxy</span>
@@ -269,6 +274,138 @@
         <div class="pagination" id="profiles-pagination"></div>
       </section>
 
+      <!-- ===== VIEW: MONITORING (Thong ke & Theo doi) ===== -->
+      <section id="view-monitoring" class="view">
+        <div class="mon-head">
+          <div>
+            <h2 class="mon-title">Thống kê & Theo dõi</h2>
+            <p class="mon-sub">Theo dõi trạng thái, sức khỏe và thay đổi của toàn bộ kênh</p>
+          </div>
+          <div class="mon-actions">
+            <div class="seg" id="mon-range">
+              <button data-range="1" onclick="monSetRange(1)">24 giờ</button>
+              <button data-range="7" class="active" onclick="monSetRange(7)">7 ngày</button>
+              <button data-range="30" onclick="monSetRange(30)">30 ngày</button>
+              <button data-range="custom" onclick="monSetRangeCustom()">Tùy chỉnh</button>
+            </div>
+            <input type="date" id="mon-from" class="filter-select hidden" onchange="monRangeCustomGo()">
+            <input type="date" id="mon-to" class="filter-select hidden" onchange="monRangeCustomGo()">
+            <button class="btn btn-sm" onclick="monRefresh(true)">↻ Làm mới</button>
+          </div>
+        </div>
+        <div class="mon-tabs">
+          <button class="mon-tab active" data-mtab="overview" onclick="monTab('overview')">Tổng quan</button>
+          <button class="mon-tab" data-mtab="channels" onclick="monTab('channels')">Kênh</button>
+          <button class="mon-tab" data-mtab="alerts" onclick="monTab('alerts')">Cảnh báo <span id="mon-tab-alert-n" class="nav-count hidden"></span></button>
+          <button class="mon-tab" data-mtab="trends" onclick="monTab('trends')">Xu hướng</button>
+          <button class="mon-tab" data-mtab="history" onclick="monTab('history')">Lịch sử</button>
+        </div>
+
+        <div class="mon-pane" id="mon-pane-overview">
+          <div class="stat-grid" id="mon-kpi"></div>
+          <div class="stat-grid mon-kpi-sub" id="mon-kpi-sub"></div>
+          <div class="panel">
+            <div class="panel-head"><h3>Tình trạng toàn bộ kênh</h3></div>
+            <div id="mon-health"><div class="skeleton"></div></div>
+          </div>
+          <div class="mon-cols">
+            <div class="panel">
+              <div class="panel-head"><h3>Cần chú ý</h3><button class="btn btn-sm" onclick="monTab('alerts')">Xem tất cả</button></div>
+              <div id="mon-alerts-mini"><div class="skeleton"></div></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h3>Thay đổi gần đây</h3><button class="btn btn-sm" onclick="monTab('history')">Xem tất cả</button></div>
+              <div id="mon-recent"><div class="skeleton"></div></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>Phân bố</h3>
+              <select id="mon-dist-by" class="filter-select" onchange="monLoadDist()">
+                <option value="stage">Theo giai đoạn</option>
+                <option value="platform">Theo nền tảng</option>
+                <option value="proxy">Theo Proxy</option>
+                <option value="monitoring">Theo monitoring</option>
+              </select>
+            </div>
+            <div id="mon-dist"><div class="skeleton"></div></div>
+          </div>
+        </div>
+
+        <div class="mon-pane hidden" id="mon-pane-channels">
+          <div class="mon-chips" id="mon-chips">
+            <button class="chip active" data-chip="" onclick="monChip('')">Tất cả</button>
+            <button class="chip" data-chip="ACTIVE" onclick="monChip('ACTIVE')">Hoạt động</button>
+            <button class="chip" data-chip="ISSUES" onclick="monChip('ISSUES')">Có vấn đề</button>
+            <button class="chip" data-chip="UNCHECKED" onclick="monChip('UNCHECKED')">Chưa check</button>
+            <button class="chip" data-chip="LOGIN_REQUIRED" onclick="monChip('LOGIN_REQUIRED')">Cần login</button>
+            <button class="chip" data-chip="proxy_dead" onclick="monChip('proxy_dead')">Proxy lỗi</button>
+            <button class="chip" data-chip="RUNNING" onclick="monChip('RUNNING')">Đang chạy</button>
+            <button class="chip" data-chip="WATCH" onclick="monChip('WATCH')">⭐ Watchlist</button>
+          </div>
+          <div class="toolbar mon-filters">
+            <div class="search-box"><input type="text" id="mon-search" placeholder="Tìm kênh..." oninput="monSearch()"></div>
+            <select id="mon-f-eval" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi ĐG</option><option value="ACTIVE">Hoạt động</option><option value="UNCHECKED">Chưa kiểm tra</option><option value="CHECKING">Đang kiểm tra</option><option value="LOGIN_REQUIRED">Cần đăng nhập</option><option value="VERIFICATION_REQUIRED">Cần xác minh</option><option value="UNAVAILABLE">Không truy cập được</option><option value="ERROR">Lỗi kiểm tra</option></select>
+            <select id="mon-f-chrome" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi Chrome</option><option value="running">Đang chạy</option><option value="stopped">Dừng</option></select>
+            <select id="mon-f-stage" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi giai đoạn</option><option value="NEW">Mới</option><option value="OBSERVING">Theo dõi</option><option value="STABLE">Ổn định</option><option value="READY_FOR_CHANNEL">Sẵn sàng</option><option value="CHANNEL_EXISTS">Có kênh</option><option value="REVIEW_REQUIRED">Cần xem</option><option value="ACTION_REQUIRED">Cần xử lý</option><option value="UNAVAILABLE">Mất kết nối</option></select>
+            <select id="mon-f-platform" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi nền tảng</option><option value="youtube">YouTube</option><option value="tiktok">TikTok</option><option value="facebook">Facebook</option><option value="other">Khác</option></select>
+            <select id="mon-f-proxy" class="filter-select" onchange="monLoadChannels(1)"><option value="">Mọi proxy</option><option value="ok">Proxy tốt</option><option value="dead">Proxy lỗi</option><option value="none">Không proxy</option></select>
+            <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="mon-f-watch" onchange="monLoadChannels(1)"><span>⭐ Watchlist</span></label>
+            <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="mon-f-alert" onchange="monLoadChannels(1)"><span>Có cảnh báo</span></label>
+          </div>
+          <div class="panel">
+            <div class="table-wrap mon-table-wrap">
+              <table class="data-table">
+                <thead><tr><th></th><th>Channel</th><th>Đánh giá</th><th>Chrome</th><th>Proxy</th><th>Tabs</th><th>Giai đoạn</th><th>Ổn định</th><th>Tin cậy</th><th>Kiểm tra</th><th>Cảnh báo</th><th>Theo dõi</th><th>Hành động</th></tr></thead>
+                <tbody id="mon-tbody"><tr><td colspan="13"><div class="skeleton"></div></td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="pagination" id="mon-pagination"></div>
+        </div>
+
+        <div class="mon-pane hidden" id="mon-pane-alerts">
+          <div class="toolbar">
+            <select id="mon-a-status" class="filter-select" onchange="monLoadAlerts()"><option value="OPEN">Đang mở</option><option value="RESOLVED">Đã xử lý</option><option value="all">Tất cả</option></select>
+            <select id="mon-a-sev" class="filter-select" onchange="monLoadAlerts()"><option value="">Mọi mức</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select>
+            <div class="spacer"></div>
+            <button class="btn btn-sm" onclick="monRecheckSelected()">✓ Kiểm tra lại đã chọn</button>
+            <button class="btn btn-sm" onclick="monResolveSelected()">Đánh dấu đã xem</button>
+          </div>
+          <div class="panel"><div class="table-wrap"><table class="data-table">
+            <thead><tr><th></th><th>Kênh</th><th>Mức</th><th>Loại</th><th>Nội dung</th><th>Lần đầu</th><th>Lần cuối</th><th>Hành động</th></tr></thead>
+            <tbody id="mon-alerts-tbody"><tr><td colspan="8"><div class="skeleton"></div></td></tr></tbody>
+          </table></div></div>
+        </div>
+
+        <div class="mon-pane hidden" id="mon-pane-trends">
+          <div class="toolbar">
+            <div class="seg" id="mon-trend-range">
+              <button data-days="7" class="active" onclick="monTrendRange(7)">7D</button>
+              <button data-days="30" onclick="monTrendRange(30)">30D</button>
+              <button data-days="90" onclick="monTrendRange(90)">90D</button>
+            </div>
+            <select id="mon-trend-metric" class="filter-select" onchange="monLoadTrends()">
+              <option value="active">Hoạt động</option>
+              <option value="issues">Có vấn đề</option>
+              <option value="login">Cần đăng nhập</option>
+              <option value="verify">Cần xác minh</option>
+              <option value="proxy">Proxy lỗi</option>
+              <option value="evalfail">Đánh giá thất bại</option>
+            </select>
+          </div>
+          <div class="panel"><canvas id="mon-chart" height="220"></canvas><div id="mon-trend-empty" class="empty-state hidden">Chưa có đủ snapshot — xu hướng sẽ hiện sau vài giờ theo dõi.</div></div>
+        </div>
+
+        <div class="mon-pane hidden" id="mon-pane-history">
+          <div class="toolbar">
+            <select id="mon-h-cat" class="filter-select" onchange="monLoadHistory(1)"><option value="">Tất cả loại</option><option value="evaluation">Đánh giá</option><option value="runtime">Chrome</option><option value="proxy">Proxy</option><option value="monitoring">Theo dõi</option></select>
+            <input type="date" id="mon-h-from" class="filter-select" onchange="monLoadHistory(1)">
+            <div class="search-box"><input type="text" id="mon-h-search" placeholder="Lọc theo kênh..." oninput="monLoadHistory(1)"></div>
+          </div>
+          <div class="panel"><div id="mon-history"><div class="skeleton"></div></div></div>
+          <div class="pagination" id="mon-history-pg"></div>
+        </div>
+      </section>
       <!-- ===== VIEW: PROXIES ===== -->
       <section id="view-proxies" class="view">
         <div class="toolbar">
@@ -957,5 +1094,6 @@
 </div>
 
 <script src="assets/js/app.js?v=20260918f"></script>
+<script src="assets/js/monitoring.js?v=20260921a"></script>
 </body>
 </html>

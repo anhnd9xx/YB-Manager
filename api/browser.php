@@ -105,6 +105,14 @@ function open_chrome(array $p, ?string $url = null): void
         if (!test_proxy($proxyTest)) {
             db()->prepare('UPDATE proxies SET status=?, last_check=NOW() WHERE id=?')
                 ->execute(['dead', (int)$p['proxy_id']]);
+            try {
+                require_once __DIR__ . '/../sync/AlertManager.php';
+                require_once __DIR__ . '/../sync/MonitoringService.php';
+                require_once __DIR__ . '/../sync/StateHistory.php';
+                AlertManager::syncProxy((int)$p['id'], true, MonitoringService::getSettings((int)$p['id']));
+                StateHistory::record((int)$p['id'], StateHistory::CAT_PROXY, 'OK', 'ERROR', 'proxy dead');
+            } catch (Throwable $e) {
+            }
             json_out([
                 'ok'         => false,
                 'proxy_dead' => true,
@@ -114,6 +122,11 @@ function open_chrome(array $p, ?string $url = null): void
         }
         db()->prepare('UPDATE proxies SET status=?, last_check=NOW() WHERE id=?')
             ->execute(['alive', (int)$p['proxy_id']]);
+        try {
+            require_once __DIR__ . '/../sync/AlertManager.php';
+            AlertManager::syncProxy((int)$p['id'], false, ['alert_on_proxy_error' => 1]);
+        } catch (Throwable $e) {
+        }
     }
 
     // Bat buoc co debug port truoc khi launch (cap chung via config.php)
@@ -148,6 +161,11 @@ function open_chrome(array $p, ?string $url = null): void
         // khong de danh gia lam hong mo kenh
     }
     log_action((int)$p['id'], 'open', $url);
+    try {
+        require_once __DIR__ . '/../sync/StateHistory.php';
+        StateHistory::record((int)$p['id'], StateHistory::CAT_RUNTIME, 'STOPPED', 'RUNNING', 'open');
+    } catch (Throwable $e) {
+    }
     json_out(['ok' => true, 'message' => 'Da mo Chrome cho profile: ' . $p['name'], 'port' => $port]);
 }
 
@@ -218,5 +236,10 @@ function kill_chrome(array $p): void
     SyncLogger::info('browser_perf', '[PERF] close profile #' . (int)$p['id']
         . ' dispatch: ' . (int)round((microtime(true) - $t0) * 1000) . 'ms');
     log_action((int)$p['id'], 'close', 'Dong chrome');
+    try {
+        require_once __DIR__ . '/../sync/StateHistory.php';
+        StateHistory::record((int)$p['id'], StateHistory::CAT_RUNTIME, 'RUNNING', 'STOPPED', 'close');
+    } catch (Throwable $e) {
+    }
     json_out(['ok' => true, 'message' => 'Da dong Chrome cho profile: ' . $p['name']]);
 }
