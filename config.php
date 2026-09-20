@@ -1,6 +1,12 @@
 <?php
 declare(strict_types=1);
 
+// Server canonical timezone: Asia/Ho_Chi_Minh (UTC+7), KHOP voi MySQL SYSTEM
+// (truoc day PHP mac dinh Europe/Berlin -> date() lech 5h so voi NOW(), card
+// hien "5 gio truoc" ngay sau khi danh gia xong). API tra ISO8601 kem offset
+// (+07:00) de browser parse khong mo ho; DB giu wall-time naive nhu cu.
+date_default_timezone_set('Asia/Ho_Chi_Minh');
+
 define('DB_HOST', '127.0.0.1');
 define('DB_NAME', 'yt_manager');
 define('DB_USER', 'root');
@@ -51,6 +57,25 @@ function chrome_path(): string
 function proxy_timeout(): int
 {
     return max(2, (int)get_setting('proxy_timeout', '5'));
+}
+
+/**
+ * Chuyen wall-time DB ('Y-m-d H:i:s', Asia/Ho_Chi_Minh) sang ISO8601 kem offset.
+ * Frontend parse chinh xac moi timezone, khong doan mo.
+ */
+function iso_ts(?string $naive): ?string
+{
+    if ($naive === null || trim($naive) === '') return null;
+    $s = trim($naive);
+    if (strpos($s, 'T') !== false) return $s; // da ISO
+    // Wall-time DB cung mui gio server (date_default_timezone_set) -> gan offset that
+    return str_replace(' ', 'T', $s) . date('P', strtotime($s) ?: time());
+}
+
+/** Gio hien tai dang ISO8601 kem offset (cho API result). */
+function now_iso(): string
+{
+    return date('Y-m-d\TH:i:sP');
 }
 
 function json_out($data, int $code = 200): void

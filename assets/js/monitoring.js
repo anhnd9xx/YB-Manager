@@ -336,7 +336,7 @@ function monRowHtml(x) {
     + `<td>${x.has_tabs ? '•' : '0'}</td>`
     + `<td>${accStageBadge(x.stage || 'NEW')}</td>`
     + `<td>${x.stability ?? '-'}</td><td>${x.confidence ?? '-'}</td>`
-    + `<td><small>${x.eval_attempt ? accRelTime(x.eval_attempt) : 'chưa có'}</small></td>`
+    + `<td><small>${x.eval_completed ? relSpan(x.eval_completed) : 'chưa có'}</small></td>`
     + `<td>${x.open_alerts ? `<span class="badge badge-danger">${x.open_alerts}</span>` : '0'}</td>`
     + `<td><button class="btn btn-xs" onclick="monToggleWatch(${x.id}, this)" title="Theo dõi">${x.watchlist ? '⭐' : '☆'}</button> ${x.monitor_enabled ? '<span class="badge badge-info">ON</span>' : '<span class="badge badge-muted">OFF</span>'}</td>`
     + `<td><button class="btn btn-xs" onclick="monRowRecheck(${x.id}, this)">✓</button> <button class="btn btn-xs" onclick="monOpenDrawer(${x.id})">Chi tiết</button></td></tr>`;
@@ -347,7 +347,7 @@ function monPatchRow(r) {
   if (!tr) return;
   const cells = tr.children;
   if (cells[2]) cells[2].innerHTML = evalBadge(r.status || 'ERROR');
-  if (cells[9]) cells[9].innerHTML = `<small>${accRelTime(r.checked_at || '')}</small>`;
+  if (cells[9]) cells[9].innerHTML = `<small>${relSpan(r.last_completed_at || r.checked_at || '')}</small>`;
 }
 async function monToggleWatch(id, btn) {
   const r = await sendJson(api + 'monitoring.php?action=watch', { id });
@@ -494,7 +494,8 @@ async function monOpenDrawer(id) {
     $('acc-drawer-body').innerHTML =
       `<div class="acc-head"><span class="meta-label">Chrome: ${p.status === 'running' ? '● Đang chạy' : '● Dừng'}</span><span>${evalBadge(ev)}</span></div>`
       + `<div class="sync-label" style="margin-top:8px">TỔNG QUAN</div><div class="acc-grid">`
-      + row('Kiểm tra', st.last_attempt_at ? accRelTime(st.last_attempt_at) : 'chưa có')
+      + row('Gần nhất', (st.last_completed_at || st.last_attempt_at) ? relSpan(st.last_completed_at || st.last_attempt_at) : 'chưa có')
+      + row('Thành công', st.last_successful_check_at ? relSpan(st.last_successful_check_at) : 'chưa có')
       + row('Biết gần nhất', st.last_known_status ? (EVAL_STATUS[st.last_known_status] || [])[0] : '-') + `</div>`
       + `<div class="sync-label">ĐÁNH GIÁ (tín hiệu thô)</div><div class="acc-grid">`
       + row('Đăng nhập', st.login_state || '—') + row('Phiên', st.session_state || '—')

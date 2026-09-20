@@ -65,6 +65,20 @@ class ChannelEvaluationManager
         return $has;
     }
 
+    /** Cache SHOW COLUMNS (trahn query lap moi finish). */
+    private static function hasCol(string $col): bool
+    {
+        static $cache = [];
+        if (!array_key_exists($col, $cache)) {
+            try {
+                $cache[$col] = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE '$col'")->fetch();
+            } catch (Throwable $e) {
+                $cache[$col] = false;
+            }
+        }
+        return $cache[$col];
+    }
+
     private static function cancelFile(int $profileId): string
     {
         return rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalcancel_' . $profileId . '.json';
@@ -411,12 +425,14 @@ class ChannelEvaluationManager
         if (self::hasEvalCols()) {
             try {
                 $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
+                $doneCol = self::hasCol('last_completed_at') ? ', last_completed_at=?' : '';
+                $doneP = self::hasCol('last_completed_at') ? [$now] : [];
                 if ($hasAttempt) {
-                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=? WHERE profile_id=?')
-                        ->execute([$back, $now, self::ATT_FAILED, $code, mb_substr($message, 0, 500), mb_substr($message, 0, 500), $ms, 'FAILED', $profileId]);
+                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=?' . $doneCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, $now, self::ATT_FAILED, $code, mb_substr($message, 0, 500), mb_substr($message, 0, 500), $ms, 'FAILED'], $doneP, [$profileId]));
                 } else {
-                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_error=?, last_duration_ms=?, eval_stage=? WHERE profile_id=?')
-                        ->execute([$back, $now, mb_substr($message, 0, 500), $ms, 'FAILED', $profileId]);
+                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_error=?, last_duration_ms=?, eval_stage=?' . $doneCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, $now, mb_substr($message, 0, 500), $ms, 'FAILED'], $doneP, [$profileId]));
                 }
             } catch (Throwable $e) {
             }
@@ -429,6 +445,7 @@ class ChannelEvaluationManager
         self::setStage($profileId, 'FAILED');
         return ['profileId' => $profileId, 'status' => $back, 'attempt_status' => self::ATT_FAILED,
             'error_code' => $code, 'checked_at' => $now,
+            'last_completed_at' => iso_ts($now),
             'stages' => self::getStageSnapshot($profileId),
             'login_state' => 'unknown', 'session_state' => 'unknown', 'youtube_state' => 'unknown',
             'security_challenge' => false, 'channel_state' => 'unknown',
@@ -481,6 +498,16 @@ class ChannelEvaluationManager
                 $attCols .= $hasConf ? ', eval_confidence=?' : '';
                 $attParams = $hasAttempt ? [self::ATT_SUCCESS, null, null] : [];
                 if ($hasConf) $attParams[] = $confidence;
+                // last_completed_at = moi lan xong; changed chi khi channel doi that
+                $fromCh = ($prevStatus !== self::CHECKING) ? $prevStatus : ($lastKnown ?? self::UNCHECKED);
+                if (self::hasCol('last_completed_at')) {
+                    $attCols .= ', last_completed_at=?';
+                    $attParams[] = $now;
+                }
+                if (self::hasCol('last_status_changed_at') && $status !== $fromCh) {
+                    $attCols .= ', last_status_changed_at=?';
+                    $attParams[] = $now;
+                }
                 db()->prepare('UPDATE account_states SET eval_status=?, last_known_status=?, last_successful_check_at=IF(? IN (\'ACTIVE\',\'LOGIN_REQUIRED\',\'VERIFICATION_REQUIRED\',\'CHANNEL_UNAVAILABLE\',\'RESTRICTED\'),?,last_successful_check_at), last_attempt_at=?, last_error=NULL, last_duration_ms=?, eval_stage=?' . $attCols . ' WHERE profile_id=?')
                     ->execute(array_merge([$status, $isSuccessCheck ? $status : $lastKnown, $status, $now, $now, $ms, 'SUCCESS'], $attParams, [$profileId]));
                 db()->prepare('INSERT INTO account_history (profile_id, checked_at, stability, confidence, stage, reasons, warnings, eval_status, prev_status, duration_ms, reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
@@ -516,13 +543,15 @@ class ChannelEvaluationManager
         $row = AccountRepository::load($profileId);
         return ['profileId' => $profileId, 'status' => $status, 'attempt_status' => self::ATT_SUCCESS,
             'error_code' => null, 'checked_at' => $now,
+            'last_completed_at' => iso_ts($now),
+            'last_successful_check_at' => iso_ts($isSuccessCheck ? $now : (($prev['last_successful_check_at'] ?? null))),
+            'last_known_status' => $isSuccessCheck ? $status : $lastKnown,
             'login_state' => $signals['login'] ?? 'unknown', 'session_state' => $signals['session'] ?? 'unknown',
             'youtube_state' => $signals['youtube'] ?? 'unknown',
             'security_challenge' => !empty($signals['challenge']), 'channel_state' => $signals['channel'] ?? 'unknown',
             'success_count' => (int)($row['success_count'] ?? 0), 'fail_count' => (int)($row['fail_count'] ?? 0),
             'consecutive_errors' => (int)($row['consec_fails'] ?? 0),
             'reason' => $reason, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
-            'last_known_status' => $isSuccessCheck ? $status : $lastKnown,
             'stability' => $stability, 'confidence' => $confidence, 'stage' => $stage,
             'tool_error' => false, 'perf' => $perf, 'run_state' => 'SUCCESS'];
     }
@@ -542,12 +571,13 @@ class ChannelEvaluationManager
                 $infraCol = $hasInfra ? ', infra_status=?' : '';
                 $infraParam = $hasInfra ? [$infra !== '' ? $infra : null] : [];
                 $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
+                $doneCol = self::hasCol('last_completed_at') ? ', last_completed_at=?' : '';
                 if ($hasAttempt) {
-                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=?' . $infraCol . ' WHERE profile_id=?')
-                        ->execute(array_merge([$back, $now, $attempt, $code, mb_substr($err, 0, 500), mb_substr($err, 0, 500), $ms, 'FAILED'], $infraParam, [$profileId]));
+                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?, last_duration_ms=?, eval_stage=?' . $infraCol . $doneCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, $now, $attempt, $code, mb_substr($err, 0, 500), mb_substr($err, 0, 500), $ms, 'FAILED'], $infraParam, self::hasCol('last_completed_at') ? [$now] : [], [$profileId]));
                 } else {
-                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_error=?, last_duration_ms=?, eval_stage=? WHERE profile_id=?')
-                        ->execute([$back, $now, mb_substr($err, 0, 500), $ms, 'FAILED', $profileId]);
+                    db()->prepare('UPDATE account_states SET eval_status=?, last_attempt_at=?, last_error=?, last_duration_ms=?, eval_stage=?' . $doneCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, $now, mb_substr($err, 0, 500), $ms, 'FAILED'], self::hasCol('last_completed_at') ? [$now] : [], [$profileId]));
                 }
                 $st = AccountRepository::load($profileId);
                 db()->prepare('INSERT INTO account_history (profile_id, checked_at, stability, confidence, stage, reasons, warnings, eval_status, prev_status, duration_ms, reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
@@ -572,6 +602,7 @@ class ChannelEvaluationManager
         return ['profileId' => $profileId, 'status' => $back, 'attempt_status' => $attempt,
             'infra_status' => $infra !== '' ? $infra : null,
             'stages' => self::getStageSnapshot($profileId),
+            'last_completed_at' => iso_ts($now),
             'error_code' => $code, 'checked_at' => $now,
             'reason' => $err, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
             'last_known_status' => $lastKnown, 'tool_error' => true,
@@ -588,9 +619,11 @@ class ChannelEvaluationManager
                 // Tra ve trang thai cu (khong de CHECKING treo)
                 $back = $lastKnown ?? ($prevStatus !== self::CHECKING ? $prevStatus : self::UNCHECKED);
                 $hasAttempt = (bool)db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch();
+                $doneCol = self::hasCol('last_completed_at') ? ', last_completed_at=?' : '';
+                $doneP = self::hasCol('last_completed_at') ? [date('Y-m-d H:i:s')] : [];
                 if ($hasAttempt) {
-                    db()->prepare('UPDATE account_states SET eval_status=?, eval_stage=?, last_attempt_status=?, last_attempt_at=? WHERE profile_id=?')
-                        ->execute([$back, 'CANCELLED', self::ATT_CANCELLED, date('Y-m-d H:i:s'), $profileId]);
+                    db()->prepare('UPDATE account_states SET eval_status=?, eval_stage=?, last_attempt_status=?, last_attempt_at=?' . $doneCol . ' WHERE profile_id=?')
+                        ->execute(array_merge([$back, 'CANCELLED', self::ATT_CANCELLED, date('Y-m-d H:i:s')], $doneP, [$profileId]));
                 } else {
                     db()->prepare('UPDATE account_states SET eval_status=?, eval_stage=? WHERE profile_id=?')
                         ->execute([$back, 'CANCELLED', $profileId]);
@@ -601,6 +634,7 @@ class ChannelEvaluationManager
         self::setStage($profileId, 'CANCELLED');
         return ['profileId' => $profileId, 'status' => 'CANCELLED', 'attempt_status' => self::ATT_CANCELLED,
             'error_code' => null, 'checked_at' => date('Y-m-d H:i:s'),
+            'last_completed_at' => iso_ts(date('Y-m-d H:i:s')),
             'reason' => 'cancelled', 'duration_ms' => $ms, 'prev_status' => $prevStatus,
             'last_known_status' => $lastKnown, 'tool_error' => false, 'run_state' => 'CANCELLED'];
     }

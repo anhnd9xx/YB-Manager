@@ -41,7 +41,7 @@ try {
                 try {
                     require_once __DIR__ . '/../sync/ChannelEvaluationManager.php';
                     ChannelEvaluationManager::watchdog();
-                    $cols = 'profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error, infra_status';
+                    $cols = 'profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error, infra_status, last_completed_at, last_status_changed_at';
                     try {
                         if (db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch()) {
                             $cols .= ', last_attempt_status, last_error_code, last_error_message, eval_stage';
@@ -70,6 +70,9 @@ try {
                 $row['eval_error_code'] = $em ? ($em['last_error_code'] ?? null) : null;
                 $row['eval_stage'] = $em ? ($em['eval_stage'] ?? null) : null;
                 $row['infra_status'] = $em ? ($em['infra_status'] ?? null) : null;
+                $row['eval_completed'] = $em && !empty($em['last_completed_at']) ? iso_ts($em['last_completed_at']) : null;
+                $row['eval_success_at'] = $em && !empty($em['last_successful_check_at']) ? iso_ts($em['last_successful_check_at']) : null;
+                $row['eval_changed_at'] = $em && !empty($em['last_status_changed_at']) ? iso_ts($em['last_status_changed_at']) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

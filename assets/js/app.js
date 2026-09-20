@@ -1002,6 +1002,9 @@ function evalApplyResult(r) {
   p.eval_prev = (r.prev_status && r.prev_status !== 'CHECKING') ? r.prev_status : p.eval_prev;
   p.eval_known = r.last_known_status ?? p.eval_known;
   p.eval_attempt = r.checked_at || p.eval_attempt;
+  // Patch ngay completed/success/changed (ISO kem offset) -> card doi tuc thi
+  if (r.last_completed_at) { p.eval_completed = r.last_completed_at; p.eval_attempt = r.last_completed_at; }
+  if (r.last_successful_check_at) p.eval_success_at = r.last_successful_check_at;
   p.eval_attempt_status = r.attempt_status || null;
   p.eval_error_code = r.error_code || null;
   p.eval_error = r.tool_error ? (r.reason || 'Lỗi kiểm tra') : (r.error_code ? (r.reason || r.error_code) : null);
@@ -1263,7 +1266,9 @@ async function openAccountDrawer(id, keepOpen) {
       const ok = ['YES', 'VALID', 'AVAILABLE'].includes(v);
       return `<span class="badge ${ok ? 'badge-ok' : (v === 'NOT_CHECKED' || v === 'CHECK_FAILED' ? 'badge-muted' : 'badge-review')}">${ok ? '✓' : '•'} ${escapeHtml(lbl)}</span>`;
     };
-    const lastTxt = st.last_attempt_at || st.last_checked_at;
+    const completedTs = st.last_completed_at || st.last_attempt_at || st.last_checked_at || null;
+    const successTs = st.last_successful_check_at || null;
+    const attemptRes = st.last_attempt_status || null;
     const STAGE_ORDER = ['PRECHECK_BROWSER', 'CHECK_CDP', 'CHECK_PROXY_NETWORK', 'CHECK_SESSION', 'CHECK_LOGIN', 'CHECK_YOUTUBE', 'CHECK_CHANNEL', 'CHECK_SECURITY'];
     const STAGE_VN_SHORT = { PRECHECK_BROWSER: 'Browser', CHECK_CDP: 'CDP', CHECK_PROXY_NETWORK: 'Proxy', CHECK_SESSION: 'Session', CHECK_LOGIN: 'Login', CHECK_YOUTUBE: 'YouTube', CHECK_CHANNEL: 'Channel', CHECK_SECURITY: 'Security' };
     const stageIcon = (r) => r === 'PASS' ? '<span class="st-healthy">✓ Pass</span>' : (r === 'FAIL' ? '<span class="st-critical">! Fail</span>' : (r === 'TIMEOUT' ? '<span class="st-warning">◌ Timeout</span>' : (r === 'NOT_APPLICABLE' ? '<span class="muted">— N/A</span>' : '<span class="muted">— Chưa chạy</span>')));
@@ -1304,8 +1309,12 @@ async function openAccountDrawer(id, keepOpen) {
     } else if (st.last_error) {
       head += `<div class="eval-prev" title="${escapeAttr(st.last_error)}">⚠ Lần kiểm tra mới nhất thất bại</div>`;
     }
+    const attemptLine = attemptRes ? ` · Kết quả: ${attemptRes}` : '';
+    const successLine = successTs ? `<div class="sync-label">Lần kiểm tra thành công: ${relSpan(successTs)}</div>` : '';
+    const changedLine = st.last_status_changed_at ? `<div class="sync-label">Trạng thái từ: ${relSpan(st.last_status_changed_at)}</div>` : '';
     $('acc-drawer-body').innerHTML = head
-      + `<div class="sync-label">Lần kiểm tra: ${lastTxt ? escapeHtml(lastTxt) + ` (${accRelTime(lastTxt)})` : 'chưa có'}</div>`
+      + `<div class="sync-label">Lần kiểm tra gần nhất: ${completedTs ? relSpan(completedTs) : 'chưa có'}${attemptLine}</div>`
+      + successLine + changedLine
       + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
       + row('Đăng nhập', sig(st.login_state === 'ok' ? 'YES' : (st.login_state === 'failed' ? 'NO' : (st.login_state || 'NOT_CHECKED'))))
       + row('Phiên', sig(st.session_state === 'ok' ? 'VALID' : (st.session_state === 'failed' ? 'INVALID' : (st.session_state || 'NOT_CHECKED'))))
@@ -1633,14 +1642,14 @@ function accDaysVN(p) {
 }
 const EVAL_UI_VN = { YES: 'Đã đăng nhập', NO: 'Chưa đăng nhập', VALID: 'Hợp lệ', INVALID: 'Không hợp lệ', AVAILABLE: 'Truy cập được', UNAVAILABLE: 'Không truy cập được', NOT_CHECKED: 'Chưa kiểm tra', CHECK_FAILED: 'Không kiểm tra được' };
 function evalBlockInner(p) {
-  // Chrome status GIU NGUYEN o card-status; day chi evaluation (rieng biet)
+  // Card dung last_completed_at (lan xong gan nhat, ke ca failed/timeout)
   const es = p.eval_status || 'UNCHECKED';
-  const last = p.eval_attempt || p.acc_checked;
-  const lastTxt = last ? accRelTime(last) : 'chưa kiểm tra';
+  const completed = p.eval_completed || null;
   let sub = '';
   if (es === 'CHECKING') {
     const st = p.eval_stage ? (EVAL_STAGE_VN[p.eval_stage] || null) : null;
     sub = `<div class="eval-prev">◌ ${st ? escapeHtml(st) : 'Đang chờ'}...</div>`;
+    if (completed) sub += `<div class="eval-prev">Lần trước: ${relSpan(completed)}</div>`;
     if (p.eval_prev && p.eval_prev !== 'CHECKING' && p.eval_prev !== 'UNCHECKED') {
       sub += `<div class="eval-prev">Trước đó: ${(EVAL_STATUS[p.eval_prev] || [])[0] || p.eval_prev}</div>`;
     }
@@ -1648,9 +1657,9 @@ function evalBlockInner(p) {
     // Attempt moi loi nhung giu last_known: hien last_known + warning (khong phong to loi)
     const known = p.eval_known && p.eval_known !== 'UNCHECKED' ? p.eval_known : null;
     if (known) {
-      sub = `<div class="eval-prev">⚠ Kiểm tra mới nhất thất bại (${lastTxt})</div>`;
+      sub = `<div class="eval-prev">⚠ Kiểm tra mới nhất thất bại</div>`;
     } else {
-      sub = `<div class="eval-prev">⚠ Không kiểm tra được (${lastTxt})</div>`;
+      sub = `<div class="eval-prev">⚠ Không kiểm tra được</div>`;
     }
     if (p.eval_error_code) sub += `<div class="eval-prev" title="${escapeAttr(p.eval_error_code)}">ⓘ ${escapeHtml(evalErrVN(p.eval_error_code))}</div>`;
   } else if (es === 'ERROR' && p.eval_known && p.eval_known !== 'ERROR' && p.eval_known !== 'UNCHECKED') {
@@ -1663,7 +1672,7 @@ function evalBlockInner(p) {
   const ch = p.acc_channel === 'exists'
     ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
     : '';
-  return `<div class="acc-head"><span class="meta-label">Đánh giá · ${lastTxt}</span>`
+  return `<div class="acc-head"><span class="meta-label">Đánh giá · ${relSpan(completed, 'chưa kiểm tra')}</span>`
     + `<span class="acc-stage">${evalBadgeFor(p)}</span></div>`
     + sub + err
     + `<div class="acc-meter"><span>Ổn định</span><strong>${p.acc_stability ?? '-'}</strong>${accBar(p.acc_stability, stabTip)}${ch}</div>`
@@ -1682,17 +1691,58 @@ function evalBadgeFor(p) {
   }
   return evalBadge(es);
 }
-function accRelTime(s) {
+// Utility DUY NHAT cho relative time (§9). DB khong luu text, chi timestamp.
+// Naive 'YYYY-MM-DD HH:MM:SS' = wall-time server (+07:00) -> gan offset de khong mo ho.
+function parseServerTime(s) {
+  if (!s) return NaN;
+  s = String(s).trim();
+  if (/[T]/.test(s)) return new Date(s).getTime(); // ISO (co Z/offset) -> chinh xac
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (m) return new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}+07:00`).getTime();
+  return new Date(s).getTime();
+}
+function formatRelativeTime(ts) {
   try {
-    const t = new Date(s.replace(' ', 'T')).getTime();
-    if (isNaN(t)) return s;
-    const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+    const t = parseServerTime(ts);
+    if (isNaN(t)) return String(ts || '');
+    const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (sec < 10) return 'vừa xong';
+    if (sec < 60) return 'vài giây trước';
+    const m = Math.floor(sec / 60);
     if (m < 1) return 'vừa xong';
+    if (m === 1) return '1 phút trước';
     if (m < 60) return `${m} phút trước`;
-    const h = Math.round(m / 60);
+    const h = Math.floor(m / 60);
+    if (h === 1) return '1 giờ trước';
     if (h < 24) return `${h} giờ trước`;
-    return `${Math.round(h / 24)} ngày trước`;
-  } catch (e) { return s; }
+    const d = Math.floor(h / 24);
+    if (d === 1) return 'hôm qua';
+    if (d < 7) return `${d} ngày trước`;
+    const dt = new Date(t);
+    return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
+  } catch (e) { return String(ts || ''); }
+}
+function formatAbsoluteTime(ts) {
+  try {
+    const t = parseServerTime(ts);
+    if (isNaN(t)) return String(ts || '');
+    return new Date(t).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch (e) { return String(ts || ''); }
+}
+function accRelTime(s) { return formatRelativeTime(s); } // alias tuong thich
+// 1 timer chung 30s: chi update text cac [data-rel], khong fetch, khong rerender
+setInterval(() => {
+  try {
+    document.querySelectorAll('[data-rel]').forEach(el => {
+      const ts = el.getAttribute('data-ts');
+      if (ts) el.textContent = formatRelativeTime(ts);
+    });
+  } catch (e) {}
+}, 30000);
+function relSpan(ts, fallback) {
+  // Span tu update theo ticker + tooltip gio local chinh xac
+  if (!ts) return escapeHtml(fallback || 'chưa kiểm tra');
+  return `<span data-rel data-ts="${escapeAttr(ts)}" title="${escapeAttr(formatAbsoluteTime(ts))}">${escapeHtml(formatRelativeTime(ts))}</span>`;
 }
 
 // ============ PROFILE ACTIONS ============
