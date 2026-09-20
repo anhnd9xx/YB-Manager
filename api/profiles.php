@@ -41,7 +41,14 @@ try {
                 try {
                     require_once __DIR__ . '/../sync/ChannelEvaluationManager.php';
                     ChannelEvaluationManager::watchdog();
-                    foreach (db()->query('SELECT profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error FROM account_states') as $er) {
+                    $cols = 'profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error';
+                    try {
+                        if (db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch()) {
+                            $cols .= ', last_attempt_status, last_error_code, last_error_message, eval_stage';
+                        }
+                    } catch (Throwable $e2) {
+                    }
+                    foreach (db()->query("SELECT $cols FROM account_states") as $er) {
                         $evalMap[(int)$er['profile_id']] = $er;
                     }
                 } catch (Throwable $e) {
@@ -59,6 +66,9 @@ try {
                 $row['eval_known'] = $em ? ($em['last_known_status'] ?? null) : null;
                 $row['eval_attempt'] = $em ? ($em['last_attempt_at'] ?? null) : null;
                 $row['eval_error'] = $em ? ($em['last_error'] ?? null) : null;
+                $row['eval_attempt_status'] = $em ? ($em['last_attempt_status'] ?? null) : null;
+                $row['eval_error_code'] = $em ? ($em['last_error_code'] ?? null) : null;
+                $row['eval_stage'] = $em ? ($em['eval_stage'] ?? null) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

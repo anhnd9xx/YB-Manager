@@ -213,6 +213,7 @@ body {
 .eval-live { font-size: 12.5px; color: var(--info, #4da3ff); margin: 6px 0; animation: evalPulse 1.2s ease-in-out infinite; }
 @keyframes evalPulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 .eval-flash { animation: evalFlash 2.5s ease-out; }
+.eval-popover { position: absolute; z-index: 200; width: 220px; background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow-pop); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
 @keyframes evalFlash { 0% { box-shadow: 0 0 0 2px var(--yellow); } 100% { box-shadow: none; } }
 /* drawer chi tiet account (truot tu phai, khong chuyen page) */
 .drawer-wrap { position: fixed; inset: 0; z-index: 70; }

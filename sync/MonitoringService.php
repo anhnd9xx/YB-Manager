@@ -40,7 +40,7 @@ class MonitoringService
         try {
             $rows = db()->query(
                 'SELECT p.id, p.status AS runtime, p.proxy_id, pr.status AS proxy_status,'
-                . ' s.eval_status, s.stage'
+                . ' s.eval_status, s.last_known_status, s.last_attempt_status, s.stage'
                 . ' FROM profiles p LEFT JOIN proxies pr ON pr.id=p.proxy_id'
                 . ' LEFT JOIN account_states s ON s.profile_id=p.id'
                 . " $w"
@@ -49,7 +49,7 @@ class MonitoringService
             try {
                 $rows = db()->query(
                     'SELECT p.id, p.status AS runtime, p.proxy_id, pr.status AS proxy_status,'
-                    . " NULL AS eval_status FROM profiles p LEFT JOIN proxies pr ON pr.id=p.proxy_id $w"
+                    . " NULL AS eval_status, NULL AS last_known_status, NULL AS last_attempt_status FROM profiles p LEFT JOIN proxies pr ON pr.id=p.proxy_id $w"
                 )->fetchAll();
             } catch (Throwable $e2) {
                 $rows = [];
@@ -63,16 +63,20 @@ class MonitoringService
         $running = 0;
         $withProxy = 0;
         $proxyDead = 0;
+        $evalErrors = 0; // attempt moi nhat loi, rieng voi channel status
         foreach ($rows as $r) {
-            $ev = (string)($r['eval_status'] ?? 'UNCHECKED');
+            // Dashboard dung last_known_channel_status (khong dung attempt status)
+            $ev = (string)($r['last_known_status'] ?? '');
+            if ($ev === '' || $ev === null) $ev = (string)($r['eval_status'] ?? 'UNCHECKED');
             if ($ev === '' || $ev === null) $ev = 'UNCHECKED';
             if (($r['runtime'] ?? '') === 'running') $running++;
             if (!empty($r['proxy_id'])) $withProxy++;
             if (!empty($r['proxy_id']) && ($r['proxy_status'] ?? '') === 'dead') $proxyDead++;
+            if (in_array(($r['last_attempt_status'] ?? ''), ['FAILED', 'TIMEOUT'], true)) $evalErrors++;
             if ($ev === 'ACTIVE') $active++;
             elseif ($ev === 'UNCHECKED') $unchecked++;
             elseif ($ev === 'CHECKING') $checking++;
-            else $issues++; // LOGIN_REQUIRED/VERIFICATION_REQUIRED/UNAVAILABLE/ERROR
+            else $issues++; // LOGIN_REQUIRED/VERIFICATION_REQUIRED/UNAVAILABLE/RESTRICTED/ERROR
         }
         $alerts = AlertManager::counts();
         self::maybeSnapshot($total, $active, $issues, $unchecked, $running, $proxyDead);
@@ -102,7 +106,7 @@ class MonitoringService
         }
         return ['total' => $total, 'active' => $active, 'issues' => $issues,
             'unchecked' => $unchecked, 'checking' => $checking, 'running' => $running,
-            'withProxy' => $withProxy, 'proxyDead' => $proxyDead,
+            'withProxy' => $withProxy, 'proxyDead' => $proxyDead, 'evalErrors' => $evalErrors,
             'proxyOk' => max(0, $withProxy - $proxyDead),
             'alerts' => $alerts['total'], 'alertsCritical' => $alerts['CRITICAL'],
             'coverage' => $coverage, 'watchlist' => $watchlist,

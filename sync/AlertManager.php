@@ -89,6 +89,11 @@ class AlertManager
                 self::resolve($profileId, 'login_required');
                 self::resolve($profileId, 'verification_required');
                 break;
+            case 'RESTRICTED':
+                if ($onChange) self::open($profileId, self::WARNING, 'verification_required', $reason ?: 'Bi han che');
+                self::resolve($profileId, 'login_required');
+                self::resolve($profileId, 'channel_unavailable');
+                break;
             case 'ERROR':
                 if ($onChange) self::open($profileId, self::INFO, 'eval_failed', $reason ?: 'Loi kiem tra');
                 break;

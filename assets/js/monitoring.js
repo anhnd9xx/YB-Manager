@@ -82,10 +82,18 @@ function monRangeCustomGo() {
 // Friendly message: khong hien raw backend code cho user
 const MON_MSG = {
   chrome_not_running: 'Chrome chưa chạy', login_required: 'Cần đăng nhập',
-  verification_required: 'Cần xác minh', security_challenge: 'Gặp kiểm tra bảo mật',
+  verification_required: 'Cần xác minh', security_challenge: 'Cần xác minh',
   recovery_required: 'Cần khôi phục tài khoản', proxy_error: 'Proxy không kết nối được',
   proxy_dead: 'Proxy không kết nối được', youtube_unreachable: 'Không truy cập được YouTube',
   channel_unavailable: 'Không truy cập được', eval_failed: 'Lỗi kiểm tra, thử lại sau',
+  CHROME_NOT_RUNNING: 'Chrome chưa chạy', CHROME_START_TIMEOUT: 'Mở Chrome quá chậm',
+  DEBUG_PORT_UNAVAILABLE: 'Không lấy được cổng kiểm tra',
+  CDP_CONNECT_FAILED: 'Không kết nối được trình duyệt',
+  CDP_TIMEOUT: 'Trình duyệt phản hồi quá chậm', NETWORK_TIMEOUT: 'Mạng quá chậm',
+  PAGE_TIMEOUT: 'Trang tải quá chậm', TIMEOUT: 'Kiểm tra quá thời gian',
+  PROFILE_MISMATCH: 'Nhầm phiên Chrome', LOGIN_REQUIRED: 'Cần đăng nhập',
+  SECURITY_CHALLENGE: 'Cần xác minh', YOUTUBE_UNAVAILABLE: 'Không truy cập được YouTube',
+  EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra',
 };
 function monFriendly(code, fallback) {
   if (!code) return fallback || 'Có vấn đề cần kiểm tra';

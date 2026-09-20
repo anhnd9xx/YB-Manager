@@ -1,46 +1,124 @@
 <?php
 declare(strict_types=1);
 /**
- * AccountDataCollector - Thu thap tin hieu tai khoan qua CDP (spec muc 12).
+ * AccountDataCollector - Thu thap tin hieu tai khoan qua CDP.
  * CHI DOC + dieu huong tab kiem tra rieng (background) cua chinh user:
- * - Khong bypass CAPTCHA/2FA/recovery (gap -> danh dau ACTION_REQUIRED, user tu xu ly).
- * - Khong like/view/sub/comment.
- * - Khong luu password/token/cookie (chi trang thai + diem).
- * Reuse: cdp_reachable, cdp_page_targets, cdp_ws_send/batch (config.php).
+ * - Khong bypass CAPTCHA/2FA/recovery (gap -> danh dau, user tu xu ly).
+ * - Khong like/view/sub/comment. Khong luu password/token/cookie.
+ *
+ * Hardening:
+ * - precheck() rieng voi error_code ro rang (CHROME_NOT_RUNNING,
+ *   DEBUG_PORT_UNAVAILABLE, CDP_CONNECT_FAILED, PROFILE_MISMATCH).
+ * - 1 snapshot /json/list dau batch, reuse trong ca run (khong query tung eval).
+ * - Moi stage co timeout (poll 250ms, khong fixed sleep dai).
  */
 require_once __DIR__ . '/../config.php';
 
 class AccountDataCollector
 {
+    // Error codes (khong dung chung "ERROR")
+    public const E_CHROME_NOT_RUNNING = 'CHROME_NOT_RUNNING';
+    public const E_DEBUG_PORT = 'DEBUG_PORT_UNAVAILABLE';
+    public const E_CDP_CONNECT = 'CDP_CONNECT_FAILED';
+    public const E_CDP_TIMEOUT = 'CDP_TIMEOUT';
+    public const E_PAGE_TIMEOUT = 'PAGE_TIMEOUT';
+    public const E_PROFILE_MISMATCH = 'PROFILE_MISMATCH';
+    public const E_INTERNAL = 'EVALUATOR_INTERNAL_ERROR';
+
+    /** Loi tam thoi duoc retry 1 lan (delay 500ms). */
+    public static function isTransient(string $code): bool
+    {
+        return in_array($code, [self::E_CDP_CONNECT, self::E_CDP_TIMEOUT, 'NETWORK_TIMEOUT'], true);
+    }
+
     /**
-     * @return array{status:ok|failed|skipped, signals:array, error?:string}
-     * signals: login|session|youtube (ok|failed|unknown), channel (exists|none|unknown),
-     *          channelName, challenge:bool, recovery:bool
+     * PRECHECK: profile + runtime + port + CDP + khop debug port voi process.
+     * @return array{ok:bool, profile?:array, port?:int, code?:string, message?:string, ms:int}
      */
-    public static function collect(int $profileId, int $timeoutSec = 25): array
+    public static function precheck(int $profileId): array
     {
         $t0 = microtime(true);
-        $deadline = $t0 + max(10, $timeoutSec);
         try {
-            $st = db()->prepare('SELECT id, name, status, debug_port FROM profiles WHERE id=?');
+            $st = db()->prepare('SELECT id, name, status, debug_port, user_data_dir FROM profiles WHERE id=?');
             $st->execute([$profileId]);
             $p = $st->fetch();
-            if (!$p) return self::res('skipped', [], 'no profile');
-            $port = (int)($p['debug_port'] ?? 0);
-            if (($p['status'] ?? '') !== 'running' || $port <= 0 || !cdp_reachable($port)) {
-                return self::res('skipped', [], 'profile not running');
+            if (!$p) {
+                return ['ok' => false, 'code' => self::E_INTERNAL, 'message' => 'profile_not_found',
+                        'ms' => (int)round((microtime(true) - $t0) * 1000)];
             }
+            $port = (int)($p['debug_port'] ?? 0);
+            if (($p['status'] ?? '') !== 'running') {
+                return ['ok' => false, 'code' => self::E_CHROME_NOT_RUNNING, 'message' => 'Chrome chua chay (can mo Chrome de kiem tra)',
+                        'ms' => (int)round((microtime(true) - $t0) * 1000)];
+            }
+            if ($port <= 0) {
+                return ['ok' => false, 'code' => self::E_DEBUG_PORT, 'message' => 'Thieu debug port',
+                        'ms' => (int)round((microtime(true) - $t0) * 1000)];
+            }
+            if (!cdp_reachable($port)) {
+                return ['ok' => false, 'code' => self::E_CDP_CONNECT, 'message' => 'Khong ket noi duoc CDP',
+                        'ms' => (int)round((microtime(true) - $t0) * 1000)];
+            }
+            // Khop debug port voi process Chrome that cua profile (chong nham port)
+            $udir = (string)($p['user_data_dir'] ?? '');
+            if ($udir !== '') {
+                $cmd = chrome_main_cmdline($udir);
+                if (is_string($cmd) && strpos($cmd, 'remote-debugging-port=' . $port) === false) {
+                    return ['ok' => false, 'code' => self::E_PROFILE_MISMATCH,
+                            'message' => 'Debug port khong khop Chrome cua kenh',
+                            'ms' => (int)round((microtime(true) - $t0) * 1000)];
+                }
+            }
+            return ['ok' => true, 'profile' => $p, 'port' => $port,
+                    'ms' => (int)round((microtime(true) - $t0) * 1000)];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'code' => self::E_INTERNAL, 'message' => mb_substr($e->getMessage(), 0, 200),
+                    'ms' => (int)round((microtime(true) - $t0) * 1000)];
+        }
+    }
+
+    /**
+     * @return array{status:success|failed|skipped, signals:array, error?:string, error_code?:string, timings?:array}
+     * signals: login|session|youtube (ok|failed|unknown), channel (exists|none|unknown),
+     *          channelName, challenge:bool, recovery:bool
+     * $timeouts: ['session'=>5,'platform'=>8] giay.
+     */
+    public static function collect(int $profileId, int $timeoutSec = 25, array $timeouts = []): array
+    {
+        $tAll = microtime(true);
+        $timings = [];
+        $t = microtime(true);
+        $pre = self::precheck($profileId);
+        $timings['precheck'] = (int)round((microtime(true) - $t) * 1000);
+        if (!$pre['ok']) {
+            $code = (string)($pre['code'] ?? self::E_INTERNAL);
+            // Precheck fail = dieu kien, khong phai ket luan account hong
+            return self::res('skipped', [], (string)($pre['message'] ?? ''), $code, $timings);
+        }
+        $port = (int)$pre['port'];
+        $deadline = $tAll + max(10, $timeoutSec);
+        $tSession = (int)($timeouts['session'] ?? 5);
+        $tPlatform = (int)($timeouts['platform'] ?? 8);
+        try {
             // Tab kiem tra background rieng (khong dung tab user dang xem)
+            $t = microtime(true);
             $tabId = self::openTab($port, 'https://www.youtube.com');
+            $timings['connect'] = (int)round((microtime(true) - $t) * 1000);
             if ($tabId === null) {
-                return self::res('failed', self::blank(), 'cannot open check tab');
+                return self::res('failed', self::blank(), 'cannot open check tab', self::E_CDP_TIMEOUT, $timings);
             }
             try {
-                $yt = self::probeYoutube($port, $tabId, $deadline);
+                // 1 snapshot targets, reuse ca run (khong /json/list tung eval)
+                $targets = cdp_page_targets($port);
+                $t = microtime(true);
+                $yt = self::probeYoutube($port, $tabId, $deadline, $tSession, $targets);
+                $timings['session'] = (int)round((microtime(true) - $t) * 1000);
                 if ($yt === null) {
-                    return self::res('failed', self::blank(), 'youtube probe failed');
+                    return self::res('failed', self::blank(), 'youtube probe failed', self::E_PAGE_TIMEOUT, $timings);
                 }
-                $ch = self::probeChannel($port, $tabId, $deadline);
+                $t = microtime(true);
+                $ch = self::probeChannel($port, $tabId, $deadline, $tPlatform);
+                $timings['platform'] = (int)round((microtime(true) - $t) * 1000);
                 $signals = [
                     'login' => $yt['av'] ? 'ok' : 'failed',
                     'session' => 'ok', // CDP evaluate thanh cong = session dung duoc
@@ -50,19 +128,22 @@ class AccountDataCollector
                     'challenge' => $yt['ch'] || $ch['ch'],
                     'recovery' => $yt['rc'] || $ch['rc'],
                 ];
-                return self::res('success', $signals, null);
+                $timings['total'] = (int)round((microtime(true) - $tAll) * 1000);
+                return self::res('success', $signals, null, null, $timings);
             } finally {
                 self::closeTab($port, $tabId);
             }
         } catch (Throwable $e) {
-            return self::res('failed', self::blank(), mb_substr($e->getMessage(), 0, 200));
+            $timings['total'] = (int)round((microtime(true) - $tAll) * 1000);
+            return self::res('failed', self::blank(), mb_substr($e->getMessage(), 0, 200), self::E_INTERNAL, $timings);
         }
     }
 
-    private static function res(string $status, array $signals, ?string $error): array
+    private static function res(string $status, array $signals, ?string $error, ?string $code, array $timings): array
     {
-        $r = ['status' => $status, 'signals' => $signals + self::blank()];
+        $r = ['status' => $status, 'signals' => $signals + self::blank(), 'timings' => $timings];
         if ($error !== null) $r['error'] = $error;
+        if ($code !== null) $r['error_code'] = $code;
         return $r;
     }
 
@@ -87,20 +168,29 @@ class AccountDataCollector
         @file_get_contents('http://127.0.0.1:' . $port . '/json/close/' . $tabId, false, $ctx);
     }
 
-    private static function wsFor(int $port, string $tabId): ?string
+    /** Tim WS tu snapshot co san; thieu thi fetch lai 1 lan (khong moi eval). */
+    private static function wsFor(int $port, string $tabId, ?array $cached = null): ?string
     {
-        foreach (cdp_page_targets($port) as $t) {
-            if ((string)$t['id'] === $tabId && !empty($t['webSocketDebuggerUrl'])) {
+        $list = $cached ?? cdp_page_targets($port);
+        foreach ($list as $t) {
+            if ((string)($t['id'] ?? '') === $tabId && !empty($t['webSocketDebuggerUrl'])) {
                 return (string)$t['webSocketDebuggerUrl'];
+            }
+        }
+        if ($cached !== null) {
+            foreach (cdp_page_targets($port) as $t) {
+                if ((string)($t['id'] ?? '') === $tabId && !empty($t['webSocketDebuggerUrl'])) {
+                    return (string)$t['webSocketDebuggerUrl'];
+                }
             }
         }
         return null;
     }
 
     /** Evaluate JS tren tab, tra ve value da decode (array) hoac null. */
-    private static function eval(int $port, string $tabId, string $js): ?array
+    private static function eval(int $port, string $tabId, string $js, ?array $cached = null): ?array
     {
-        $ws = self::wsFor($port, $tabId);
+        $ws = self::wsFor($port, $tabId, $cached);
         if ($ws === null) return null;
         $v = cdp_ws_batch($port, $ws, [
             json_encode(['id' => 7, 'method' => 'Runtime.evaluate',
@@ -111,28 +201,42 @@ class AccountDataCollector
         return is_array($d) ? $d : null;
     }
 
-    /** Cho tab load (title/url xuat hien), toi da $waitSec. */
+    /** Cho tab load (title xuat hien), poll 250ms toi da $waitSec (khong sleep mu). */
     private static function waitLoad(int $port, string $tabId, float $deadline, int $waitSec = 8): void
     {
         $until = min($deadline, microtime(true) + $waitSec);
         while (microtime(true) < $until) {
             foreach (cdp_page_targets($port) as $t) {
-                if ((string)$t['id'] === $tabId && trim((string)($t['title'] ?? '')) !== '') return;
+                if ((string)($t['id'] ?? '') === $tabId && trim((string)($t['title'] ?? '')) !== '') return;
             }
-            usleep(500000);
+            usleep(250000);
         }
     }
 
-    private static function probeYoutube(int $port, string $tabId, float $deadline): ?array
+    /** Cho URL doi (redirect @me), poll 250ms thay vi sleep cung 1.5s. */
+    private static function waitUrlChange(int $port, string $tabId, string $fromPart, float $deadline, int $waitSec = 4): void
     {
-        self::waitLoad($port, $tabId, $deadline, 8);
+        $until = min($deadline, microtime(true) + $waitSec);
+        while (microtime(true) < $until) {
+            foreach (cdp_page_targets($port) as $t) {
+                if ((string)($t['id'] ?? '') !== $tabId) continue;
+                $u = (string)($t['url'] ?? '');
+                if ($u !== '' && stripos($u, $fromPart) === false) return;
+            }
+            usleep(250000);
+        }
+    }
+
+    private static function probeYoutube(int $port, string $tabId, float $deadline, int $waitSec, array $targets): ?array
+    {
+        self::waitLoad($port, $tabId, $deadline, $waitSec);
         $d = self::eval($port, $tabId,
             "(()=>{try{const t=document.title||'',u=location.href;"
             . "return {t:t.slice(0,120),u:u.slice(0,200),"
             . "av:!!document.querySelector('button#avatar-btn'),"
             . "rs:document.readyState,"
             . "ch:/challenge|verify/i.test(u+' '+t),"
-            . "rc:/recover/i.test(u)}}catch(e){return null}})()");
+            . "rc:/recover/i.test(u)}}catch(e){return null}})()", $targets);
         if (!is_array($d)) return null;
         return [
             'av' => !empty($d['av']),
@@ -146,15 +250,15 @@ class AccountDataCollector
      * Kiem tra channel qua https://www.youtube.com/@me (redirect ve channel neu co)
      * + doi chieu markers tao-kenh. Mo ho -> 'unknown' (khong doan mo).
      */
-    private static function probeChannel(int $port, string $tabId, float $deadline): array
+    private static function probeChannel(int $port, string $tabId, float $deadline, int $waitSec): array
     {
         $out = ['state' => 'unknown', 'name' => null, 'ch' => false, 'rc' => false];
         $ws = self::wsFor($port, $tabId);
         if ($ws === null) return $out;
         cdp_ws_send($port, $ws, json_encode(['id' => 8, 'method' => 'Page.navigate',
             'params' => ['url' => 'https://www.youtube.com/@me']]));
-        self::waitLoad($port, $tabId, $deadline, 8);
-        usleep(1500000); // cho redirect @me hoan tat
+        self::waitLoad($port, $tabId, $deadline, $waitSec);
+        self::waitUrlChange($port, $tabId, '/@me', $deadline, 4);
         $d = self::eval($port, $tabId,
             "(()=>{try{const u=location.href,t=document.title||'';"
             . "const body=(document.body?document.body.innerText.slice(0,3000):'');"

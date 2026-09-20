@@ -495,6 +495,9 @@ class SyncSettingsService
             'acc_eval_on_start' => '0',
             'acc_background' => '0',
             'acc_batch' => '10',
+            'acc_concurrency' => '4',
+            'acc_auto_start' => '0',
+            'acc_close_after' => '0',
             'acc_w_login' => '25',
             'acc_w_session' => '15',
             'acc_w_youtube' => '25',
@@ -528,6 +531,9 @@ class SyncSettingsService
             'evalOnStart' => $b('acc_eval_on_start'),
             'background' => $b('acc_background'),
             'batch' => $i('acc_batch', 10, 1, 100),
+            'concurrency' => in_array($ci = $i('acc_concurrency', 4, 2, 8), [2, 4, 6, 8], true) ? $ci : 4,
+            'autoStart' => $b('acc_auto_start'),
+            'closeAfter' => $b('acc_close_after'),
             'wLogin' => $i('acc_w_login', 25, 0, 100),
             'wSession' => $i('acc_w_session', 15, 0, 100),
             'wYoutube' => $i('acc_w_youtube', 25, 0, 100),
@@ -545,16 +551,21 @@ class SyncSettingsService
             'acc_review_threshold' => [0, 100], 'acc_unavail_fails' => [1, 1000],
             'acc_check_interval_min' => [5, 10080], 'acc_max_data_age_h' => [1, 720],
             'acc_batch' => [1, 100],
+            'acc_concurrency' => [2, 8],
             'acc_w_login' => [0, 100], 'acc_w_session' => [0, 100],
             'acc_w_youtube' => [0, 100], 'acc_w_rate' => [0, 100], 'acc_w_consec' => [0, 100],
         ];
-        $bools = ['acc_eval_on_start', 'acc_background'];
+        $bools = ['acc_eval_on_start', 'acc_background', 'acc_auto_start', 'acc_close_after'];
         $errors = [];
         foreach ($rules as $k => [$lo, $hi]) {
             if (array_key_exists($k, $in)) {
                 $v = self::toInt($in[$k], -1);
                 if ($v < $lo || $v > $hi) $errors[] = "$k phai $lo..$hi";
             }
+        }
+        if (array_key_exists('acc_concurrency', $in)) {
+            $cv = self::toInt($in['acc_concurrency'], 4);
+            if (!in_array($cv, [2, 4, 6, 8], true)) $errors[] = 'acc_concurrency phai la 2/4/6/8';
         }
         if ($errors) return ['ok' => false, 'errors' => $errors, 'normalized' => []];
         $out = [];

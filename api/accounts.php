@@ -116,6 +116,17 @@ try {
             break;
         }
 
+        // Priority: dua profile QUEUED len dau queue (khong duplicate)
+        case 'eval_priority': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $bid = (string)($b['batch_id'] ?? ($_GET['batch_id'] ?? ''));
+            $pid = (int)($b['profile_id'] ?? ($b['id'] ?? 0));
+            if ($bid === '' || $pid <= 0) json_out(['ok' => false, 'message' => 'Thieu batch_id/profile_id'], 400);
+            $ok = ChannelEvaluationManager::prioritize($bid, $pid);
+            json_out(['ok' => $ok, 'data' => ['prioritized' => $ok]]);
+            break;
+        }
+
         case 'eval_state': {
             $bid = (string)($_GET['batch_id'] ?? '');
             if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);

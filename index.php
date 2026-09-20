@@ -831,6 +831,16 @@
               <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-acc-onstart"><span>Đánh giá khi mở kênh</span></label>
               <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-acc-bg"><span>Chạy nền (monitor)</span></label>
             </div>
+            <div class="win-group-title">Chạy đánh giá</div>
+            <div class="win-row">
+              <div class="win-field"><label>Đồng thời (2/4/6/8)</label>
+                <select id="set-acc-concurrency"><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select>
+              </div>
+            </div>
+            <div class="win-row" style="flex-wrap:wrap;gap:8px">
+              <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-acc-autostart"><span>Tự mở Chrome khi đánh giá (mặc định: yêu cầu Chrome chạy)</span></label>
+              <label class="checkbox-row" style="min-width:0"><input type="checkbox" id="set-acc-closeafter"><span>Đóng lại sau khi kiểm tra (nếu trước đó đang dừng)</span></label>
+            </div>
             <div class="settings-actions">
               <button class="btn" id="acc-reset-btn" onclick="resetAccountSettings()">↺ Mặc định</button>
               <button class="btn btn-primary" id="acc-save-btn" onclick="saveAccountSettings()">💾 Lưu đánh giá</button>

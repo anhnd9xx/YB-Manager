@@ -126,6 +126,8 @@ function normalize_setting(string $key, ?string $value)
         case 'layout_keep_inside':
         case 'acc_eval_on_start':
         case 'acc_background':
+        case 'acc_auto_start':
+        case 'acc_close_after':
         case 'tab_autosave':
         case 'tab_autorestore':
         case 'tab_remember_active':
@@ -151,6 +153,7 @@ function normalize_setting(string $key, ?string $value)
         case 'acc_check_interval_min':
         case 'acc_max_data_age_h':
         case 'acc_batch':
+        case 'acc_concurrency':
         case 'acc_w_login':
         case 'acc_w_session':
         case 'acc_w_youtube':

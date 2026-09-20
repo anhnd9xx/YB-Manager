@@ -956,8 +956,26 @@ const EVAL_STATUS = {
   LOGIN_REQUIRED: ['Cần đăng nhập', 'badge-review', '!'],
   VERIFICATION_REQUIRED: ['Cần xác minh', 'badge-warn', '!'],
   UNAVAILABLE: ['Không truy cập được', 'badge-danger', '●'],
+  RESTRICTED: ['Bị hạn chế', 'badge-warn', '!'],
   ERROR: ['Lỗi kiểm tra', 'badge-muted', '!'],
 };
+// Ma loi -> tieng Viet (khong hien raw code tren card)
+const EVAL_ERR_VN = {
+  CHROME_NOT_RUNNING: 'Chrome chưa chạy — cần mở Chrome để kiểm tra',
+  CHROME_START_TIMEOUT: 'Mở Chrome quá chậm',
+  DEBUG_PORT_UNAVAILABLE: 'Không lấy được cổng kiểm tra',
+  CDP_CONNECT_FAILED: 'Không kết nối được trình duyệt',
+  CDP_TIMEOUT: 'Trình duyệt phản hồi quá chậm',
+  NETWORK_TIMEOUT: 'Mạng quá chậm', PAGE_TIMEOUT: 'Trang tải quá chậm',
+  TIMEOUT: 'Kiểm tra quá thời gian', PROFILE_MISMATCH: 'Nhầm phiên Chrome',
+  LOGIN_REQUIRED: 'Cần đăng nhập', SECURITY_CHALLENGE: 'Cần xác minh',
+  YOUTUBE_UNAVAILABLE: 'Không truy cập được YouTube',
+  EVALUATOR_INTERNAL_ERROR: 'Lỗi công cụ kiểm tra',
+};
+function evalErrVN(code, fallback) {
+  if (!code) return fallback || '';
+  return EVAL_ERR_VN[code] || fallback || 'Có vấn đề cần kiểm tra';
+}
 function evalBadge(st) {
   const [label, cls, dot] = EVAL_STATUS[st] || EVAL_STATUS.UNCHECKED;
   return `<span class="badge ${cls}">${dot} ${label}</span>`;
@@ -974,7 +992,10 @@ function evalApplyResult(r) {
   p.eval_prev = (r.prev_status && r.prev_status !== 'CHECKING') ? r.prev_status : p.eval_prev;
   p.eval_known = r.last_known_status ?? p.eval_known;
   p.eval_attempt = r.checked_at || p.eval_attempt;
-  p.eval_error = r.tool_error ? (r.reason || 'Lỗi kiểm tra') : null;
+  p.eval_attempt_status = r.attempt_status || null;
+  p.eval_error_code = r.error_code || null;
+  p.eval_error = r.tool_error ? (r.reason || 'Lỗi kiểm tra') : (r.error_code ? (r.reason || r.error_code) : null);
+  p.eval_stage = r.run_state || null;
   if (r.login_state) p.acc_login = r.login_state;
   if (r.session_state) p.acc_session = r.session_state;
   if (r.youtube_state) p.acc_youtube = r.youtube_state;
@@ -1002,84 +1023,169 @@ function updateCardEval(id, changed) {
     }
   }
 }
+// Buffer gom update card trong ~75ms (4 finish gan nhau -> 1 render)
+let evalFlushTimer = null;
+const evalPendingPaint = new Map();
+function evalQueuePaint(r) {
+  evalPendingPaint.set(Number(r.profileId), r);
+  clearTimeout(evalFlushTimer);
+  evalFlushTimer = setTimeout(() => {
+    for (const q of evalPendingPaint.values()) {
+      evalApplyResult(q);
+      if (accDrawerId === Number(q.profileId)) openAccountDrawer(Number(q.profileId), true);
+    }
+    evalPendingPaint.clear();
+  }, 75);
+}
 async function evaluateSelected() {
-  if (evalRunning) { toast('Đang đánh giá — bấm Hủy nếu muốn dừng', 'error'); return; }
+  if (evalRunning) { monEvalPopover(); return; } // click khi running -> popover trang thai
+  // Snapshot selection luc bat dau (bo chon sau khong anh huong batch)
   const ids = Array.from(selectedProfileIds).map(Number).filter(x => x > 0);
   if (!ids.length) { toast('Chọn ít nhất một kênh để đánh giá', 'error'); return; }
+  // Bo qua kenh dang CHECKING (profile lock) thay vi duplicate
+  const fresh = ids.filter(id => {
+    const p = profiles.find(x => Number(x.id) === id);
+    return !(p && p.eval_status === 'CHECKING');
+  });
+  if (!fresh.length) { toast('Các kênh đã chọn đang được kiểm tra', 'error'); return; }
+  if (fresh.length < ids.length) toast(`Bỏ qua ${ids.length - fresh.length} kênh đang kiểm tra`, '');
   evalRunning = true;
   const btn = $('btn-eval-bulk');
   const cancelBtn = $('btn-eval-cancel');
   if (cancelBtn) cancelBtn.classList.remove('hidden');
   const oldBtn = btn ? btn.innerHTML : '';
-  // 1) Optimistic CHECKING ngay cho ca batch (giu previous)
-  const prevMap = {};
-  ids.forEach(id => {
+  // 1) QUEUED/CHECKING optimistic ngay cho ca batch (giu previous)
+  fresh.forEach(id => {
     const p = profiles.find(x => Number(x.id) === id);
-    if (p) { prevMap[id] = p.eval_status || 'UNCHECKED'; p.eval_prev = prevMap[id]; p.eval_status = 'CHECKING'; }
+    if (p) { p.eval_prev = p.eval_status || 'UNCHECKED'; p.eval_status = 'CHECKING'; p.eval_stage = 'QUEUED'; }
   });
   renderProfiles();
+  const conc = (settings && [2, 4, 6, 8].includes(Number(settings.acc_concurrency))) ? Number(settings.acc_concurrency) : 4;
   const counts = {};
-  let done = 0;
+  let done = 0, failed = 0;
   try {
-    // 2) Tao batch server (mark CHECKING 1 UPDATE)
-    const st = await sendJson(api + 'accounts.php?action=eval_start', { ids, concurrency: 4 });
+    // 2) Tao batch server (dedupe + mark CHECKING 1 UPDATE)
+    const st = await sendJson(api + 'accounts.php?action=eval_start', { ids: fresh, concurrency: conc });
     if (!st.ok) { toast(st.message || 'Lỗi tạo batch', 'error'); throw new Error('start'); }
-    evalBatch = { batch_id: st.data.batch_id, total: ids.length, done: 0 };
-    // 3) Chunk <=4, kenh nao xong update card do ngay
+    evalBatch = { batch_id: st.data.batch_id, total: fresh.length, done: 0, failed: 0, pending: fresh.length };
+    // Poll stage 2s cho card dang CHECKING (hien thi "Dang kiem tra YouTube...")
+    const stageTimer = setInterval(async () => {
+      const checking = profiles.filter(p => p.eval_status === 'CHECKING' && fresh.includes(Number(p.id))).slice(0, 8);
+      for (const p of checking) {
+        try {
+          const s = await getJson(api + `accounts.php?action=eval_stage&id=${p.id}`);
+          const st2 = s.ok && s.data ? s.data.stage : null;
+          if (st2 && st2 !== p.eval_stage && st2 !== 'DONE' && st2 !== 'SUCCESS' && st2 !== 'FAILED') {
+            p.eval_stage = st2;
+            updateCardEval(p.id, false);
+          }
+        } catch (e) {}
+      }
+    }, 2000);
+    evalBatch.stageTimer = stageTimer;
+    // 3) Chunk theo concurrency, kenh nao xong update card do ngay (buffer 75ms)
     let finished = false;
     while (!finished) {
-      if (btn) btn.innerHTML = `◌ Đánh giá ${done}/${ids.length}`;
-      const ch = await sendJson(api + 'accounts.php?action=eval_chunk', { batch_id: evalBatch.batch_id, limit: 4 });
+      if (btn) btn.innerHTML = `◌ ${done}/${fresh.length}`;
+      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = fresh.length - done;
+      const ch = await sendJson(api + 'accounts.php?action=eval_chunk', { batch_id: evalBatch.batch_id, limit: conc });
       if (!ch.ok) { toast(ch.message || 'Lỗi batch', 'error'); break; }
       for (const r of (ch.data.results || [])) {
+        if (r.already_running) { continue; }
         done++;
-        if (r.status) counts[r.status] = (counts[r.status] || 0) + 1;
-        evalApplyResult(r);
-        // Panel chi tiet dang mo dung kenh nay -> live update
-        if (tabsPanelId === Number(r.profileId) || accDrawerId === Number(r.profileId)) openAccountDrawer(Number(r.profileId), true);
+        if ((r.attempt_status || '') === 'SUCCESS') { if (r.status) counts[r.status] = (counts[r.status] || 0) + 1; }
+        else failed++;
+        evalQueuePaint(r);
       }
-      evalBatch.done = done;
-      if (btn) btn.innerHTML = `◌ Đánh giá ${done}/${ids.length}`;
+      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = fresh.length - done;
+      if (btn) btn.innerHTML = `◌ ${done}/${fresh.length}`;
       finished = !!ch.data.done;
       if (!finished && !(ch.data.results || []).length) break;
     }
   } catch (e) {
     if (e.message !== 'start') toast('Lỗi kết nối khi đánh giá', 'error');
   } finally {
+    clearTimeout(evalFlushTimer);
+    if (evalBatch && evalBatch.stageTimer) clearInterval(evalBatch.stageTimer);
+    for (const q of evalPendingPaint.values()) evalApplyResult(q);
+    evalPendingPaint.clear();
     // Tra CHECKING treo (cancel/mang rot) ve previous
     profiles.forEach(p => {
-      if (p.eval_status === 'CHECKING' && ids.includes(Number(p.id))) {
+      if (p.eval_status === 'CHECKING' && fresh.includes(Number(p.id))) {
         p.eval_status = p.eval_prev || 'UNCHECKED';
       }
     });
     renderProfiles();
     if (btn) btn.innerHTML = oldBtn;
     if (cancelBtn) cancelBtn.classList.add('hidden');
+    const pop = $('eval-popover');
+    if (pop) pop.classList.add('hidden');
     evalRunning = false;
     evalBatch = null;
   }
   const sum = Object.entries(counts).map(([s, c]) => `${(EVAL_STATUS[s] || [])[0] || s}: ${c}`).join(' · ');
-  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}`, done === ids.length ? 'success' : 'error');
+  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}${failed ? ` · lỗi thử: ${failed}` : ''}`, done === fresh.length ? 'success' : 'error');
+}
+// Mini popover trang thai batch (click toolbar khi running)
+function monEvalPopover() {
+  let pop = $('eval-popover');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.id = 'eval-popover';
+    pop.className = 'eval-popover hidden';
+    document.body.appendChild(pop);
+  }
+  if (!evalBatch) { pop.classList.add('hidden'); return; }
+  const b = evalBatch;
+  pop.innerHTML = `<strong>Đánh giá hàng loạt</strong>`
+    + `<div>Hoàn tất: ${b.done || 0}</div><div>Đang chạy: ${Math.min(4, (b.total || 0) - (b.done || 0))}</div>`
+    + `<div>Đang chờ: ${b.pending || 0}</div><div>Thất bại: ${b.failed || 0}</div>`
+    + `<button class="btn btn-sm" onclick="evalCancelBatch()">Hủy các mục đang chờ</button>`;
+  const btn = $('btn-eval-bulk');
+  const rc = btn ? btn.getBoundingClientRect() : { left: 100, bottom: 100 };
+  pop.style.left = Math.min(window.innerWidth - 240, rc.left) + 'px';
+  pop.style.top = (rc.bottom + window.scrollY + 6) + 'px';
+  pop.classList.toggle('hidden');
 }
 async function evalCancelBatch() {
   if (!evalBatch) return;
   await sendJson(api + 'accounts.php?action=eval_cancel', { batch_id: evalBatch.batch_id });
   toast('Đã gửi yêu cầu hủy batch', '');
 }
-// Danh gia 1 profile (nut Kiem tra tren card): optimistic CHECKING + panel live
+// Danh gia 1 profile (nut Kiem tra tren card): lock + disable rieng nut do
 async function evaluateOneProfile(id) {
   const p = profiles.find(x => Number(x.id) === Number(id));
-  if (p) { p.eval_prev = p.eval_status || 'UNCHECKED'; p.eval_status = 'CHECKING'; updateCardEval(id, false); }
+  // Profile lock: dang CHECKING -> focus operation hien tai, khong duplicate
+  if (p && p.eval_status === 'CHECKING') {
+    toast('Kênh đang được kiểm tra...', '');
+    if (evalBatch) {
+      // Neu QUEUED trong batch -> tang priority, khong tao moi
+      sendJson(api + 'accounts.php?action=eval_priority', { batch_id: evalBatch.batch_id, profile_id: id });
+      toast('Đã ưu tiên kênh này lên đầu hàng đợi', 'success');
+    }
+    return;
+  }
+  const btn = document.querySelector(`button[onclick="evaluateOneProfile(${Number(id)})"]`);
+  if (btn) btn.disabled = true;
+  if (p) { p.eval_prev = p.eval_status || 'UNCHECKED'; p.eval_status = 'CHECKING'; p.eval_stage = 'QUEUED'; updateCardEval(id, false); }
   if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
-  const res = await sendJson(api + 'accounts.php?action=refresh', { id });
-  if (res.ok && res.data) {
-    evalApplyResult(res.data);
-    if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
-    const r = res.data;
-    toast(`#${id}: ${(EVAL_STATUS[r.status] || [])[0] || r.status}`, r.status === 'ACTIVE' ? 'success' : 'error');
-  } else {
-    toast(res.message || 'Lỗi', 'error');
-    if (p) { p.eval_status = p.eval_prev || 'UNCHECKED'; updateCardEval(id, false); }
+  try {
+    const res = await sendJson(api + 'accounts.php?action=refresh', { id });
+    if (res.ok && res.data) {
+      if (res.data.already_running) { toast('Kênh đang được kiểm tra ở tiến trình khác', ''); }
+      else {
+        evalApplyResult(res.data);
+        const r = res.data;
+        const label = (EVAL_STATUS[r.status] || [])[0] || r.status;
+        toast(`#${id}: ${label}${r.error_code ? ' (' + evalErrVN(r.error_code) + ')' : ''}`, r.status === 'ACTIVE' ? 'success' : 'error');
+      }
+      if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
+    } else {
+      toast(res.message || 'Lỗi', 'error');
+      if (p) { p.eval_status = p.eval_prev || 'UNCHECKED'; updateCardEval(id, false); }
+    }
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 const ACC_STAGE_VN = { NEW: 'Mới', OBSERVING: 'Theo dõi', STABLE: 'Ổn định', READY_FOR_CHANNEL: 'Sẵn sàng mở kênh', CHANNEL_EXISTS: 'Đã có kênh', REVIEW_REQUIRED: 'Cần xem lại', ACTION_REQUIRED: 'Cần xử lý', UNAVAILABLE: 'Không khả dụng' };
@@ -1090,7 +1196,7 @@ function closeAccountDrawer() {
   const w = $('acc-drawer-wrap');
   if (w) w.classList.add('hidden');
 }
-const EVAL_STAGE_VN = { INITIALIZING: 'Đang khởi tạo...', QUEUED: 'Đang chờ...', CHECKING_SESSION: 'Đang kiểm tra phiên...', CHECKING_LOGIN: 'Đang kiểm tra đăng nhập...', CHECKING_PLATFORM: 'Đang kiểm tra YouTube...', CHECKING_CHANNEL: 'Đang kiểm tra kênh...', FINALIZING: 'Đang tổng hợp...', DONE: 'Hoàn tất' };
+const EVAL_STAGE_VN = { INITIALIZING: 'Đang khởi tạo...', QUEUED: 'Đang chờ...', PRECHECK: 'Đang kiểm tra điều kiện...', CONNECTING: 'Đang kết nối trình duyệt...', CHECKING_SESSION: 'Đang kiểm tra phiên...', CHECKING_LOGIN: 'Đang kiểm tra đăng nhập...', CHECKING_PLATFORM: 'Đang kiểm tra YouTube...', CHECKING_CHANNEL: 'Đang kiểm tra kênh...', FINALIZING: 'Đang tổng hợp...', DONE: 'Hoàn tất', SUCCESS: 'Hoàn tất', FAILED: 'Thất bại', CANCELLED: 'Đã hủy' };
 async function openAccountDrawer(id, keepOpen) {
   accDrawerId = Number(id);
   try {
@@ -1123,7 +1229,12 @@ async function openAccountDrawer(id, keepOpen) {
       head += `<div class="eval-prev">Trạng thái gần nhất: ${(EVAL_STATUS[st.last_known_status] || [])[0] || st.last_known_status}`
         + (st.last_successful_check_at ? ` (${accRelTime(st.last_successful_check_at)})` : '') + `</div>`;
     }
-    if (st.last_error) head += `<div class="eval-prev" title="${escapeAttr(st.last_error)}">⚠ Lần kiểm tra mới nhất thất bại</div>`;
+    if (st.last_attempt_status && st.last_attempt_status !== 'SUCCESS') {
+      head += `<div class="eval-prev">Lần thử: ${st.last_attempt_status}`
+        + (st.last_error_code ? ` · ${escapeHtml(evalErrVN(st.last_error_code))}` : '') + `</div>`;
+    } else if (st.last_error) {
+      head += `<div class="eval-prev" title="${escapeAttr(st.last_error)}">⚠ Lần kiểm tra mới nhất thất bại</div>`;
+    }
     $('acc-drawer-body').innerHTML = head
       + `<div class="sync-label">Lần kiểm tra: ${lastTxt ? escapeHtml(lastTxt) + ` (${accRelTime(lastTxt)})` : 'chưa có'}</div>`
       + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
@@ -1458,12 +1569,25 @@ function evalBlockInner(p) {
   const last = p.eval_attempt || p.acc_checked;
   const lastTxt = last ? accRelTime(last) : 'chưa kiểm tra';
   let sub = '';
-  if (es === 'CHECKING' && p.eval_prev && p.eval_prev !== 'CHECKING' && p.eval_prev !== 'UNCHECKED') {
-    sub = `<div class="eval-prev">Trước đó: ${(EVAL_STATUS[p.eval_prev] || [])[0] || p.eval_prev}</div>`;
+  if (es === 'CHECKING') {
+    const st = p.eval_stage ? (EVAL_STAGE_VN[p.eval_stage] || null) : null;
+    sub = `<div class="eval-prev">◌ ${st ? escapeHtml(st) : 'Đang chờ'}...</div>`;
+    if (p.eval_prev && p.eval_prev !== 'CHECKING' && p.eval_prev !== 'UNCHECKED') {
+      sub += `<div class="eval-prev">Trước đó: ${(EVAL_STATUS[p.eval_prev] || [])[0] || p.eval_prev}</div>`;
+    }
+  } else if (p.eval_attempt_status === 'FAILED' || p.eval_attempt_status === 'TIMEOUT') {
+    // Attempt moi loi nhung giu last_known: hien last_known + warning (khong phong to loi)
+    const known = p.eval_known && p.eval_known !== 'UNCHECKED' ? p.eval_known : null;
+    if (known) {
+      sub = `<div class="eval-prev">⚠ Kiểm tra mới nhất thất bại (${lastTxt})</div>`;
+    } else {
+      sub = `<div class="eval-prev">⚠ Không kiểm tra được (${lastTxt})</div>`;
+    }
+    if (p.eval_error_code) sub += `<div class="eval-prev" title="${escapeAttr(p.eval_error_code)}">ⓘ ${escapeHtml(evalErrVN(p.eval_error_code))}</div>`;
   } else if (es === 'ERROR' && p.eval_known && p.eval_known !== 'ERROR' && p.eval_known !== 'UNCHECKED') {
     sub = `<div class="eval-prev">⚠ Gần nhất: ${(EVAL_STATUS[p.eval_known] || [])[0] || p.eval_known}</div>`;
   }
-  const err = (es === 'ERROR' && p.eval_error) ? `<div class="eval-prev" title="${escapeAttr(p.eval_error)}">⚠ Lần này thất bại</div>` : '';
+  const err = (es === 'ERROR' && !p.eval_known && p.eval_error) ? `<div class="eval-prev" title="${escapeAttr(p.eval_error)}">⚠ Lần này thất bại</div>` : '';
   const stage = p.acc_stage || 'NEW';
   const [, , dot] = ACC_STAGES[stage] || ACC_STAGES.NEW;
   const stabTip = `Ổn định (điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube): ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
@@ -1471,7 +1595,7 @@ function evalBlockInner(p) {
     ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
     : '';
   return `<div class="acc-head"><span class="meta-label">Đánh giá · ${lastTxt}</span>`
-    + `<span class="acc-stage">${evalBadge(es)}</span></div>`
+    + `<span class="acc-stage">${evalBadgeFor(p)}</span></div>`
     + sub + err
     + `<div class="acc-meter"><span>Ổn định</span><strong>${p.acc_stability ?? '-'}</strong>${accBar(p.acc_stability, stabTip)}${ch}</div>`
     + `<div class="acc-head" style="margin-top:4px"><span class="meta-label">Account · ${accDaysVN(p)}</span>`
@@ -1480,6 +1604,14 @@ function evalBlockInner(p) {
 function buildAccountRow(p) {
   return `<div class="acc-block eval-block" onclick="openAccountDrawer(${p.id})" title="Xem chi tiết đánh giá">`
     + evalBlockInner(p) + `</div>`;
+}
+function evalBadgeFor(p) {
+  // Chua tung check thanh cong + attempt loi -> "Chua xac dinh" (khong ket luan hong)
+  const es = p.eval_status || 'UNCHECKED';
+  if (es === 'UNCHECKED' && (p.eval_attempt_status === 'FAILED' || p.eval_attempt_status === 'TIMEOUT')) {
+    return `<span class="badge badge-muted">? Chưa xác định</span>`;
+  }
+  return evalBadge(es);
 }
 function accRelTime(s) {
   try {
@@ -2878,8 +3010,11 @@ function loadAccountSettingsForm(s) {
   $('set-acc-interval').value = s.acc_check_interval_min ?? 120;
   $('set-acc-maxage').value = s.acc_max_data_age_h ?? 72;
   $('set-acc-batch').value = s.acc_batch ?? 10;
+  $('set-acc-concurrency').value = String(s.acc_concurrency ?? 4);
   $('set-acc-onstart').checked = !!s.acc_eval_on_start;
   $('set-acc-bg').checked = !!s.acc_background;
+  $('set-acc-autostart').checked = !!s.acc_auto_start;
+  $('set-acc-closeafter').checked = !!s.acc_close_after;
   refreshAccountMonitorLine();
 }
 function collectAccountSettings() {
@@ -2898,8 +3033,11 @@ function collectAccountSettings() {
     acc_check_interval_min: parseInt($('set-acc-interval').value, 10),
     acc_max_data_age_h: parseInt($('set-acc-maxage').value, 10),
     acc_batch: parseInt($('set-acc-batch').value, 10),
+    acc_concurrency: parseInt($('set-acc-concurrency').value, 10),
     acc_eval_on_start: $('set-acc-onstart').checked ? '1' : '0',
-    acc_background: $('set-acc-bg').checked ? '1' : '0'
+    acc_background: $('set-acc-bg').checked ? '1' : '0',
+    acc_auto_start: $('set-acc-autostart').checked ? '1' : '0',
+    acc_close_after: $('set-acc-closeafter').checked ? '1' : '0'
   };
 }
 function accResult(msg, ok) {
@@ -2946,7 +3084,7 @@ async function saveAccountSettings() {
 }
 function resetAccountSettings() {
   confirmDelete('Reset chính sách đánh giá về mặc định?', async () => {
-    const data = { acc_min_days: 7, acc_min_checks: 10, acc_ready_stability: 80, acc_ready_confidence: 70, acc_review_threshold: 50, acc_unavail_fails: 20, acc_w_login: 25, acc_w_session: 15, acc_w_youtube: 25, acc_w_rate: 25, acc_w_consec: 10, acc_check_interval_min: 120, acc_max_data_age_h: 72, acc_batch: 10, acc_eval_on_start: '0', acc_background: '0' };
+    const data = { acc_min_days: 7, acc_min_checks: 10, acc_ready_stability: 80, acc_ready_confidence: 70, acc_review_threshold: 50, acc_unavail_fails: 20, acc_w_login: 25, acc_w_session: 15, acc_w_youtube: 25, acc_w_rate: 25, acc_w_consec: 10, acc_check_interval_min: 120, acc_max_data_age_h: 72, acc_batch: 10, acc_concurrency: 4, acc_eval_on_start: '0', acc_background: '0', acc_auto_start: '0', acc_close_after: '0' };
     const res = await sendJson(api + 'settings.php?action=save', data);
     if (res.ok) { await loadSettings(); accResult('✓ Đã reset về mặc định', true); toast('Đã reset', 'success'); }
     else { accResult('✗ ' + (res.message || 'Lỗi'), false); toast(res.message || 'Lỗi', 'error'); }
