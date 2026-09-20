@@ -841,6 +841,12 @@ body {
   background: rgba(255,82,82,.1); border: 1px solid rgba(255,82,82,.35);
 }
 #profile-modal .modal { width: min(520px, calc(100vw - 20px)); }
+.seg-3 button { flex: 1; white-space: nowrap; }
+.link-btn { background: none; border: 0; color: var(--blue); cursor: pointer; font-size: 12.5px; padding: 6px 0; }
+@media (max-width: 560px) {
+  #pf-proxy-manual-wrap .win-row { flex-direction: column; }
+  #pf-proxy-manual-wrap .win-field { min-width: 0; }
+}
 
 /* ================= MISC ================= */
 .proxy-result, .import-result { margin-top: 14px; font-size: 13px; }

@@ -32,7 +32,7 @@ try {
                 json_out(['ok' => false, 'message' => 'Thieu host hoac port'], 400);
             }
             $protocol = strtolower((string)($b['protocol'] ?? 'http'));
-            if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
+            if (!in_array($protocol, ['http', 'https', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
             $stmt = db()->prepare('INSERT INTO proxies (name, host, port, username, password, protocol, country)
                                    VALUES (?, ?, ?, ?, ?, ?, ?)');
             $stmt->execute([
@@ -56,7 +56,7 @@ try {
             $cur = $chk->fetch();
             if (!$cur) json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
             $protocol = strtolower((string)($b['protocol'] ?? 'http'));
-            if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
+            if (!in_array($protocol, ['http', 'https', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
             // Password khong tra ra browser nua -> form edit gui rong nghia la GIU NGUYEN
             $newPass = array_key_exists('password', $b) && $b['password'] !== '' && $b['password'] !== null
                 ? (string)$b['password'] : $cur['password'];
@@ -121,6 +121,27 @@ try {
             json_out(['ok' => true, 'data' => $results]);
             break;
 
+        // Test proxy thu cong (modal Sua kenh): khong tao record, khong tra password.
+        case 'check': {
+            $b = $_SERVER['REQUEST_METHOD'] === 'GET' ? $_GET : json_body();
+            $host = trim((string)($b['host'] ?? ''));
+            $port = (int)($b['port'] ?? 0);
+            $proto = strtolower(trim((string)($b['protocol'] ?? 'http')));
+            if (!in_array($proto, ['http', 'https', 'socks4', 'socks5'], true)) {
+                json_out(['ok' => false, 'message' => 'Protocol khong hop le'], 400);
+            }
+            if ($host === '' || $port < 1 || $port > 65535) {
+                json_out(['ok' => false, 'message' => 'Host/port khong hop le'], 400);
+            }
+            $r = test_proxy_detailed([
+                'host' => $host, 'port' => $port, 'protocol' => $proto,
+                'username' => trim((string)($b['username'] ?? '')) ?: null,
+                'password' => (string)($b['password'] ?? '') !== '' ? (string)$b['password'] : null,
+            ]);
+            json_out(['ok' => true, 'data' => $r]);
+            break;
+        }
+
         case 'test':
             $id = (int)($_GET['id'] ?? 0);
             $stmt = db()->prepare('SELECT * FROM proxies WHERE id = ?');
@@ -154,7 +175,7 @@ try {
             if (empty($ids)) json_out(['ok' => false, 'message' => 'Chua chon proxy nao'], 400);
             $proto = array_key_exists('protocol', $b) && $b['protocol'] !== '' && $b['protocol'] !== 'keep'
                 ? strtolower(trim((string)$b['protocol'])) : null;
-            if ($proto !== null && !in_array($proto, ['http', 'socks4', 'socks5', 'ssh'], true)) {
+            if ($proto !== null && !in_array($proto, ['http', 'https', 'socks4', 'socks5', 'ssh'], true)) {
                 json_out(['ok' => false, 'message' => 'Protocol khong hop le'], 400);
             }
             $country = array_key_exists('country', $b) && trim((string)$b['country']) !== ''

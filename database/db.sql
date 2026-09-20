@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS proxies (
     port INT NOT NULL,
     username VARCHAR(100) DEFAULT NULL,
     password VARCHAR(255) DEFAULT NULL,
-    protocol ENUM('http','socks4','socks5','ssh') DEFAULT 'http',
+    protocol ENUM('http','https','socks4','socks5','ssh') DEFAULT 'http',
     country VARCHAR(2) DEFAULT NULL,
     status ENUM('alive','dead','unknown') DEFAULT 'unknown',
     last_check DATETIME DEFAULT NULL,

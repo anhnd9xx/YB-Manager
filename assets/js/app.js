@@ -1853,6 +1853,7 @@ function openCreateChannel() {
   $('pf-proxy-note').textContent = '';
   setProfileMode('single');
   populateProxySelect();
+  initProxyModeUI(null);
   profileDraftOriginal = null;
   refreshProfileSaveBtn();
   showModal('profile-modal');
@@ -1865,10 +1866,35 @@ function collectProfileDraft() {
     channel_handle: $('pf-handle').value.trim() || null,
     user_agent: $('pf-ua').value.trim() || null,
     webrtc_protection: $('pf-webrtc').value,
-    proxy_id: $('pf-proxy').value ? Number($('pf-proxy').value) : null,
+    ...collectProxyDraft(),
     monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
     fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : '',
   };
+}
+function initProxyModeUI(p) {
+  // Default theo du lieu channel hien tai: co proxy -> SAVED, khong -> NONE
+  const hasProxy = !!(p && p.proxy_id);
+  setProxyModeSilent(hasProxy ? 'SAVED' : 'NONE');
+  pfManual = { protocol: 'socks5', host: '', port: '', username: '', password: '' };
+  $('pf-proxy-text').value = '';
+  $('pf-proxy-proto').value = 'socks5';
+  $('pf-px-host').value = ''; $('pf-px-port').value = ''; $('pf-px-user').value = ''; $('pf-px-pass').value = '';
+  $('pf-proxy-adv').classList.add('hidden');
+  $('pf-proxy-adv-toggle').textContent = 'Cấu hình chi tiết ▾';
+  $('pf-proxy-test-result').textContent = '';
+  pfProxyError('');
+  // Neu kenh co protocol luu -> manual default theo no
+  const cur = p && proxies.find(x => Number(x.id) === Number(p.proxy_id));
+  if (cur && cur.protocol && PF_PROTOCOLS.includes(cur.protocol)) {
+    $('pf-proxy-proto').value = cur.protocol;
+    pfManual.protocol = cur.protocol;
+  }
+}
+function setProxyModeSilent(m) {
+  pfProxyMode = m;
+  document.querySelectorAll('#pf-proxy-modes button').forEach(b => b.classList.toggle('active', b.dataset.pmode === m));
+  $('pf-proxy-saved-wrap').classList.toggle('hidden', m !== 'SAVED');
+  $('pf-proxy-manual-wrap').classList.toggle('hidden', m !== 'MANUAL');
 }
 function openEditChannel(id) {
   // Load bang stable ID (khong index/title/vi tri), clone sang draft
@@ -1883,6 +1909,7 @@ function openEditChannel(id) {
   $('pf-ua').value = p.user_agent || '';
   $('pf-webrtc').value = p.webrtc_protection || 'default';
   populateProxySelect(p.proxy_id);
+  initProxyModeUI(p);
   if ($('pf-monitor-mode')) $('pf-monitor-mode').value = p.monitor_mode || 'LAST';
   pfFillMonitorSelect($('pf-monitor-fixed'), cachedMonitors, p.fixed_monitor_device || '');
   pfRefreshMonitorHint();
@@ -1910,9 +1937,20 @@ function refreshProfileSaveBtn() {
   btn.disabled = !dirty;
   $('pf-dirty-hint').textContent = dirty ? 'Có thay đổi chưa lưu' : '';
 }
-['pf-name', 'pf-handle', 'pf-platform', 'pf-ua', 'pf-webrtc', 'pf-proxy', 'pf-monitor-fixed'].forEach(fid => {
-  document.addEventListener('change', (e) => { if (e.target && e.target.id === fid) profileDraftChanged(); });
-  document.addEventListener('input', (e) => { if (e.target && e.target.id === fid) profileDraftChanged(); });
+['pf-name', 'pf-handle', 'pf-platform', 'pf-ua', 'pf-webrtc', 'pf-proxy', 'pf-monitor-fixed', 'pf-proxy-text', 'pf-proxy-proto', 'pf-px-host', 'pf-px-port', 'pf-px-user', 'pf-px-pass'].forEach(fid => {
+  document.addEventListener('change', (e) => {
+    if (!e.target || e.target.id !== fid) return;
+    if (fid === 'pf-proxy-text') onProxyTextInput();
+    else if (fid === 'pf-proxy-proto') onProxyProtoChange();
+    else if (fid.startsWith('pf-px-')) onProxyAdvInput();
+    else profileDraftChanged();
+  });
+  document.addEventListener('input', (e) => {
+    if (!e.target || e.target.id !== fid) return;
+    if (fid === 'pf-proxy-text') onProxyTextInput();
+    else if (fid.startsWith('pf-px-')) onProxyAdvInput();
+    else profileDraftChanged();
+  });
 });
 function cancelProfileModal() {
   // Cancel/X: dirty -> hoi, sach -> dong ngay. Draft bi huy, card giu nguyen.
@@ -1932,9 +1970,181 @@ function cancelProfileModal() {
 function populateProxySelect(selectedId) {
   const sel = $('pf-proxy');
   sel.innerHTML = '<option value="">Không dùng proxy</option>' +
-    proxies.map(p =>
-      `<option value="${p.id}" ${p.id == selectedId ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.host)}:${p.port})</option>`
-    ).join('');
+    proxies.map(p => {
+      const proto = String(p.protocol || 'http').toUpperCase();
+      const label = `${proto} • ${p.host}:${p.port}`;
+      const title = p.name && !/^\d/.test(p.name) ? `${p.name} — ${label}` : label;
+      return `<option value="${p.id}" ${p.id == selectedId ? 'selected' : ''}>${escapeHtml(title)}</option>`;
+    }).join('');
+}
+// ============ PROXY MODE (edit/create modal): NONE | SAVED | MANUAL ============
+let pfProxyMode = 'NONE';
+let pfManual = { protocol: 'socks5', host: '', port: '', username: '', password: '' };
+let pfProxyTestAbort = null;
+const PF_PROTOCOLS = ['http', 'https', 'socks4', 'socks5'];
+function setProxyMode(m) {
+  pfProxyMode = m;
+  document.querySelectorAll('#pf-proxy-modes button').forEach(b => b.classList.toggle('active', b.dataset.pmode === m));
+  $('pf-proxy-saved-wrap').classList.toggle('hidden', m !== 'SAVED');
+  $('pf-proxy-manual-wrap').classList.toggle('hidden', m !== 'MANUAL');
+  pfProxyError('');
+  profileDraftChanged();
+}
+function pfProxyError(msg) {
+  const el = $('pf-proxy-error');
+  el.textContent = msg || '';
+  el.classList.toggle('hidden', !msg);
+}
+// Parser: host:port | host:port:user:pass | user:pass@host:port | proto://... (khong doan port)
+function parseProxyText(text, fallbackProto) {
+  const t = String(text || '').trim();
+  if (!t) return { error: 'Chưa nhập proxy' };
+  let rest = t, proto = null;
+  const pm = rest.match(/^(https?|socks4|socks5):\/\//i);
+  if (pm) { proto = pm[1].toLowerCase(); rest = rest.slice(pm[0].length); }
+  let auth = null;
+  const at = rest.lastIndexOf('@');
+  if (at >= 0) {
+    auth = rest.slice(0, at);
+    rest = rest.slice(at + 1);
+    const ci = auth.indexOf(':');
+    if (ci < 0) return { error: 'Định dạng proxy không hợp lệ' };
+  }
+  const parts = rest.split(':');
+  if (parts.length < 2 || parts.length > 4) return { error: 'Định dạng proxy không hợp lệ' };
+  const host = parts[0].trim();
+  const port = parseInt(parts[1], 10);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { error: 'Định dạng proxy không hợp lệ' };
+  }
+  let username = '', password = '';
+  if (auth !== null) {
+    username = auth.slice(0, auth.indexOf(':'));
+    password = auth.slice(auth.indexOf(':') + 1);
+  } else if (parts.length >= 4) {
+    username = parts[2]; password = parts.slice(3).join(':');
+  } else if (parts.length === 3) {
+    return { error: 'Định dạng proxy không hợp lệ (thiếu password)' };
+  }
+  return { protocol: proto || (fallbackProto || 'socks5'), host, port, username, password };
+}
+function pfFillManual(m, updateText) {
+  pfManual = { protocol: m.protocol || 'socks5', host: m.host || '', port: m.port || '', username: m.username || '', password: m.password || '' };
+  $('pf-proxy-proto').value = pfManual.protocol;
+  $('pf-px-host').value = pfManual.host;
+  $('pf-px-port').value = pfManual.port;
+  $('pf-px-user').value = pfManual.username;
+  $('pf-px-pass').value = pfManual.password;
+  if (updateText !== false) {
+    let s = `${pfManual.host}:${pfManual.port}`;
+    if (pfManual.username) s += `:${pfManual.username}:${pfManual.password}`;
+    if ($('pf-proxy-text').value.trim() === '' || updateText === true) $('pf-proxy-text').value = (pfManual.host && pfManual.port) ? s : $('pf-proxy-text').value;
+  }
+}
+function onProxyTextInput() {
+  const t = $('pf-proxy-text').value.trim();
+  if (!t) { pfProxyError(''); return; }
+  const r = parseProxyText(t, $('pf-proxy-proto').value);
+  if (r.error) { pfProxyError(r.error); return; }
+  pfProxyError('');
+  $('pf-proxy-proto').value = r.protocol;
+  pfFillManual(r, false);
+  $('pf-proxy-test-result').textContent = '';
+  profileDraftChanged();
+}
+function onProxyProtoChange() {
+  pfManual.protocol = $('pf-proxy-proto').value;
+  profileDraftChanged();
+}
+function onProxyAdvInput() {
+  pfManual.host = $('pf-px-host').value.trim();
+  pfManual.port = $('pf-px-port').value !== '' ? parseInt($('pf-px-port').value, 10) : '';
+  pfManual.username = $('pf-px-user').value;
+  pfManual.password = $('pf-px-pass').value;
+  pfManual.protocol = $('pf-proxy-proto').value;
+  profileDraftChanged();
+}
+async function pasteProxy() {
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (e) {
+    // Fallback khi clipboard API bi chan: dung prompt nhap nhanh
+    text = prompt('Dán proxy vào đây:', '') || '';
+  }
+  text = String(text || '').trim();
+  if (!text) return;
+  $('pf-proxy-text').value = text;
+  onProxyTextInput();
+  if (!$('pf-proxy-error').classList.contains('hidden')) toast('Định dạng proxy không hợp lệ', 'error');
+}
+function toggleProxyAdvanced() {
+  const el = $('pf-proxy-adv');
+  el.classList.toggle('hidden');
+  $('pf-proxy-adv-toggle').textContent = el.classList.contains('hidden') ? 'Cấu hình chi tiết ▾' : 'Cấu hình chi tiết ▴';
+}
+function toggleProxyPass() {
+  const el = $('pf-px-pass');
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+function collectManualProxy() {
+  // Uu tien advanced fields neu user da mo/sua (dong bo 2 chieu truoc khi doc)
+  if (!$('pf-proxy-adv').classList.contains('hidden')) onProxyAdvInput();
+  else {
+    const t = $('pf-proxy-text').value.trim();
+    if (t) {
+      const r = parseProxyText(t, $('pf-proxy-proto').value);
+      if (!r.error) pfFillManual(r, false);
+    } else {
+      pfManual.protocol = $('pf-proxy-proto').value;
+    }
+  }
+  return { ...pfManual };
+}
+function validateManualProxy(m) {
+  if (!m.host) return 'Nhập host proxy';
+  if (!Number.isInteger(Number(m.port)) || Number(m.port) < 1 || Number(m.port) > 65535) return 'Port phải 1–65535';
+  if (!PF_PROTOCOLS.includes(m.protocol)) return 'Protocol không hợp lệ';
+  return '';
+}
+async function testManualProxy() {
+  if (pfProxyTestAbort) { pfProxyTestAbort.abort(); pfProxyTestAbort = null; }
+  const m = collectManualProxy();
+  const err = validateManualProxy({ ...m, port: Number(m.port) });
+  if (err) { pfProxyError(err); return; }
+  pfProxyError('');
+  const btn = $('pf-proxy-test-btn'), out = $('pf-proxy-test-result');
+  btn.disabled = true; btn.textContent = '◌ Checking...';
+  out.textContent = '';
+  const ctrl = new AbortController();
+  pfProxyTestAbort = ctrl;
+  const timer = setTimeout(() => ctrl.abort(), 11000);
+  try {
+    const res = await fetch(api + 'proxies.php?action=check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: m.host, port: Number(m.port), protocol: m.protocol, username: m.username || null, password: m.password || null }),
+      signal: ctrl.signal,
+    });
+    const j = await res.json();
+    if (j.ok && j.data && j.data.ok) {
+      out.textContent = `✓ Hoạt động${j.data.ip ? ' · IP: ' + j.data.ip : ''} · ${j.data.ms} ms`;
+    } else {
+      out.textContent = `✕ Không kết nối được${j.data && j.data.error ? ' — ' + j.data.error : ''}`;
+    }
+  } catch (e) {
+    out.textContent = e.name === 'AbortError' ? 'Đã hủy kiểm tra' : 'Lỗi kết nối khi kiểm tra';
+  } finally {
+    clearTimeout(timer);
+    pfProxyTestAbort = null;
+    btn.disabled = false; btn.textContent = '⚡ Kiểm tra proxy';
+  }
+}
+// Draft proxy slice (de dirty-check + payload)
+function collectProxyDraft() {
+  if (pfProxyMode === 'NONE') return { proxy_mode: 'NONE' };
+  if (pfProxyMode === 'SAVED') return { proxy_mode: 'SAVED', proxy_id: $('pf-proxy').value ? Number($('pf-proxy').value) : null };
+  const m = collectManualProxy();
+  return { proxy_mode: 'MANUAL', proxy_protocol: m.protocol, proxy_host: m.host, proxy_port: m.port === '' ? '' : Number(m.port), proxy_username: m.username, proxy_password: m.password };
 }
 // Dispatch RO RANG theo modal mode (khong doan mo ho): create -> createChannel, edit -> updateChannel
 async function saveProfile() {
@@ -1962,15 +2172,21 @@ async function createChannel() {
   }
   const name = $('pf-name').value.trim();
   if (!name) { toast('Vui lòng nhập tên kênh', 'error'); return; }
+  const px = collectProxyDraft();
+  if (px.proxy_mode === 'MANUAL') {
+    const verr = validateManualProxy({ protocol: px.proxy_protocol, host: px.proxy_host, port: px.proxy_port });
+    if (verr) { pfShowError(verr); toast(verr, 'error'); return; }
+  }
   const btn = $('pf-create-btn');
   if (btn) { btn.disabled = true; btn.textContent = '◌ Đang tạo...'; }
+  pfShowError('');
   try {
     const res = await sendJson(api + 'profiles.php?action=add', {
       name, platform,
       channel_handle: $('pf-handle').value.trim() || null,
       user_agent: $('pf-ua').value.trim() || null,
       webrtc_protection: $('pf-webrtc').value,
-      proxy_id,
+      ...px,
       monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
       fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : '',
     });
@@ -1993,6 +2209,10 @@ async function updateChannel() {
   if (!(id > 0)) { pfShowError('Thiếu ID kênh — không thể lưu.'); return; }
   const draft = collectProfileDraft();
   if (!draft.name) { pfShowError('Vui lòng nhập tên kênh.'); toast('Vui lòng nhập tên kênh', 'error'); return; }
+  if (draft.proxy_mode === 'MANUAL') {
+    const verr = validateManualProxy({ protocol: draft.proxy_protocol, host: draft.proxy_host, port: draft.proxy_port });
+    if (verr) { pfShowError(verr); toast(verr, 'error'); return; }
+  }
   // Chi gui field thay doi (dirty) + id; backend giu nguyen field khong gui
   const orig = JSON.parse(profileDraftOriginal || '{}');
   const payload = { id };

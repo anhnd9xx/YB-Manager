@@ -1066,7 +1066,7 @@ function parse_proxy_string(string $s, string $defaultProtocol = 'http'): ?array
     //   protocol://host:port
     //   protocol://user:pass@host:port
     $protocol = strtolower(trim($defaultProtocol));
-    if (!in_array($protocol, ['http', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
+    if (!in_array($protocol, ['http', 'https', 'socks4', 'socks5', 'ssh'], true)) $protocol = 'http';
     $auth = null;
 
     if (preg_match('#^(https?|socks4|socks5|ssh)://#i', $s, $m)) {
@@ -1127,6 +1127,94 @@ function find_or_create_proxy(array $p): ?int
             strtoupper($p['country'] ?? ''),
         ]);
     return (int)db()->lastInsertId();
+}
+
+/**
+ * Resolve proxy_id tu payload modal (NONE/SAVED/MANUAL), dung chung add/update.
+ * Khong co proxy_mode trong payload -> proxy_id truc tiep (client cu) hoac giu hien tai.
+ */
+function resolve_profile_proxy($currentProxyId, array $b, int $profileId = 0)
+{
+    if (array_key_exists('proxy_mode', $b)) {
+        $pmode = strtoupper(trim((string)$b['proxy_mode']));
+        if ($pmode === 'NONE') return null;
+        if ($pmode === 'SAVED') {
+            $pid2 = !empty($b['proxy_id']) ? (int)$b['proxy_id'] : null;
+            if ($pid2 !== null) {
+                $chk = db()->prepare('SELECT id FROM proxies WHERE id=?');
+                $chk->execute([$pid2]);
+                if (!$chk->fetch()) json_out(['ok' => false, 'message' => 'Proxy khong ton tai'], 404);
+            }
+            return $pid2;
+        }
+        if ($pmode === 'MANUAL') {
+            $proto = strtolower(trim((string)($b['proxy_protocol'] ?? 'http')));
+            if (!in_array($proto, ['http', 'https', 'socks4', 'socks5'], true)) {
+                json_out(['ok' => false, 'message' => 'Protocol khong hop le'], 400);
+            }
+            $mhost = trim((string)($b['proxy_host'] ?? ''));
+            $mport = (int)($b['proxy_port'] ?? 0);
+            if ($mhost === '' || $mport < 1 || $mport > 65535) {
+                json_out(['ok' => false, 'message' => 'Host/port proxy khong hop le'], 400);
+            }
+            $muser = trim((string)($b['proxy_username'] ?? ''));
+            $mpass = (string)($b['proxy_password'] ?? '');
+            if ($muser === '') $mpass = '';
+            return resolve_manual_proxy($profileId, $mhost, $mport, $proto,
+                $muser !== '' ? $muser : null, $muser !== '' ? $mpass : null);
+        }
+        json_out(['ok' => false, 'message' => 'proxy_mode khong hop le'], 400);
+    }
+    if (array_key_exists('proxy_id', $b)) {
+        return !empty($b['proxy_id']) ? (int)$b['proxy_id'] : null;
+    }
+    return $currentProxyId;
+}
+
+/**
+ * Resolve proxy thu cong cho 1 profile (modal Sua kenh).
+ * - Trung khop host+port+protocol+user -> reuse id (khong dup).
+ * - Trung host+port nhung record chi profile nay dung -> update tai cho.
+ * - Trung host+port nhung profile khac cung dung + auth khac -> tao moi.
+ * Khong log password (chi mask).
+ */
+function resolve_manual_proxy(int $profileId, string $host, int $port, string $protocol, ?string $user, ?string $pass): int
+{
+    $st = db()->prepare('SELECT * FROM proxies WHERE host=? AND port=?');
+    $st->execute([$host, $port]);
+    $cands = $st->fetchAll();
+    foreach ($cands as $c) {
+        if (strtolower((string)$c['protocol']) === strtolower($protocol)
+            && (string)($c['username'] ?? '') === (string)($user ?? '')) {
+            if ((string)($c['password'] ?? '') !== (string)($pass ?? '')) {
+                db()->prepare('UPDATE proxies SET password=? WHERE id=?')->execute([$pass, (int)$c['id']]);
+            }
+            return (int)$c['id'];
+        }
+    }
+    if ($cands) {
+        // Record dau tien: neu chi profile nay dung -> update tai cho (giu id on dinh)
+        $first = $cands[0];
+        $cnt = db()->prepare('SELECT COUNT(*) FROM profiles WHERE proxy_id=? AND id<>?');
+        $cnt->execute([(int)$first['id'], $profileId]);
+        if ((int)$cnt->fetchColumn() === 0) {
+            db()->prepare('UPDATE proxies SET protocol=?, username=?, password=?, name=? WHERE id=?')
+                ->execute([$protocol, $user, $pass, $host . ':' . $port, (int)$first['id']]);
+            try {
+                log_action($profileId, 'proxy_manual', mask_proxy_url($protocol, $host, $port, $user));
+            } catch (Throwable $e) {
+            }
+            return (int)$first['id'];
+        }
+    }
+    db()->prepare('INSERT INTO proxies (name, host, port, username, password, protocol, country) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        ->execute([$host . ':' . $port, $host, $port, $user, $pass, $protocol, '']);
+    $newId = (int)db()->lastInsertId();
+    try {
+        log_action($profileId, 'proxy_manual', mask_proxy_url($protocol, $host, $port, $user));
+    } catch (Throwable $e) {
+    }
+    return $newId;
 }
 
 /** Xoa de quy mot thu muc (va moi noi dung ben trong). Khong bao loi khi khong ton tai. */
@@ -1230,4 +1318,89 @@ function test_proxy(array $p): bool
     curl_close($ch);
 
     return $code >= 200 && $code < 400;
+}
+
+/** Mask password de log/toast an toan: socks5://user:***@host:port */
+function mask_proxy_url(string $protocol, string $host, int $port, ?string $user = null): string
+{
+    $auth = ($user !== null && $user !== '') ? $user . ':***@' : '';
+    return strtolower($protocol) . '://' . $auth . $host . ':' . $port;
+}
+
+/** Dat proxy opts len curl handle (dung chung cho test thuong + chi tiet). */
+function proxy_curl_apply($ch, array $p): void
+{
+    $proxyAddr = $p['host'] . ':' . (int)$p['port'];
+    switch (strtolower($p['protocol'] ?? 'http')) {
+        case 'socks5':
+            curl_setopt($ch, CURLOPT_PROXY, $proxyAddr);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME);
+            break;
+        case 'socks4':
+            curl_setopt($ch, CURLOPT_PROXY, $proxyAddr);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
+            break;
+        default: // http + https (Chrome coi https nhu http)
+            curl_setopt($ch, CURLOPT_PROXY, $proxyAddr);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+            break;
+    }
+    if (!empty($p['username']) || !empty($p['password'])) {
+        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['username'] . ':' . $p['password']);
+    }
+}
+
+/** Map curl errno -> error code than thien (khong lo password). */
+function proxy_curl_errcode(int $errno): string
+{
+    if (in_array($errno, [28], true)) return 'Timeout';
+    if (in_array($errno, [56, 7], true)) return 'Connection refused';
+    if (in_array($errno, [6], true)) return 'DNS error';
+    if (in_array($errno, [67], true)) return 'Authentication failed';
+    return 'Connection failed';
+}
+
+/**
+ * Test proxy chi tiet cho modal Sua kenh: {ok, ms, ip, error}.
+ * Khong tao record, khong tra password, khong log password.
+ * Chay sync trong request (timeout 10s); client goi async + co Abort.
+ */
+function test_proxy_detailed(array $p, int $timeout = 10): array
+{
+    $timeout = max(3, min(15, $timeout));
+    $t0 = microtime(true);
+    $ch = curl_init('http://www.google.com/generate_204');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => $timeout,
+        CURLOPT_NOBODY         => true,
+    ]);
+    proxy_curl_apply($ch, $p);
+    curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $errno = curl_errno($ch);
+    $err = curl_error($ch);
+    curl_close($ch);
+    $ms = (int)round((microtime(true) - $t0) * 1000);
+    if ($errno === 0 && $code >= 200 && $code < 400) {
+        // Lay IP egress (best-effort, timeout ngan rieng)
+        $ip = null;
+        $ch2 = curl_init('https://api.ipify.org');
+        curl_setopt_array($ch2, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 5,
+            CURLOPT_CONNECTTIMEOUT => 5,
+        ]);
+        proxy_curl_apply($ch2, $p);
+        $body = curl_exec($ch2);
+        if (is_string($body) && preg_match('/^\d{1,3}(\.\d{1,3}){3}$/', trim($body))) {
+            $ip = trim($body);
+        }
+        curl_close($ch2);
+        return ['ok' => true, 'ms' => $ms, 'ip' => $ip];
+    }
+    $reason = $errno !== 0 ? proxy_curl_errcode($errno) : ('HTTP ' . $code);
+    if ($errno !== 0 && $err !== '') $reason .= ' (' . mb_substr($err, 0, 80) . ')';
+    return ['ok' => false, 'ms' => $ms, 'ip' => null, 'error' => $reason];
 }

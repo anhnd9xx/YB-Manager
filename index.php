@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260921d">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260921e">
 </head>
 <body>
 
@@ -916,7 +916,53 @@
         </select>
         <div class="form-group-title">Kết nối</div>
         <label>Proxy</label>
-        <select id="pf-proxy"><option value="">Không dùng proxy</option></select>
+        <div class="seg seg-3" id="pf-proxy-modes">
+          <button type="button" data-pmode="NONE" onclick="setProxyMode('NONE')">Không dùng</button>
+          <button type="button" data-pmode="SAVED" onclick="setProxyMode('SAVED')">Kho proxy</button>
+          <button type="button" data-pmode="MANUAL" onclick="setProxyMode('MANUAL')">Nhập thủ công</button>
+        </div>
+        <div id="pf-proxy-saved-wrap">
+          <select id="pf-proxy" style="margin-top:6px"><option value="">Không dùng proxy</option></select>
+        </div>
+        <div id="pf-proxy-manual-wrap" class="hidden">
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Protocol</label>
+              <select id="pf-proxy-proto">
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks4">SOCKS4</option>
+                <option value="socks5" selected>SOCKS5</option>
+              </select>
+            </div>
+            <div class="win-field" style="flex:2"><label>Proxy</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="text" id="pf-proxy-text" style="flex:1" placeholder="host:port hoặc user:pass@host:port...">
+                <button type="button" class="btn btn-sm" onclick="pasteProxy()" title="Dán từ clipboard">📋</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-error hidden" id="pf-proxy-error"></div>
+          <div class="win-row" style="margin-top:8px">
+            <button type="button" class="btn btn-sm" id="pf-proxy-test-btn" onclick="testManualProxy()">⚡ Kiểm tra proxy</button>
+            <span class="summary-text" id="pf-proxy-test-result"></span>
+          </div>
+          <button type="button" class="link-btn" id="pf-proxy-adv-toggle" onclick="toggleProxyAdvanced()">Cấu hình chi tiết ▾</button>
+          <div id="pf-proxy-adv" class="hidden">
+            <div class="win-row">
+              <div class="win-field"><label>Host</label><input type="text" id="pf-px-host"></div>
+              <div class="win-field" style="flex:0 0 110px"><label>Port</label><input type="number" id="pf-px-port" min="1" max="65535"></div>
+            </div>
+            <div class="win-row">
+              <div class="win-field"><label>Username</label><input type="text" id="pf-px-user"></div>
+              <div class="win-field"><label>Password</label>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input type="password" id="pf-px-pass" style="flex:1">
+                  <button type="button" class="btn btn-sm" onclick="toggleProxyPass()" title="Hiện/ẩn mật khẩu">👁</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="hint" id="pf-proxy-note"></div>
         <div class="form-group-title">Hiển thị</div>
         <label>Màn hình</label>
@@ -1150,7 +1196,7 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260921d"></script>
+<script src="assets/js/app.js?v=20260921e"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
 </body>
 </html>

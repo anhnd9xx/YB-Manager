@@ -108,7 +108,7 @@ try {
                 $b['channel_handle'] ?? null,
                 isset($b['user_agent']) && trim((string)$b['user_agent']) !== '' ? trim((string)$b['user_agent']) : null,
                 $webrtc,
-                !empty($b['proxy_id']) ? (int)$b['proxy_id'] : null,
+                resolve_profile_proxy(null, $b, 0),
                 $userDir,
             ]);
             $newId = (int)db()->lastInsertId();
@@ -192,7 +192,7 @@ try {
             if (empty($ids)) json_out(['ok' => false, 'message' => 'Chua chon kenh nao'], 400);
             if (empty($lines)) json_out(['ok' => false, 'message' => 'Chua nhap danh sach proxy'], 400);
             $defProto = strtolower(trim((string)($b['protocol'] ?? 'http')));
-            if (!in_array($defProto, ['http', 'socks4', 'socks5', 'ssh'], true)) $defProto = 'http';
+            if (!in_array($defProto, ['http', 'https', 'socks4', 'socks5', 'ssh'], true)) $defProto = 'http';
 
             $proxyIds = [];
             foreach ($lines as $line) {
@@ -253,9 +253,8 @@ try {
             $webrtc = array_key_exists('webrtc_protection', $b)
                 ? (in_array($b['webrtc_protection'], ['default','disable_nonproxied_udp'], true) ? $b['webrtc_protection'] : 'default')
                 : $curRow['webrtc_protection'];
-            $proxyId = array_key_exists('proxy_id', $b)
-                ? (!empty($b['proxy_id']) ? (int)$b['proxy_id'] : null)
-                : $curRow['proxy_id'];
+            // Proxy resolve server-side (authoritative). Khong gui gi -> giu proxy cu.
+            $proxyId = resolve_profile_proxy($curRow['proxy_id'], $b, $id);
 
             $monMode = $hasPlace
                 ? (isset($b['monitor_mode']) ? strtoupper(trim((string)$b['monitor_mode'])) : (string)($curRow['monitor_mode'] ?? 'LAST'))
