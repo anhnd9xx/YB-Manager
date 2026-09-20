@@ -46,6 +46,18 @@ try {
                         if (db()->query("SHOW COLUMNS FROM account_states LIKE 'last_attempt_status'")->fetch()) {
                             $cols .= ', last_attempt_status, last_error_code, last_error_message, eval_stage';
                         }
+                        // V2 state model (neu da migrate): browser/google/youtube/access/security/version
+                        foreach (['browser_status', 'google_auth_status', 'google_auth_confidence',
+                                  'youtube_auth_status', 'youtube_auth_confidence', 'channel_presence_confidence',
+                                  'channel_access_status', 'security_status', 'evaluation_id',
+                                  'evaluation_version', 'needs_recheck', 'auth_verified_at'] as $c) {
+                            try {
+                                if (db()->query("SHOW COLUMNS FROM account_states LIKE '$c'")->fetch()) {
+                                    $cols .= ", $c";
+                                }
+                            } catch (Throwable $e3) {
+                            }
+                        }
                     } catch (Throwable $e2) {
                     }
                     foreach (db()->query("SELECT $cols FROM account_states") as $er) {
@@ -77,6 +89,14 @@ try {
                 $row['channel_presence'] = $em ? ($em['channel_presence'] ?? 'NOT_CHECKED') : 'NOT_CHECKED';
                 $row['channel_verified_at'] = $em && !empty($em['channel_verified_at']) ? iso_ts($em['channel_verified_at']) : null;
                 $row['last_known_presence'] = $em ? ($em['last_known_presence'] ?? null) : null;
+                // V2 single source of truth (§49): browser/google/youtube/access/security/version
+                foreach (['browser_status', 'google_auth_status', 'google_auth_confidence',
+                          'youtube_auth_status', 'youtube_auth_confidence', 'channel_presence_confidence',
+                          'channel_access_status', 'security_status', 'evaluation_id',
+                          'evaluation_version', 'needs_recheck'] as $k) {
+                    $row[$k] = $em ? ($em[$k] ?? null) : null;
+                }
+                $row['auth_verified_at'] = $em && !empty($em['auth_verified_at']) ? iso_ts($em['auth_verified_at']) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

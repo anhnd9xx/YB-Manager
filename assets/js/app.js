@@ -1010,6 +1010,16 @@ function evalApplyResult(r) {
   p.eval_known = r.last_known_status ?? p.eval_known;
   p.auth_status = r.auth_status ?? p.auth_status;
   p.channel_presence = r.channel_presence ?? p.channel_presence;
+  // V2 single source of truth (§49): browser/google/youtube/access/security/version
+  if (r.browser_status) p.browser_status = r.browser_status;
+  if (r.google_auth_status) p.google_auth_status = r.google_auth_status;
+  if (r.google_auth_confidence) p.google_auth_confidence = r.google_auth_confidence;
+  if (r.youtube_auth_status) p.youtube_auth_status = r.youtube_auth_status;
+  if (r.youtube_auth_confidence) p.youtube_auth_confidence = r.youtube_auth_confidence;
+  if (r.channel_presence_confidence) p.channel_presence_confidence = r.channel_presence_confidence;
+  if (r.channel_access_status) p.channel_access_status = r.channel_access_status;
+  if (r.security_status) p.security_status = r.security_status;
+  if (r.evaluation_id) p.evaluation_id = r.evaluation_id;
   p.channel_verified_at = r.channel_verified_at || p.channel_verified_at;
   p.last_known_presence = r.last_known_presence ?? p.last_known_presence;
   if (r.channel_state) { p.acc_channel = r.channel_state; p.acc_channel_name = r.channel_name || null; }
@@ -1324,11 +1334,28 @@ async function openAccountDrawer(id, keepOpen) {
     const attemptLine = attemptRes ? ` · Kết quả: ${attemptRes}` : '';
     const successLine = successTs ? `<div class="sync-label">Lần kiểm tra thành công: ${relSpan(successTs)}</div>` : '';
     const changedLine = st.last_status_changed_at ? `<div class="sync-label">Trạng thái từ: ${relSpan(st.last_status_changed_at)}</div>` : '';
+    // Stale badge (§35-§36): verified qua 24h => "Cần kiểm tra lại", khong coi cu nhu current
+    let staleLine = '';
+    try {
+      const vTs = st.auth_verified_at || successTs || null;
+      if (vTs) {
+        const t = parseServerTime(vTs);
+        if (!isNaN(t) && (Date.now() - t) > 24 * 3600 * 1000) {
+          staleLine = `<div class="eval-prev">Đã xác minh ${formatRelativeTime(vTs)} · <strong>Cần kiểm tra lại</strong></div>`;
+        }
+      } else if (st.needs_recheck) {
+        staleLine = `<div class="eval-prev"><strong>Cần đánh giá lại</strong> (kết quả cũ chưa có bằng chứng xác minh)</div>`;
+      }
+    } catch (e) {}
+    const gLbl = st.google_auth_status ? `${AUTH_VN[st.google_auth_status] || st.google_auth_status}${st.google_auth_confidence ? ' · ' + st.google_auth_confidence : ''}` : null;
+    const yLbl = st.youtube_auth_status ? `${AUTH_VN[st.youtube_auth_status] || st.youtube_auth_status}${st.youtube_auth_confidence ? ' · ' + st.youtube_auth_confidence : ''}` : null;
     $('acc-drawer-body').innerHTML = head
       + `<div class="sync-label">Lần kiểm tra gần nhất: ${completedTs ? relSpan(completedTs) : 'chưa có'}${attemptLine}</div>`
-      + successLine + changedLine
+      + successLine + changedLine + staleLine
       + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
       + row('Đăng nhập', authBadge(st.auth_status, st.login_state))
+      + (gLbl ? row('Google', `<span class="badge badge-muted">G: ${escapeHtml(gLbl)}</span>`) : '')
+      + (yLbl ? row('YouTube TK', `<span class="badge badge-muted">Y: ${escapeHtml(yLbl)}</span>`) : '')
       + row('Phiên', sig(st.session_state === 'ok' ? 'VALID' : (st.session_state === 'failed' ? 'INVALID' : (st.session_state || 'NOT_CHECKED'))))
       + row('Bảo mật', st.security_challenge ? yn(true) : '<span class="badge badge-ok">✓ Bình thường</span>')
       + `</div><div class="sync-label" style="margin-top:6px">NỀN TẢNG</div><div class="acc-grid">`
@@ -1707,6 +1734,8 @@ function channelPresenceBadge(st) {
   const pres = st.channel_presence || 'NOT_CHECKED';
   if (auth === 'LOGIN_REQUIRED') return '<span class="badge badge-review">⚠ Cần đăng nhập</span>';
   if (auth === 'VERIFICATION_REQUIRED') return '<span class="badge badge-warn">⚠ Cần xác minh</span>';
+  // UNKNOWN / CHECK_FAILED => "— Chưa kiểm tra", KHONG suy logout/login (§43-§44)
+  if (auth === 'UNKNOWN' || auth === 'CHECK_FAILED' || !auth) return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
   if (auth !== 'LOGGED_IN') return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
   if (pres === 'HAS_CHANNEL') return `<span class="badge badge-ok">✓ Đã có kênh${st.channel_name ? ' (' + escapeHtml(st.channel_name) + ')' : ''}</span>`;
   if (pres === 'NO_CHANNEL') return '<span class="badge badge-review">○ Chưa có kênh</span>';
@@ -1719,6 +1748,14 @@ function channelPresenceChip(p) {
   const known = p.last_known_presence || null;
   if (auth === 'LOGIN_REQUIRED') return `<span class="acc-channel" title="Cần đăng nhập để xác minh kênh">⚠ Cần đăng nhập</span>`;
   if (auth === 'VERIFICATION_REQUIRED') return `<span class="acc-channel" title="Cần xác minh">⚠ Cần xác minh</span>`;
+  // UNKNOWN / technical => "? Chưa xác định" + previous verified (khong masquerade) (§43-§44)
+  if (auth === 'UNKNOWN' || auth === 'CHECK_FAILED') {
+    let sub = `<span class="acc-channel" title="Chưa hoàn tất kiểm tra">? Chưa xác định</span>`;
+    if (known === 'HAS_CHANNEL') {
+      sub += `<div class="eval-prev">Lần xác nhận gần nhất: ✓ Đã có kênh${p.channel_verified_at ? ' · ' + formatRelativeTime(p.channel_verified_at) : ''}</div>`;
+    }
+    return sub;
+  }
   if (auth !== 'LOGGED_IN') {
     let sub = `<span class="acc-channel" title="Chưa xác minh kênh">— Chưa xác minh kênh</span>`;
     if (known === 'HAS_CHANNEL') {

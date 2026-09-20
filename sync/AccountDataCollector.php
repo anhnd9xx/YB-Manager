@@ -120,9 +120,10 @@ class AccountDataCollector
                 $ch = self::probeChannel($port, $tabId, $deadline, $tPlatform);
                 $timings['platform'] = (int)round((microtime(true) - $t) * 1000);
                 $signals = [
-                    'login' => $yt['av'] ? 'ok' : 'failed',
+                    // KHONG boolean: trang chua load xong => unknown (khong suy logout) (§30-§31, §51)
+                    'login' => $yt['av'] ? 'ok' : ($yt['loaded'] ? 'failed' : 'unknown'),
                     'session' => 'ok', // CDP evaluate thanh cong = session dung duoc
-                    'youtube' => $yt['loaded'] ? 'ok' : 'failed',
+                    'youtube' => $yt['loaded'] ? 'ok' : 'unknown',
                     'channel' => $ch['state'],
                     'channelName' => $ch['name'],
                     'challenge' => $yt['ch'] || $ch['ch'],

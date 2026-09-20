@@ -65,6 +65,53 @@ class ChannelEvaluationManager
         return $has;
     }
 
+    /**
+     * Migration V2 (STATE + EVIDENCE ENGINE): them cot neu chua co.
+     * Chay lazy moi lan evaluate (idempotent, co cache).
+     */
+    public static function ensureEvalV2Cols(): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        $defs = [
+            'browser_status' => "VARCHAR(20) NULL",
+            'google_auth_status' => "VARCHAR(30) NULL",
+            'google_auth_confidence' => "VARCHAR(10) NULL",
+            'youtube_auth_status' => "VARCHAR(30) NULL",
+            'youtube_auth_confidence' => "VARCHAR(10) NULL",
+            'channel_presence_confidence' => "VARCHAR(10) NULL",
+            'channel_access_status' => "VARCHAR(20) NULL",
+            'security_status' => "VARCHAR(20) NULL",
+            'evaluation_id' => "VARCHAR(64) NULL",
+            'evaluation_version' => "INT NULL",
+            'needs_recheck' => "TINYINT(1) NOT NULL DEFAULT 0",
+            'auth_evidence' => "TEXT NULL",
+        ];
+        try {
+            $have = [];
+            foreach (db()->query('SHOW COLUMNS FROM account_states')->fetchAll() as $r) {
+                $have[(string)$r['Field']] = true;
+            }
+            foreach ($defs as $col => $def) {
+                if (empty($have[$col])) {
+                    try {
+                        db()->exec("ALTER TABLE account_states ADD COLUMN $col $def");
+                    } catch (Throwable $e) {
+                    }
+                }
+            }
+            // Legacy khong co verified_at/evidence -> danh dau can danh gia lai (§58-§59)
+            try {
+                db()->exec("UPDATE account_states SET needs_recheck=1 WHERE needs_recheck=0"
+                    . " AND ((auth_verified_at IS NULL AND channel_verified_at IS NULL)"
+                    . " OR (eval_status IN ('ACTIVE','LOGIN_REQUIRED') AND auth_status IS NULL))");
+            } catch (Throwable $e) {
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
     /** Cache SHOW COLUMNS (trahn query lap moi finish). */
     private static function hasCol(string $col): bool
     {
@@ -296,7 +343,7 @@ class ChannelEvaluationManager
         $signals = (array)($pipe['signals'] ?? []);
         $res = self::finishAccount($profileId, $prev, $prevStatus, $lastKnown, $t0,
             (string)($pipe['channel_status'] ?? self::ACTIVE), $pipe['reason'] ?? null, $signals, $perf,
-            (string)($pipe['confidence'] ?? 'HIGH'));
+            (string)($pipe['confidence'] ?? 'HIGH'), (array)$pipe);
         $ui = self::uiLabels($signals);
         $res['loginUi'] = $ui['loginUi'];
         $res['sessionUi'] = $ui['sessionUi'];
@@ -458,10 +505,39 @@ class ChannelEvaluationManager
 
     /** Ket qua account that (chi HIGH/MEDIUM duoc overwrite last_known). */
     private static function finishAccount(int $profileId, ?array $prev, string $prevStatus, ?string $lastKnown,
-        float $t0, string $status, ?string $reason, array $signals, array $perf = [], string $confidence = 'HIGH'): array
+        float $t0, string $status, ?string $reason, array $signals, array $perf = [], string $confidence = 'HIGH', array $pipe = []): array
     {
         $ms = (int)round((microtime(true) - $t0) * 1000);
         $now = date('Y-m-d H:i:s');
+        self::ensureEvalV2Cols();
+        // Versioned result (§20-§21): chi commit neu evaluation moi nhat
+        $evalId = (string)($pipe['evaluation_id'] ?? ('ev_' . date('YmdHis') . '_' . $profileId));
+        $evalVer = (int)($pipe['version'] ?? 2);
+        try {
+            $st = db()->prepare('SELECT evaluation_id FROM account_states WHERE profile_id=?');
+            $st->execute([$profileId]);
+            $storedId = (string)($st->fetchColumn() ?: '');
+            // evaluation_id co prefix timestamp YmdHis: so sanh tu dien = moi/cu
+            if ($storedId !== '' && strcmp($evalId, $storedId) < 0) {
+                // Event cu den cham: discard (§20), tra ve state hien tai
+                $cur = AccountRepository::load($profileId);
+                return ['profileId' => $profileId, 'status' => (string)($cur['eval_status'] ?? $status),
+                    'attempt_status' => self::ATT_SUCCESS, 'error_code' => null,
+                    'checked_at' => $now, 'reason' => 'stale_result_discarded',
+                    'duration_ms' => $ms, 'prev_status' => $prevStatus,
+                    'last_known_status' => $lastKnown, 'tool_error' => false,
+                    'run_state' => 'SUCCESS', 'discarded' => true, 'evaluation_id' => $evalId];
+            }
+        } catch (Throwable $e) {
+        }
+        // New-model fields tu pipeline (fallback ve legacy khi chay pipeline cu)
+        $browser = (string)($pipe['browser_status'] ?? 'READY');
+        $g = is_array($pipe['google'] ?? null) ? $pipe['google'] : ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'legacy'];
+        $yt = is_array($pipe['youtube'] ?? null) ? $pipe['youtube'] : ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'legacy'];
+        $presenceConf = (string)($pipe['presence_confidence'] ?? $confidence);
+        $access = (string)($pipe['access'] ?? 'NOT_CHECKED');
+        $security = (string)($pipe['security'] ?? 'UNKNOWN');
+        $evSummary = (string)($pipe['evidence_summary'] ?? '');
         $isSuccessCheck = in_array($status, [self::ACTIVE, self::LOGIN_REQUIRED, self::VERIFICATION_REQUIRED, self::UNAVAILABLE, self::RESTRICTED], true);
         // Auth/presence tu pipeline (verified-only): chua login -> channel NOT_CHECKED
         $auth = (string)($signals['auth'] ?? 'UNKNOWN');
@@ -534,6 +610,24 @@ class ChannelEvaluationManager
                     $attCols .= ', last_status_changed_at=?';
                     $attParams[] = $now;
                 }
+                // V2 state model (§3, §32): browser/google/youtube/access/security/version
+                if (self::hasCol('browser_status')) {
+                    $attCols .= ', browser_status=?, google_auth_status=?, google_auth_confidence=?,'
+                        . ' youtube_auth_status=?, youtube_auth_confidence=?, channel_presence_confidence=?,'
+                        . ' channel_access_status=?, security_status=?, evaluation_id=?, evaluation_version=?,'
+                        . ' needs_recheck=0, auth_evidence=?';
+                    $attParams[] = $browser;
+                    $attParams[] = (string)($g['status'] ?? 'UNKNOWN');
+                    $attParams[] = (string)($g['confidence'] ?? 'LOW');
+                    $attParams[] = (string)($yt['status'] ?? 'UNKNOWN');
+                    $attParams[] = (string)($yt['confidence'] ?? 'LOW');
+                    $attParams[] = $presenceConf;
+                    $attParams[] = $access;
+                    $attParams[] = $security;
+                    $attParams[] = $evalId;
+                    $attParams[] = $evalVer;
+                    $attParams[] = mb_substr($evSummary . ' | g:' . ($g['reason'] ?? '') . ' y:' . ($yt['reason'] ?? ''), 0, 2000);
+                }
                 db()->prepare('UPDATE account_states SET eval_status=?, last_known_status=?, last_successful_check_at=IF(? IN (\'ACTIVE\',\'LOGIN_REQUIRED\',\'VERIFICATION_REQUIRED\',\'CHANNEL_UNAVAILABLE\',\'RESTRICTED\'),?,last_successful_check_at), last_attempt_at=?, last_error=NULL, last_duration_ms=?, eval_stage=?' . $attCols . ' WHERE profile_id=?')
                     ->execute(array_merge([$status, $isSuccessCheck ? $status : $lastKnown, $status, $now, $now, $ms, 'SUCCESS'], $attParams, [$profileId]));
                 db()->prepare('INSERT INTO account_history (profile_id, checked_at, stability, confidence, stage, reasons, warnings, eval_status, prev_status, duration_ms, reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
@@ -574,6 +668,15 @@ class ChannelEvaluationManager
             'channel_verified_at' => $verifiedPresence ? iso_ts($now) : null,
             'last_known_status' => $isSuccessCheck ? $status : $lastKnown,
             'auth_status' => $auth, 'channel_presence' => $presence,
+            'browser_status' => $browser,
+            'google_auth_status' => (string)($g['status'] ?? 'UNKNOWN'),
+            'google_auth_confidence' => (string)($g['confidence'] ?? 'LOW'),
+            'youtube_auth_status' => (string)($yt['status'] ?? 'UNKNOWN'),
+            'youtube_auth_confidence' => (string)($yt['confidence'] ?? 'LOW'),
+            'channel_presence_confidence' => $presenceConf,
+            'channel_access_status' => $access,
+            'security_status' => $security,
+            'evaluation_id' => $evalId, 'evaluation_version' => $evalVer,
             'presence_evidence' => $presenceEv,
             'channel_name' => $verifiedPresence ? ($signals['channelName'] ?? null) : null,
             'last_known_presence' => $verifiedPresence ? $presence : ($prev['last_known_presence'] ?? null),

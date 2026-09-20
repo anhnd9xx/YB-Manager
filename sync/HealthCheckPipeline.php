@@ -1,28 +1,38 @@
 <?php
 declare(strict_types=1);
 /**
- * HealthCheckPipeline - staged health check cho 1 profile.
+ * HealthCheckPipeline - STATE + EVIDENCE ENGINE (rebuild, khong patch if/else cu).
  *
  * Pipeline: PRECHECK_BROWSER -> CHECK_CDP -> CHECK_PROXY_NETWORK -> CHECK_SESSION
- *   -> CHECK_LOGIN -> CHECK_YOUTUBE -> CHECK_CHANNEL -> CHECK_SECURITY -> FINALIZE.
- * Moi stage: PASS | FAIL | TIMEOUT | NOT_RUN | NOT_APPLICABLE (khong 'unknown').
- * Short-circuit: CDP fail -> cac stage sau NOT_RUN (khong cho 20-30s);
- *   proxy fail -> giu channel, khong ket luan YT/channel.
- * Timeout moi stage (2/3/4/3/4/5/5/3s) + absolute deadline 20s.
- * Retry 1 lan chi cho CDP_TIMEOUT/NETWORK_TIMEOUT/PAGE_TIMEOUT.
- * Inference chi khi co evidence; technical loi -> confidence LOW, giu last_known.
+ *   (dedicated evaluation target) -> CHECK_LOGIN (GOOGLE AUTH) ->
+ *   CHECK_YOUTUBE (YOUTUBE AUTH) -> CHECK_CHANNEL (PRESENCE+ACCESS) ->
+ *   CHECK_SECURITY -> FINALIZE (decision table).
+ *
+ * Nguyen tac:
+ *  1. Khong du bang chung => UNKNOWN (khong mac dinh SIGNED_OUT).
+ *  2. Technical error => CHECK_FAILED/UNKNOWN, KHONG phai logged out.
+ *  3. Chi strong evidence moi SIGNED_IN/SIGNED_OUT/HAS_CHANNEL/NO_CHANNEL.
+ *
+ * Moi result co: evaluation_id, profile_id, started_at, completed_at, version.
+ * Moi stage: PASS | FAIL | TIMEOUT | NOT_RUN | NOT_APPLICABLE.
  */
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/AccountDataCollector.php';
 require_once __DIR__ . '/BrowserProbe.php';
+require_once __DIR__ . '/EvalStates.php';
+require_once __DIR__ . '/YoutubeSignals.php';
+require_once __DIR__ . '/AuthEvidenceCollector.php';
+require_once __DIR__ . '/AuthDecisionEngine.php';
+require_once __DIR__ . '/EvaluationTarget.php';
 
 class HealthCheckPipeline
 {
     public const DEADLINE_SEC = 20;
+    public const VERSION = 2;
 
     public const TIMEOUTS = [
         'PRECHECK_BROWSER' => 2, 'CHECK_CDP' => 3, 'CHECK_PROXY_NETWORK' => 4,
-        'CHECK_SESSION' => 3, 'CHECK_LOGIN' => 4, 'CHECK_YOUTUBE' => 5,
+        'CHECK_SESSION' => 3, 'CHECK_LOGIN' => 5, 'CHECK_YOUTUBE' => 5,
         'CHECK_CHANNEL' => 5, 'CHECK_SECURITY' => 3,
     ];
 
@@ -44,15 +54,21 @@ class HealthCheckPipeline
     /**
      * @return array{stages:array, signals:array, outcome:success|precondition|tool_error,
      *   error_code?:string, error?:string, channel_status?:string, reason?:string,
-     *   confidence:HIGH|MEDIUM|LOW, infra?:string, timings:array}
+     *   confidence:HIGH|MEDIUM|LOW, infra?:string, timings:array,
+     *   evaluation_id:string, started_at:string, browser_status:string,
+     *   google:{status,confidence,reason}, youtube:{status,confidence,reason},
+     *   presence:string, presence_confidence:string, access:string, security:string,
+     *   evidence_summary:string}
      */
     public static function run(int $profileId, callable $onStage = null): array
     {
+        $evaluationId = 'ev_' . date('YmdHis') . '_' . $profileId . '_' . substr(md5(microtime(true) . $profileId), 0, 6);
+        $startedAt = date('Y-m-d H:i:s');
         $t0 = microtime(true);
         $deadline = $t0 + self::DEADLINE_SEC;
         $stages = [];
         $timings = [];
-        $mark = function (array $s) use (&$stages, $onStage, $profileId) {
+        $mark = function (array $s) use (&$stages, $onStage) {
             $stages[$s['stage']] = $s;
             if ($onStage) {
                 try {
@@ -64,8 +80,9 @@ class HealthCheckPipeline
         $over = function () use ($deadline): bool {
             return microtime(true) > $deadline;
         };
+        $meta = ['evaluation_id' => $evaluationId, 'started_at' => $startedAt, 'version' => self::VERSION];
 
-        // ---- PRECHECK_BROWSER: profile ton tai + runtime (khong page load) ----
+        // ---- PRECHECK_BROWSER ----
         $t = microtime(true);
         try {
             $st = db()->prepare('SELECT id, name, status, debug_port, user_data_dir, proxy_id FROM profiles WHERE id=?');
@@ -78,52 +95,79 @@ class HealthCheckPipeline
         if (!$prof) {
             $mark(self::stage('PRECHECK_BROWSER', 'FAIL', 'EVALUATOR_ERROR', 'profile_not_found', $timings['browser']));
             self::notRun($stages, array_slice(self::STAGES, 1, 7));
-            return self::finish($stages, [], 'tool_error', 'EVALUATOR_ERROR', 'profile_not_found', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'tool_error', 'EVALUATOR_ERROR', 'profile_not_found', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'UNKNOWN', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
         if (($prof['status'] ?? '') !== 'running') {
             $mark(self::stage('PRECHECK_BROWSER', 'FAIL', 'CHROME_NOT_RUNNING', 'Chrome chua chay', $timings['browser']));
             self::notRun($stages, array_slice(self::STAGES, 1, 7));
-            return self::finish($stages, [], 'precondition', 'CHROME_NOT_RUNNING', 'Can mo Chrome de kiem tra', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'precondition', 'CHROME_NOT_RUNNING', 'Can mo Chrome de kiem tra', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'NOT_RUNNING', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
         $mark(self::stage('PRECHECK_BROWSER', 'PASS', null, null, $timings['browser']));
         $port = (int)($prof['debug_port'] ?? 0);
         if ($port <= 0) {
             $mark(self::stage('CHECK_CDP', 'FAIL', 'CDP_UNAVAILABLE', 'Thieu debug port', 0));
             self::notRun($stages, array_slice(self::STAGES, 2, 6));
-            return self::finish($stages, [], 'precondition', 'CDP_UNAVAILABLE', 'Thieu debug port', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'precondition', 'CDP_UNAVAILABLE', 'Thieu debug port', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'CDP_ERROR', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
 
-        // ---- CHECK_CDP: BrowserProbe layered (port 500ms / http 1s / ws+cmd 1.5s) ----
+        // ---- CHECK_CDP ----
         $probe = BrowserProbe::probe($profileId, $port, (string)($prof['user_data_dir'] ?? ''));
         $timings['cdp'] = array_sum($probe['timings'] ?? []);
         $timings['probe'] = $probe['timings'] ?? [];
         if (empty($probe['ready'])) {
             $code = (string)($probe['code'] ?? 'CDP_CONNECT_TIMEOUT');
-            // Map ve error classification + ownership check (port thuoc profile?)
             if ($code === 'BROWSER_NOT_RUNNING') {
                 $mark(self::stage('CHECK_CDP', 'FAIL', $code, $probe['message'] ?? '', $timings['cdp']));
                 self::notRun($stages, array_slice(self::STAGES, 2, 6));
-                return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+                return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0, $meta
+                    + ['browser_status' => 'NOT_RUNNING', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                        'security' => 'UNKNOWN', 'evidence_summary' => '']);
             }
             if (in_array($code, ['DEBUG_PORT_NOT_LISTENING', 'DEVTOOLS_HTTP_UNAVAILABLE', 'CDP_WEBSOCKET_FAILED', 'CDP_COMMAND_TIMEOUT'], true)) {
                 $res = $code === 'DEBUG_PORT_NOT_LISTENING' ? 'FAIL' : 'TIMEOUT';
                 $mark(self::stage('CHECK_CDP', $res, $code, $probe['message'] ?? '', $timings['cdp']));
                 self::notRun($stages, array_slice(self::STAGES, 2, 6));
-                return self::finish($stages, [], 'tool_error', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+                $bs = $code === 'CDP_COMMAND_TIMEOUT' ? 'TIMEOUT' : 'CDP_ERROR';
+                return self::finish($stages, [], 'tool_error', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0, $meta
+                    + ['browser_status' => $bs, 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                        'security' => 'UNKNOWN', 'evidence_summary' => '']);
             }
-            // PROFILE_MISMATCH tuong lai: giu kenh
             $mark(self::stage('CHECK_CDP', 'FAIL', $code, $probe['message'] ?? '', $timings['cdp']));
             self::notRun($stages, array_slice(self::STAGES, 2, 6));
-            return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'precondition', $code, $probe['message'] ?? '', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'CDP_ERROR', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
-        // Ownership: port phai thuoc Chrome cua profile (chong query nham port)
+        // Ownership: port phai thuoc Chrome cua profile (§16-§17, key = profile_id + port)
         $udir = (string)($prof['user_data_dir'] ?? '');
         if ($udir !== '') {
             $cmd = chrome_main_cmdline($udir);
             if (is_string($cmd) && strpos($cmd, 'remote-debugging-port=' . $port) === false) {
                 $mark(self::stage('CHECK_CDP', 'FAIL', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh', $timings['cdp']));
                 self::notRun($stages, array_slice(self::STAGES, 2, 6));
-                return self::finish($stages, [], 'precondition', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh', null, null, 'LOW', null, $timings, $t0);
+                return self::finish($stages, [], 'precondition', 'PROFILE_MISMATCH', 'Debug port khong khop Chrome cua kenh', null, null, 'LOW', null, $timings, $t0, $meta
+                    + ['browser_status' => 'CDP_ERROR', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                        'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                        'security' => 'UNKNOWN', 'evidence_summary' => '']);
             }
         }
         $pt = $probe['timings'] ?? [];
@@ -131,7 +175,7 @@ class HealthCheckPipeline
             . ($pt['ws'] ?? '?') . 'ms / cmd ' . ($pt['cmd'] ?? '?') . 'ms';
         $mark(self::stage('CHECK_CDP', 'PASS', null, $detail, $timings['cdp']));
 
-        // ---- CHECK_PROXY_NETWORK (4s): proxy kenh con di duoc khong ----
+        // ---- CHECK_PROXY_NETWORK ----
         $t = microtime(true);
         $proxyCfg = null;
         try {
@@ -149,170 +193,329 @@ class HealthCheckPipeline
         } elseif ($px['result'] === 'PASS') {
             $mark(self::stage('CHECK_PROXY_NETWORK', 'PASS', null, null, $timings['proxy']));
         } else {
-            // Proxy hong: STOP, giu channel (khong ket luan YT/channel)
             $mark(self::stage('CHECK_PROXY_NETWORK', $px['result'] === 'TIMEOUT' ? 'TIMEOUT' : 'FAIL',
                 'PROXY_ERROR', $px['detail'] ?? 'proxy loi', $timings['proxy']));
             self::notRun($stages, array_slice(self::STAGES, 3, 5));
             return self::finish($stages, [], 'tool_error', 'PROXY_ERROR', $px['detail'] ?? 'Proxy khong ket noi duoc',
-                null, null, 'LOW', 'PROXY_ERROR', $timings, $t0);
+                null, null, 'LOW', 'PROXY_ERROR', $timings, $t0, $meta
+                + ['browser_status' => 'READY', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
         if ($over()) {
             self::notRun($stages, array_slice(self::STAGES, 3, 5));
-            return self::finish($stages, [], 'tool_error', 'TIMEOUT', 'Evaluation timeout', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'tool_error', 'TIMEOUT', 'Evaluation timeout', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'TIMEOUT', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
 
-        // ---- CHECK_SESSION: mo tab + doi execution context (poll 200ms, toi da ~2.5s) ----
+        // ---- CHECK_SESSION: dedicated evaluation target (§13-§15) ----
         $t = microtime(true);
-        $tabId = AccountDataCollector::openCheckTab($port);
+        $acq = EvaluationTarget::acquire($port, $profileId, 'https://www.youtube.com/');
+        $tabId = $acq['tabId'];
         if ($tabId === null && !$over()) {
-            usleep(400000); // retry 1 lan cho transient
-            if (!$over()) $tabId = AccountDataCollector::openCheckTab($port);
+            usleep(400000);
+            if (!$over()) {
+                $acq = EvaluationTarget::acquire($port, $profileId, 'https://www.youtube.com/');
+                $tabId = $acq['tabId'];
+            }
         }
         $sessOk = false;
         if ($tabId !== null) {
-            // Tab moi chua co context ngay -> poll nhe thay vi fail ngay
-            $sessOk = AccountDataCollector::waitContext($port, $tabId, 2000);
+            $sessOk = AccountDataCollector::waitContext($port, $tabId, 2500);
         }
         $timings['session'] = (int)round((microtime(true) - $t) * 1000);
         if (!$sessOk) {
-            if ($tabId !== null) AccountDataCollector::closeTab($port, $tabId);
+            if ($tabId !== null) EvaluationTarget::release($port, $tabId, true);
             $mark(self::stage('CHECK_SESSION', 'TIMEOUT', 'CDP_TIMEOUT', 'Khong mo/evaluate duoc tab kiem tra', $timings['session']));
             self::notRun($stages, array_slice(self::STAGES, 4, 4));
-            return self::finish($stages, [], 'tool_error', 'CDP_TIMEOUT', 'Trinh duyet phan hoi qua thoi gian', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'tool_error', 'CDP_TIMEOUT', 'Trinh duyet phan hoi qua thoi gian', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'TIMEOUT', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'not_checked'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
-        $mark(self::stage('CHECK_SESSION', 'PASS', null, null, $timings['session']));
+        $mark(self::stage('CHECK_SESSION', 'PASS', null, $acq['reused'] ? 'reused eval tab' : 'new eval tab', $timings['session']));
 
-        // ---- CHECK_LOGIN + CHECK_YOUTUBE (4s/5s): 1 probe youtube ----
+        // ---- CHECK_LOGIN (GOOGLE AUTH) + CHECK_YOUTUBE (YOUTUBE AUTH) ----
+        // Thu youtube evidence truoc (1 navigate da co tu acquire).
         $t = microtime(true);
-        AccountDataCollector::waitLoad($port, $tabId, $deadline, self::TIMEOUTS['CHECK_YOUTUBE']);
-        $yt = AccountDataCollector::probeYoutube($port, $tabId, $deadline, 2, cdp_page_targets($port));
-        if ($yt === null && !$over()) {
-            usleep(500000); // retry 1 lan
-            $yt = AccountDataCollector::probeYoutube($port, $tabId, $deadline, 2, null);
+        AccountDataCollector::waitLoad($port, $tabId, $deadline, 3);
+        $ytCol = AuthEvidenceCollector::collectYoutube($port, $tabId, EvalStates::AUTH_SIGNAL_DEADLINE);
+        $ytDict = $ytCol['dict'];
+        if ($ytDict === null && !$over()) {
+            usleep(500000);
+            $ytCol = AuthEvidenceCollector::collectYoutube($port, $tabId, 2);
+            $ytDict = $ytCol['dict'];
         }
         $timings['login'] = $timings['youtube'] = (int)round((microtime(true) - $t) * 1000);
-        if ($yt === null) {
-            AccountDataCollector::closeTab($port, $tabId);
+        if ($ytDict === null) {
+            EvaluationTarget::release($port, $tabId, true);
             $mark(self::stage('CHECK_LOGIN', 'NOT_RUN'));
             $mark(self::stage('CHECK_YOUTUBE', 'TIMEOUT', 'PAGE_TIMEOUT', 'Trang phan hoi qua cham', $timings['youtube']));
             self::notRun($stages, ['CHECK_CHANNEL', 'CHECK_SECURITY']);
-            return self::finish($stages, [], 'tool_error', 'PAGE_TIMEOUT', 'Trang phan hoi qua cham', null, null, 'LOW', null, $timings, $t0);
+            return self::finish($stages, [], 'tool_error', 'PAGE_TIMEOUT', 'Trang phan hoi qua cham', null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'READY', 'google' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'page_timeout'],
+                    'youtube' => ['status' => 'UNKNOWN', 'confidence' => 'LOW', 'reason' => 'page_timeout'],
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => 'UNKNOWN', 'evidence_summary' => '']);
         }
-        $pageOk = !empty($yt['loaded']);
-        // Login: FAIL chi khi trang da load xong ma khong avatar (evidence ro)
-        if (!empty($yt['av'])) {
-            $mark(self::stage('CHECK_LOGIN', 'PASS', null, null, $timings['login']));
-            $loginEv = 'ok';
-        } elseif ($pageOk) {
-            $mark(self::stage('CHECK_LOGIN', 'FAIL', 'LOGIN_REQUIRED', 'Can dang nhap', $timings['login']));
-            $loginEv = 'failed';
-        } else {
-            $mark(self::stage('CHECK_LOGIN', 'TIMEOUT', 'NETWORK_TIMEOUT', 'Trang chua tai xong', $timings['login']));
-            $loginEv = 'unknown';
-        }
-        if ($pageOk) {
-            $mark(self::stage('CHECK_YOUTUBE', 'PASS', null, null, $timings['youtube']));
-            $ytEv = 'ok';
-        } elseif ($loginEv === 'unknown') {
-            $mark(self::stage('CHECK_YOUTUBE', 'TIMEOUT', 'NETWORK_TIMEOUT', 'Trang chua tai xong', $timings['youtube']));
-            $ytEv = 'unknown';
-        } else {
-            // Trang phan hoi nhung khong phai YouTube hoan chinh (evidence)
-            $mark(self::stage('CHECK_YOUTUBE', 'FAIL', 'YOUTUBE_UNAVAILABLE', 'Khong truy cap duoc YouTube', $timings['youtube']));
-            $ytEv = 'failed';
-        }
+        $ytEv = $ytCol['evidence'];
+        // Page-level transport error => UNKNOWN ca 2 (§55), KHONG suy logout
+        $pageError = !empty($ytDict['pageError']);
 
-        // ---- AUTH gate: chi LOGGED_IN moi duoc check channel ----
-        // (ko suy tu cookie/page mo duoc; challenge/recovery/unknown -> dung)
-        $authOk = ($loginEv === 'ok');
-        $earlyChallenge = !empty($yt['ch']);
-        $earlyRecovery = !empty($yt['rc']);
-        if (!$authOk || $earlyChallenge || $earlyRecovery) {
-            $mark(self::stage('CHECK_CHANNEL', 'NOT_RUN', null, 'Doi LOGIN xac nhan', 0));
-            $ch = ['state' => 'unknown', 'name' => null, 'ch' => $earlyChallenge, 'rc' => $earlyRecovery, 'restricted' => false];
-            $timings['channel'] = 0;
-        } else {
-            // ---- CHECK_CHANNEL (5s): chi khi auth LOGGED_IN ----
-            $t = microtime(true);
-            $ch = AccountDataCollector::probeChannel($port, $tabId, $deadline, self::TIMEOUTS['CHECK_CHANNEL']);
-            $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
-            if (($ch['state'] ?? 'unknown') === 'unknown' && empty($ch['name'])) {
-                $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
-            } else {
-                $mark(self::stage('CHECK_CHANNEL', 'PASS', null, null, $timings['channel']));
+        // GOOGLE AUTH: mac dinh dung chung youtube evidence (cung session);
+        // chi navigate myaccount khi youtube UNKNOWN/conflict (tiet kiem 1 navigate).
+        $gDec = AuthDecisionEngine::decide($ytEv, 'google');
+        // Neu youtube evidence chua du ma page khong loi => thu google page doc lap
+        $needGooglePage = ($gDec['status'] === 'UNKNOWN' && !$pageError && !$over());
+        $gColExtra = null;
+        if ($needGooglePage) {
+            $gColExtra = AuthEvidenceCollector::collectGoogle($port, $tabId, $deadline);
+            if (is_array($gColExtra['dict'])) {
+                // Hop nhat: google page manh hon cho google decision
+                $gDec2 = AuthDecisionEngine::decide($gColExtra['evidence'], 'google');
+                // Chi nhan neu manh hon (HIGH/MEDIUM thang LOW)
+                if (self::confRank($gDec2['confidence']) > self::confRank($gDec['confidence'])
+                    || $gDec2['status'] !== 'UNKNOWN') {
+                    // Giu conflict: neu 2 page mau thuan => UNKNOWN (§10)
+                    if (($gDec['status'] === 'SIGNED_IN' && $gDec2['status'] === 'SIGNED_OUT')
+                        || ($gDec['status'] === 'SIGNED_OUT' && $gDec2['status'] === 'SIGNED_IN')) {
+                        $gDec = ['status' => 'UNKNOWN', 'confidence' => 'LOW',
+                            'reason' => 'auth_evidence_conflict', 'evidence_used' => array_merge($gDec['evidence_used'], $gDec2['evidence_used'])];
+                    } else {
+                        $gDec = $gDec2;
+                    }
+                }
+                // Ve lai youtube de check channel (navigate back)
+                EvaluationTarget::navigate($port, $tabId, 'https://www.youtube.com/');
+                AccountDataCollector::waitLoad($port, $tabId, $deadline, 3);
+                $ytCol2 = AuthEvidenceCollector::collectYoutube($port, $tabId, 3);
+                if (is_array($ytCol2['dict'])) {
+                    $ytDict = $ytCol2['dict'];
+                    $ytEv = $ytCol2['evidence'];
+                }
             }
         }
+        $yDec = AuthDecisionEngine::decide($ytEv, 'youtube');
 
-        // ---- CHECK_SECURITY (3s): tu du lieu da thu (khong query them) ----
+        // Map decision -> stage (CHECK_LOGIN = google, CHECK_YOUTUBE = youtube)
+        // Selector missing / UNKNOWN => TIMEOUT|FAIL? Quy uoc: UNKNOWN => TIMEOUT (technical),
+        // SIGNED_OUT => FAIL(LOGIN_REQUIRED), SIGNED_IN => PASS, VERIFICATION => FAIL(challenge).
+        self::markAuthStage($mark, 'CHECK_LOGIN', $gDec, $timings['login']);
+        self::markAuthStage($mark, 'CHECK_YOUTUBE', $yDec, $timings['youtube']);
+
+        $evSummary = '[YT ' . AuthEvidenceCollector::summary($ytEv) . ']';
+        try {
+            require_once __DIR__ . '/SyncLogger.php';
+            SyncLogger::info('evaluation', '[EVAL AUTH] profile=' . $profileId
+                . ' google=' . $gDec['status'] . '/' . $gDec['confidence']
+                . ' youtube=' . $yDec['status'] . '/' . $yDec['confidence']
+                . ' ' . $evSummary, $profileId);
+        } catch (Throwable $e) {
+        }
+
+        // ---- AUTH gate: chi SIGNED_IN ca 2 moi duoc check channel (§25) ----
+        $authOk = ($gDec['status'] === 'SIGNED_IN' && $yDec['status'] === 'SIGNED_IN');
+        $challenge = ($gDec['status'] === 'VERIFICATION_REQUIRED' || $yDec['status'] === 'VERIFICATION_REQUIRED')
+            || !empty($ytDict['ch']);
+        $recovery = !empty($ytDict['rc']);
+        $security = 'OK';
+        if ($recovery) $security = 'RECOVERY';
+        elseif ($challenge) $security = 'CHALLENGE';
+
+        if (!$authOk || $challenge || $recovery || $pageError) {
+            $mark(self::stage('CHECK_CHANNEL', 'NOT_RUN', null, 'Doi LOGIN xac nhan', 0));
+            $mark(self::stage('CHECK_SECURITY', $security === 'OK' ? 'PASS' : 'FAIL',
+                $security === 'OK' ? null : strtolower($security), $security === 'OK' ? null : 'Can xac minh', 0));
+            EvaluationTarget::release($port, $tabId, false); // giu tab reuse
+            $timings['channel'] = 0;
+            $mark(self::stage('FINALIZE', 'PASS', null, null, 0));
+            // Decision table cho cac case chua login (§29)
+            if ($pageError) {
+                $chStatus = null;
+                $outcome = 'tool_error';
+                $code = 'PAGE_TIMEOUT';
+                $err = 'Trang gap loi mang';
+                $conf = 'LOW';
+            } else {
+                $dt = EvalStates::decide(['browser' => 'READY',
+                    'google' => $gDec['status'] === 'VERIFICATION_REQUIRED' ? 'VERIFICATION_REQUIRED'
+                        : ($gDec['status'] === 'SIGNED_OUT' ? 'SIGNED_OUT'
+                        : ($gDec['status'] === 'SIGNED_IN' ? 'SIGNED_IN' : 'UNKNOWN')),
+                    'youtube' => $yDec['status'] === 'SIGNED_OUT' ? 'SIGNED_OUT'
+                        : ($yDec['status'] === 'SIGNED_IN' ? 'SIGNED_IN' : 'UNKNOWN'),
+                    'presence' => 'NOT_CHECKED', 'access' => 'NOT_CHECKED',
+                    'security' => $security, 'infra' => 'OK']);
+                $chStatus = $dt['channel_status'];
+                if ($chStatus === 'ERROR') {
+                    $outcome = 'tool_error';
+                    $code = 'NETWORK_TIMEOUT';
+                    $err = 'Chua xac dinh duoc dang nhap';
+                    $conf = 'LOW';
+                } else {
+                    $outcome = 'success';
+                    $code = null;
+                    $err = null;
+                    $conf = min($gDec['confidence'], $yDec['confidence']) === 'HIGH' ? 'HIGH' : 'MEDIUM';
+                    if ($chStatus === 'LOGIN_REQUIRED') $err = 'login_required';
+                    elseif ($chStatus === 'VERIFICATION_REQUIRED') $err = $recovery ? 'recovery_required' : 'security_challenge';
+                }
+            }
+            // Legacy signals (tuong thich ChannelEvaluationManager::finishAccount)
+            $loginEv = $yDec['status'] === 'SIGNED_IN' ? 'ok'
+                : ($yDec['status'] === 'SIGNED_OUT' || $gDec['status'] === 'SIGNED_OUT' ? 'failed' : 'unknown');
+            $ytEvSig = $loginEv;
+            $signals = ['login' => $loginEv, 'session' => $pageError ? 'unknown' : 'ok', 'youtube' => $ytEvSig,
+                'channel' => 'unknown', 'channelName' => null,
+                'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => false,
+                'auth' => $yDec['status'] === 'SIGNED_IN' && $gDec['status'] === 'SIGNED_IN' ? 'LOGGED_IN'
+                    : ($challenge || $recovery ? 'VERIFICATION_REQUIRED'
+                    : (($yDec['status'] === 'SIGNED_OUT' || $gDec['status'] === 'SIGNED_OUT') ? 'LOGIN_REQUIRED' : 'UNKNOWN')),
+                'presence' => 'NOT_CHECKED', 'presence_evidence' => null,
+            ];
+            return self::finish($stages, $signals, $outcome, $code, $err, $chStatus, $err, $conf, null, $timings, $t0, $meta
+                + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
+                    'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => $security, 'evidence_summary' => $evSummary]);
+        }
+
+        // ---- CHECK_CHANNEL (PRESENCE + ACCESS): chi khi auth SIGNED_IN (§25-§27) ----
         $t = microtime(true);
-        $challenge = !empty($yt['ch']) || !empty($ch['ch']);
-        $recovery = !empty($yt['rc']) || !empty($ch['rc']);
-        $restricted = $authOk && !empty($ch['restricted']);
-        if ($recovery || $challenge || $restricted) {
-            $code = $recovery ? 'recovery_required' : ($restricted ? 'restricted' : 'security_challenge');
+        EvaluationTarget::navigate($port, $tabId, 'https://www.youtube.com/@me');
+        AccountDataCollector::waitLoad($port, $tabId, $deadline, self::TIMEOUTS['CHECK_CHANNEL']);
+        AccountDataCollector::waitUrlChange($port, $tabId, '/@me', $deadline, 2);
+        $chDict = AccountDataCollector::eval($port, $tabId, YoutubeSignals::channelEvidenceJs());
+        $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
+        $presence = 'UNKNOWN';
+        $presenceConf = 'LOW';
+        $presenceEv = null;
+        $access = 'NOT_CHECKED';
+        $chName = null;
+        $restricted = false;
+        if (is_array($chDict)) {
+            $challenge = $challenge || !empty($chDict['ch']);
+            $recovery = $recovery || !empty($chDict['rc']);
+            if ($recovery) $security = 'RECOVERY';
+            elseif (!empty($chDict['ch'])) $security = 'CHALLENGE';
+            $restricted = (bool)($chDict['restricted'] ?? false);
+            if ($restricted) $security = 'RESTRICTED';
+            $u = (string)($chDict['u'] ?? '');
+            $body = (string)($chDict['body'] ?? '');
+            $isPlaceholder = (bool)preg_match('#/(@me|me|mine|current)([/?#]|$)#i', $u);
+            $looksChannel = (bool)preg_match('#youtube\.com/(@|channel/|c/)#i', $u)
+                && !preg_match('#/signin|/signup#i', $u) && !$isPlaceholder;
+            $createMarkers = !empty($chDict['create']);
+            if ($looksChannel && !$createMarkers) {
+                // Trich handle that, loai placeholder (@me/...) (§8)
+                $nm = null;
+                if (preg_match('~youtube\.com/(@[^/?#]+)~i', $u, $m)) $nm = urldecode($m[1]);
+                elseif (preg_match('~youtube\.com/(channel|c)/([^/?#]+)~i', $u, $m)) $nm = $m[2];
+                if ($nm !== null && preg_match('/^(@me|me|mine|current)$/i', ltrim($nm, '@'))) {
+                    $presence = 'UNKNOWN';
+                    $presenceConf = 'LOW';
+                } else {
+                    $presence = 'HAS_CHANNEL';
+                    $presenceConf = 'HIGH'; // redirect that + khong create marker = strong
+                    $presenceEv = 'youtube_channel_identity_confirmed';
+                    $chName = $nm;
+                    $access = $restricted ? 'RESTRICTED' : 'ACCESSIBLE';
+                }
+            } elseif ($createMarkers && !$looksChannel) {
+                // Authenticated + explicit create marker = verified NO_CHANNEL (§26)
+                $presence = 'NO_CHANNEL';
+                $presenceConf = 'HIGH';
+                $presenceEv = 'authenticated_account_without_channel';
+                $access = 'NOT_CHECKED';
+            } else {
+                // Mo ho => UNKNOWN (§26: khong lay HTTP 200 lam evidence)
+                $presence = 'UNKNOWN';
+                $presenceConf = 'LOW';
+            }
+        }
+        if ($presence === 'UNKNOWN') {
+            $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
+        } else {
+            $mark(self::stage('CHECK_CHANNEL', 'PASS', null, null, $timings['channel']));
+        }
+        if ($restricted && $presence === 'HAS_CHANNEL') $access = 'RESTRICTED';
+        elseif ($presence === 'HAS_CHANNEL' && $access === 'NOT_CHECKED') $access = 'ACCESSIBLE';
+
+        // ---- CHECK_SECURITY ----
+        $t = microtime(true);
+        if ($security !== 'OK') {
+            $code = $security === 'RECOVERY' ? 'recovery_required' : ($security === 'RESTRICTED' ? 'restricted' : 'security_challenge');
             $mark(self::stage('CHECK_SECURITY', 'FAIL', $code, 'Can xac minh', (int)round((microtime(true) - $t) * 1000)));
         } else {
             $mark(self::stage('CHECK_SECURITY', 'PASS', null, null, (int)round((microtime(true) - $t) * 1000)));
         }
-        AccountDataCollector::closeTab($port, $tabId);
+        EvaluationTarget::release($port, $tabId, false);
 
-        // ---- FINALIZE: inference evidence-only + confidence ----
-        // auth: LOGGED_IN / LOGIN_REQUIRED / VERIFICATION_REQUIRED / UNKNOWN / CHECK_FAILED
-        if ($loginEv === 'ok' && !$challenge && !$recovery) $auth = 'LOGGED_IN';
-        elseif ($challenge || $recovery) $auth = 'VERIFICATION_REQUIRED';
-        elseif ($loginEv === 'failed') $auth = 'LOGIN_REQUIRED';
-        elseif ($loginEv === 'unknown' && $pageOk) $auth = 'LOGGED_OUT';
-        else $auth = 'UNKNOWN';
-        // presence: CHI khi auth LOGGED_IN + evidence
-        $presence = 'NOT_CHECKED';
-        $presenceEv = null;
-        if ($auth === 'LOGGED_IN') {
-            if (($ch['state'] ?? 'unknown') === 'exists') {
-                $presence = 'HAS_CHANNEL';
-                $presenceEv = 'youtube_channel_identity_confirmed';
-            } elseif (($ch['state'] ?? 'unknown') === 'none') {
-                $presence = 'NO_CHANNEL';
-                $presenceEv = 'authenticated_account_without_channel';
-            } else {
-                $presence = 'UNKNOWN';
-            }
-        }
+        // ---- FINALIZE: decision table (§29) ----
         $mark(self::stage('FINALIZE', 'PASS', null, null, 0));
-        $signals = [
-            'login' => $loginEv, 'session' => 'ok', 'youtube' => $ytEv,
-            'channel' => $ch['state'] ?? 'unknown', 'channelName' => $ch['name'] ?? null,
+        $dt = EvalStates::decide(['browser' => 'READY', 'google' => 'SIGNED_IN', 'youtube' => 'SIGNED_IN',
+            'presence' => $presence, 'access' => $access, 'security' => $security, 'infra' => 'OK']);
+        $chStatus = $dt['channel_status'];
+        if ($chStatus === 'ERROR') {
+            // Channel technical => tool_error, giu last-known (§27: KHONG phai UNAVAILABLE)
+            $signals = ['login' => 'ok', 'session' => 'ok', 'youtube' => 'ok',
+                'channel' => 'unknown', 'channelName' => null,
+                'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => $restricted,
+                'auth' => 'LOGGED_IN', 'presence' => $presence === 'UNKNOWN' ? 'UNKNOWN' : 'NOT_CHECKED',
+                'presence_evidence' => null];
+            return self::finish($stages, $signals, 'tool_error', 'NETWORK_TIMEOUT', 'Khong xac dinh duoc kenh',
+                null, null, 'LOW', null, $timings, $t0, $meta
+                + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
+                    'presence' => $presence, 'presence_confidence' => $presenceConf, 'access' => $access,
+                    'security' => $security, 'evidence_summary' => $evSummary]);
+        }
+        $conf = $presenceConf === 'HIGH' && $gDec['confidence'] === 'HIGH' && $yDec['confidence'] === 'HIGH'
+            ? 'HIGH' : 'MEDIUM';
+        $signals = ['login' => 'ok', 'session' => 'ok', 'youtube' => 'ok',
+            'channel' => $presence === 'HAS_CHANNEL' ? 'exists' : ($presence === 'NO_CHANNEL' ? 'none' : 'unknown'),
+            'channelName' => $chName,
             'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => $restricted,
-            'auth' => $auth, 'presence' => $presence, 'presence_evidence' => $presenceEv,
-        ];
-        if ($restricted) {
-            return self::finish($stages, $signals, 'success', null, null, 'RESTRICTED', 'restricted', 'HIGH', null, $timings, $t0);
+            'auth' => 'LOGGED_IN',
+            'presence' => $presence, 'presence_evidence' => $presenceEv];
+        $reason = null;
+        if ($chStatus === 'ACTIVE' && $presence === 'NO_CHANNEL') $reason = 'no_channel';
+        elseif ($chStatus === 'RESTRICTED') $reason = 'restricted';
+        elseif ($chStatus === 'VERIFICATION_REQUIRED') $reason = $recovery ? 'recovery_required' : 'security_challenge';
+        return self::finish($stages, $signals, 'success', null, null, $chStatus, $reason, $conf, null, $timings, $t0, $meta
+            + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
+                'presence' => $presence, 'presence_confidence' => $presenceConf, 'access' => $access,
+                'security' => $security, 'evidence_summary' => $evSummary]);
+    }
+
+    private static function confRank(string $c): int
+    {
+        return $c === 'HIGH' ? 3 : ($c === 'MEDIUM' ? 2 : 1);
+    }
+
+    private static function markAuthStage(callable $mark, string $stage, array $dec, int $ms): void
+    {
+        $st = $dec['status'] ?? 'UNKNOWN';
+        if ($st === 'SIGNED_IN') {
+            $mark(self::stage($stage, 'PASS', null, $dec['reason'] ?? null, $ms));
+        } elseif ($st === 'SIGNED_OUT') {
+            $mark(self::stage($stage, 'FAIL', 'LOGIN_REQUIRED', 'Can dang nhap', $ms));
+        } elseif ($st === 'VERIFICATION_REQUIRED') {
+            $mark(self::stage($stage, 'FAIL', 'security_challenge', 'Can xac minh', $ms));
+        } else {
+            $mark(self::stage($stage, 'TIMEOUT', 'NETWORK_TIMEOUT', 'Chua xac dinh (' . ($dec['reason'] ?? '?') . ')', $ms));
         }
-        if ($recovery) {
-            return self::finish($stages, $signals, 'success', null, null, 'VERIFICATION_REQUIRED', 'recovery_required', 'HIGH', null, $timings, $t0);
-        }
-        if ($challenge) {
-            return self::finish($stages, $signals, 'success', null, null, 'VERIFICATION_REQUIRED', 'security_challenge', 'HIGH', null, $timings, $t0);
-        }
-        if ($loginEv === 'failed') {
-            return self::finish($stages, $signals, 'success', null, null, 'LOGIN_REQUIRED', 'login_required', 'HIGH', null, $timings, $t0);
-        }
-        if ($ytEv === 'failed') {
-            return self::finish($stages, $signals, 'success', null, null, 'CHANNEL_UNAVAILABLE', 'youtube_unavailable', 'MEDIUM', null, $timings, $t0);
-        }
-        if ($loginEv === 'unknown' || $ytEv === 'unknown') {
-            // Khong du evidence -> technical, giu last_known
-            return self::finish($stages, $signals, 'tool_error', 'NETWORK_TIMEOUT', 'Ket noi mang qua thoi gian', null, null, 'LOW', null, $timings, $t0);
-        }
-        $conf = (($ch['state'] ?? 'unknown') === 'unknown') ? 'MEDIUM' : 'HIGH';
-        return self::finish($stages, $signals, 'success', null, null, 'ACTIVE', null, $conf, null, $timings, $t0);
     }
 
     private static function finish(array $stages, array $signals, string $outcome, ?string $code, ?string $error,
-        ?string $channelStatus, ?string $reason, string $confidence, ?string $infra, array $timings, float $t0): array
+        ?string $channelStatus, ?string $reason, string $confidence, ?string $infra, array $timings, float $t0, array $meta = []): array
     {
         $timings['total'] = (int)round((microtime(true) - $t0) * 1000);
-        return ['stages' => $stages, 'signals' => $signals, 'outcome' => $outcome,
+        return array_merge(['stages' => $stages, 'signals' => $signals, 'outcome' => $outcome,
             'error_code' => $code, 'error' => $error, 'channel_status' => $channelStatus,
-            'reason' => $reason, 'confidence' => $confidence, 'infra' => $infra, 'timings' => $timings];
+            'reason' => $reason, 'confidence' => $confidence, 'infra' => $infra, 'timings' => $timings,
+            'completed_at' => date('Y-m-d H:i:s')], $meta);
     }
 }
