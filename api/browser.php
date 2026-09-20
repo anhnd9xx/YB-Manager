@@ -2,6 +2,7 @@
 declare(strict_types=1);
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../sync/SyncLogger.php';
+require_once __DIR__ . '/../sync/WindowDiscovery.php';
 
 $action = $_GET['action'] ?? 'open';
 $profileId = (int)($_GET['id'] ?? 0);
@@ -153,6 +154,11 @@ function open_chrome(array $p, ?string $url = null): void
 function kill_chrome_quiet(array $p): void
 {
     tab_snapshot_before_close($p);
+    try {
+        require_once __DIR__ . '/../sync/WindowPlacementManager.php';
+        WindowPlacementManager::save_window_placement($p, (int)($p['debug_port'] ?? 0) > 0 ? placement_hwnd_for((int)$p['id']) : null);
+    } catch (Throwable $e) {
+    }
     kill_chrome_processes($p);
     db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $p['id']]);
 }
@@ -184,10 +190,29 @@ function tab_snapshot_before_close(array $p): void
     }
 }
 
+function placement_hwnd_for(int $profileId): ?int
+{
+    try {
+        foreach (SyncWindowDiscovery::discover(false)['windows'] as $w) {
+            if ($w->profileId !== null && (int)$w->profileId === $profileId
+                && $w->class === 'Chrome_WidgetWin_1' && $w->visible) {
+                return $w->hwnd;
+            }
+        }
+    } catch (Throwable $e) {
+    }
+    return null;
+}
+
 function kill_chrome(array $p): void
 {
     $t0 = microtime(true);
     tab_snapshot_before_close($p);
+    try {
+        require_once __DIR__ . '/../sync/WindowPlacementManager.php';
+        WindowPlacementManager::save_window_placement($p, placement_hwnd_for((int)$p['id']));
+    } catch (Throwable $e) {
+    }
     kill_chrome_processes($p);
     db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $p['id']]);
     SyncLogger::info('browser_perf', '[PERF] close profile #' . (int)$p['id']

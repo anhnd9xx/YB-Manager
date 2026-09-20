@@ -249,9 +249,11 @@ function renderProfiles() {
   const fdays = $('profile-filter-days') && $('profile-filter-days').value !== '' ? parseInt($('profile-filter-days').value, 10) : 0;
   const fstab = $('profile-filter-stab') ? parseInt($('profile-filter-stab').value || '0', 10) : 0;
   const fconf = $('profile-filter-conf') ? parseInt($('profile-filter-conf').value || '0', 10) : 0;
+  const feval = $('profile-filter-eval') ? $('profile-filter-eval').value : '';
   profilesFiltered = profiles.filter(p => {
     if (platform && p.platform !== platform) return false;
     if (fstage && (p.acc_stage || 'NEW') !== fstage) return false;
+    if (feval && (p.eval_status || 'UNCHECKED') !== feval) return false;
     if (fchannel === 'exists' && p.acc_channel !== 'exists') return false;
     if (fchannel === 'none' && p.acc_channel !== 'none') return false;
     if (fchannel === 'unknown' && (p.acc_channel === 'exists' || p.acc_channel === 'none')) return false;
@@ -482,7 +484,7 @@ function toggleFilterPanel(force) {
   p.classList.toggle('open', show);
 }
 function resetFilters() {
-  ['profile-filter-platform', 'profile-filter-stage', 'profile-filter-channel', 'profile-filter-stab', 'profile-filter-conf'].forEach(id => {
+  ['profile-filter-platform', 'profile-filter-stage', 'profile-filter-eval', 'profile-filter-channel', 'profile-filter-stab', 'profile-filter-conf'].forEach(id => {
     const el = $(id);
     if (el) el.value = '';
   });
@@ -619,6 +621,7 @@ function arrFillMonitors() {
   if (!sel) return;
   const cur = arrEnsureCfg().monitor;
   sel.innerHTML = '<option value="settings">Theo cài đặt</option>'
+    + '<option value="profile">Theo cài đặt profile (giữ màn hình riêng)</option>'
     + '<option value="primary">Màn hình chính</option>'
     + '<option value="all">Tất cả màn hình</option>';
   (cachedMonitors || []).forEach(m => {
@@ -652,7 +655,7 @@ function arrBuildPayload(extra) {
   if (!ids.length) { toast('Không có kênh nào trong phạm vi đã chọn', 'error'); return null; }
   const p = { profileIds: ids, mode: cfg.mode };
   if (cfg.monitor && cfg.monitor !== 'settings') {
-    if (cfg.monitor === 'all' || cfg.monitor === 'primary') p.monitor = cfg.monitor;
+    if (cfg.monitor === 'all' || cfg.monitor === 'primary' || cfg.monitor === 'profile') p.monitor = cfg.monitor;
     else if (cfg.monitor.startsWith('name:')) p.monitors = [cfg.monitor.slice(5)];
   }
   p.respectTaskbar = cfg.taskbar;
@@ -824,7 +827,8 @@ async function autoArrangeAfterLaunch(ids) {
       await sleep(1000);
     }
     if (!ready.length) { arrangeResultMsg('✗ Không thấy cửa sổ nào sau khi mở', false); return; }
-    await arrangeCall({ profileIds: ready });
+    // Giu monitor affinity sau Start All: khong keo ve primary
+    await arrangeCall({ profileIds: ready, monitor: 'profile', allowLocked: true });
     if (ready.length < ids.length) {
       toast(`Tự xếp ${ready.length}/${ids.length} kênh (số còn lại chưa hiện cửa sổ)`, 'error');
     }
@@ -941,58 +945,153 @@ async function deleteSelected() {
     refreshAll();
   });
 }
-// ============ ACCOUNT EVALUATION (bulk + chi tiet) ============
-// Danh gia theo chunk (server tra remaining) de 100 profile khong freeze UI.
-// Khong chon: hoi danh gia toan bo danh sach dang loc.
-async function evaluateSelected() {
-  let ids = Array.from(selectedProfileIds);
-  if (!ids.length) {
-    // Khong chon: danh gia toan bo danh sach dang loc (spec muc 8)
-    ids = profilesFiltered.map(p => p.id);
-    if (!ids.length) { toast('Không có kênh nào để đánh giá', 'error'); return; }
-    toast(`Đánh giá toàn bộ ${ids.length} kênh đang lọc...`, '');
+// ============ CHANNEL EVALUATION (batch + realtime card) ============
+// Flow: SELECT -> eval_start (mark CHECKING) -> chunk(4) -> update tung card ngay.
+// Chi danh gia kenh DA CHON; chua chon -> toast, khong am tham danh gia tat ca.
+const EVAL_STATUS = {
+  UNCHECKED: ['Chưa kiểm tra', 'badge-muted', '●'],
+  CHECKING: ['Đang kiểm tra', 'badge-info', '◌'],
+  ACTIVE: ['Hoạt động', 'badge-ok', '●'],
+  LOGIN_REQUIRED: ['Cần đăng nhập', 'badge-review', '!'],
+  VERIFICATION_REQUIRED: ['Cần xác minh', 'badge-warn', '!'],
+  UNAVAILABLE: ['Không truy cập được', 'badge-danger', '●'],
+  ERROR: ['Lỗi kiểm tra', 'badge-muted', '!'],
+};
+function evalBadge(st) {
+  const [label, cls, dot] = EVAL_STATUS[st] || EVAL_STATUS.UNCHECKED;
+  return `<span class="badge ${cls}">${dot} ${label}</span>`;
+}
+let evalBatch = null; // {batch_id, total, done} de Cancel + progress
+let evalRunning = false;
+function evalApplyResult(r) {
+  // Ghi ket qua vao store local + highlight neu doi trang thai
+  const p = profiles.find(x => Number(x.id) === Number(r.profileId));
+  if (!p) return false;
+  const old = p.eval_status || 'UNCHECKED';
+  const nw = r.status || 'ERROR';
+  p.eval_status = nw;
+  p.eval_prev = (r.prev_status && r.prev_status !== 'CHECKING') ? r.prev_status : p.eval_prev;
+  p.eval_known = r.last_known_status ?? p.eval_known;
+  p.eval_attempt = r.checked_at || p.eval_attempt;
+  p.eval_error = r.tool_error ? (r.reason || 'Lỗi kiểm tra') : null;
+  if (r.login_state) p.acc_login = r.login_state;
+  if (r.session_state) p.acc_session = r.session_state;
+  if (r.youtube_state) p.acc_youtube = r.youtube_state;
+  if (r.stability != null) p.acc_stability = r.stability;
+  if (r.confidence != null) p.acc_confidence = r.confidence;
+  if (r.stage) p.acc_stage = r.stage;
+  updateCardEval(p.id, old !== nw);
+  return true;
+}
+function updateCardEval(id, changed) {
+  // Update dung badge/checked cua card (khong render lai grid)
+  const cards = document.querySelectorAll('#profiles-grid .profile-card');
+  const p = profiles.find(x => Number(x.id) === Number(id));
+  if (!p) return;
+  const idx = paginateProfiles().findIndex(x => Number(x.id) === Number(id));
+  if (idx < 0 || !cards[idx]) { renderProfiles(); return; }
+  const el = cards[idx].querySelector('.eval-block');
+  if (el) {
+    el.innerHTML = evalBlockInner(p);
+    if (changed) {
+      el.classList.remove('eval-flash');
+      void el.offsetWidth;
+      el.classList.add('eval-flash');
+      setTimeout(() => el.classList.remove('eval-flash'), 2500);
+    }
   }
-  let queue = ids.slice();
+}
+async function evaluateSelected() {
+  if (evalRunning) { toast('Đang đánh giá — bấm Hủy nếu muốn dừng', 'error'); return; }
+  const ids = Array.from(selectedProfileIds).map(Number).filter(x => x > 0);
+  if (!ids.length) { toast('Chọn ít nhất một kênh để đánh giá', 'error'); return; }
+  evalRunning = true;
+  const btn = $('btn-eval-bulk');
+  const cancelBtn = $('btn-eval-cancel');
+  if (cancelBtn) cancelBtn.classList.remove('hidden');
+  const oldBtn = btn ? btn.innerHTML : '';
+  // 1) Optimistic CHECKING ngay cho ca batch (giu previous)
+  const prevMap = {};
+  ids.forEach(id => {
+    const p = profiles.find(x => Number(x.id) === id);
+    if (p) { prevMap[id] = p.eval_status || 'UNCHECKED'; p.eval_prev = prevMap[id]; p.eval_status = 'CHECKING'; }
+  });
+  renderProfiles();
+  const counts = {};
   let done = 0;
-  const stages = {};
-  const el = $('selected-count');
   try {
-    while (queue.length) {
-      if (el) el.innerHTML = `<span class="sel-pill">Đang đánh giá ${done}/${ids.length}…</span>`;
-      const res = await sendJson(api + 'accounts.php?action=evaluate', { ids: queue, batch: 3 });
-      if (!res.ok) { toast(res.message || 'Lỗi đánh giá', 'error'); break; }
-      for (const r of (res.data.results || [])) {
-        if (r.stage) stages[r.stage] = (stages[r.stage] || 0) + 1;
+    // 2) Tao batch server (mark CHECKING 1 UPDATE)
+    const st = await sendJson(api + 'accounts.php?action=eval_start', { ids, concurrency: 4 });
+    if (!st.ok) { toast(st.message || 'Lỗi tạo batch', 'error'); throw new Error('start'); }
+    evalBatch = { batch_id: st.data.batch_id, total: ids.length, done: 0 };
+    // 3) Chunk <=4, kenh nao xong update card do ngay
+    let finished = false;
+    while (!finished) {
+      if (btn) btn.innerHTML = `◌ Đánh giá ${done}/${ids.length}`;
+      const ch = await sendJson(api + 'accounts.php?action=eval_chunk', { batch_id: evalBatch.batch_id, limit: 4 });
+      if (!ch.ok) { toast(ch.message || 'Lỗi batch', 'error'); break; }
+      for (const r of (ch.data.results || [])) {
+        done++;
+        if (r.status) counts[r.status] = (counts[r.status] || 0) + 1;
+        evalApplyResult(r);
+        // Panel chi tiet dang mo dung kenh nay -> live update
+        if (tabsPanelId === Number(r.profileId) || accDrawerId === Number(r.profileId)) openAccountDrawer(Number(r.profileId), true);
       }
-      const n = res.data.processed || 0;
-      done += n;
-      queue = queue.slice(n);
-      if (n === 0) break;
+      evalBatch.done = done;
+      if (btn) btn.innerHTML = `◌ Đánh giá ${done}/${ids.length}`;
+      finished = !!ch.data.done;
+      if (!finished && !(ch.data.results || []).length) break;
     }
   } catch (e) {
-    toast('Lỗi kết nối khi đánh giá', 'error');
+    if (e.message !== 'start') toast('Lỗi kết nối khi đánh giá', 'error');
+  } finally {
+    // Tra CHECKING treo (cancel/mang rot) ve previous
+    profiles.forEach(p => {
+      if (p.eval_status === 'CHECKING' && ids.includes(Number(p.id))) {
+        p.eval_status = p.eval_prev || 'UNCHECKED';
+      }
+    });
+    renderProfiles();
+    if (btn) btn.innerHTML = oldBtn;
+    if (cancelBtn) cancelBtn.classList.add('hidden');
+    evalRunning = false;
+    evalBatch = null;
   }
-  const sum = Object.entries(stages).map(([s, c]) => `${ACC_STAGES[s] ? ACC_STAGES[s][0] : s}: ${c}`).join(' · ');
-  toast(`Xong ${done}/${ids.length} kênh${sum ? ' — ' + sum : ''}`, done === ids.length ? 'success' : 'error');
-  refreshAll();
+  const sum = Object.entries(counts).map(([s, c]) => `${(EVAL_STATUS[s] || [])[0] || s}: ${c}`).join(' · ');
+  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}`, done === ids.length ? 'success' : 'error');
 }
-// Danh gia 1 profile (nut Kiem tra tren card)
+async function evalCancelBatch() {
+  if (!evalBatch) return;
+  await sendJson(api + 'accounts.php?action=eval_cancel', { batch_id: evalBatch.batch_id });
+  toast('Đã gửi yêu cầu hủy batch', '');
+}
+// Danh gia 1 profile (nut Kiem tra tren card): optimistic CHECKING + panel live
 async function evaluateOneProfile(id) {
-  toast('Đang kiểm tra account...', '');
+  const p = profiles.find(x => Number(x.id) === Number(id));
+  if (p) { p.eval_prev = p.eval_status || 'UNCHECKED'; p.eval_status = 'CHECKING'; updateCardEval(id, false); }
+  if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
   const res = await sendJson(api + 'accounts.php?action=refresh', { id });
   if (res.ok && res.data) {
+    evalApplyResult(res.data);
+    if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
     const r = res.data;
-    toast(`#${id}: ${r.stage} (ổn định ${r.stability}, tin cậy ${r.confidence})`, 'success');
-  } else toast(res.message || 'Lỗi', 'error');
-  refreshAll();
+    toast(`#${id}: ${(EVAL_STATUS[r.status] || [])[0] || r.status}`, r.status === 'ACTIVE' ? 'success' : 'error');
+  } else {
+    toast(res.message || 'Lỗi', 'error');
+    if (p) { p.eval_status = p.eval_prev || 'UNCHECKED'; updateCardEval(id, false); }
+  }
 }
 const ACC_STAGE_VN = { NEW: 'Mới', OBSERVING: 'Theo dõi', STABLE: 'Ổn định', READY_FOR_CHANNEL: 'Sẵn sàng mở kênh', CHANNEL_EXISTS: 'Đã có kênh', REVIEW_REQUIRED: 'Cần xem lại', ACTION_REQUIRED: 'Cần xử lý', UNAVAILABLE: 'Không khả dụng' };
 const ACC_REASON_VN = { channel_exists: 'Đã có YouTube channel', recovery_required: 'Cần khôi phục tài khoản', security_challenge: 'Gặp kiểm tra bảo mật', login_or_session_unusable: 'Đăng nhập/phiên không dùng được', too_many_consecutive_failures: 'Lỗi liên tiếp quá nhiều', insufficient_history: 'Chưa đủ dữ liệu theo dõi', stability_below_review: 'Ổn định dưới ngưỡng xem lại', confidence_below_ready: 'Chưa đủ tin cậy', meets_ready_policy: 'Đạt chính sách nội bộ', stable_but_below_ready: 'Ổn nhưng chưa đạt sẵn sàng' };
+let accDrawerId = 0;
 function closeAccountDrawer() {
+  accDrawerId = 0;
   const w = $('acc-drawer-wrap');
   if (w) w.classList.add('hidden');
 }
-async function openAccountDrawer(id) {
+const EVAL_STAGE_VN = { INITIALIZING: 'Đang khởi tạo...', QUEUED: 'Đang chờ...', CHECKING_SESSION: 'Đang kiểm tra phiên...', CHECKING_LOGIN: 'Đang kiểm tra đăng nhập...', CHECKING_PLATFORM: 'Đang kiểm tra YouTube...', CHECKING_CHANNEL: 'Đang kiểm tra kênh...', FINALIZING: 'Đang tổng hợp...', DONE: 'Hoàn tất' };
+async function openAccountDrawer(id, keepOpen) {
+  accDrawerId = Number(id);
   try {
     const res = await getJson(api + `accounts.php?action=get&id=${id}`);
     if (!res.ok) { toast(res.message || 'Lỗi', 'error'); return; }
@@ -1001,45 +1100,83 @@ async function openAccountDrawer(id) {
     const row = (k, v) => `<div class="acc-item"><span>${k}</span><strong>${v}</strong></div>`;
     const yn = (b) => b ? '<span class="badge badge-danger">Có</span>' : '<span class="badge badge-muted">Không</span>';
     const [sLabel, sCls, sDot] = ACC_STAGES[st.stage] || ACC_STAGES.NEW;
+    const ev = st.eval_status || 'UNCHECKED';
     const reasons = vn(hist[0] ? hist[0].reasons : []);
     const warns = vn(hist[0] ? hist[0].warnings : []);
-    const readyTxt = st.stage === 'READY_FOR_CHANNEL' ? 'READY' : (['CHANNEL_EXISTS'].includes(st.stage) ? 'CHANNEL' : st.stage);
+    const sig = (v, map) => {
+      const lbl = (EVAL_UI_VN[v] || v || 'Chưa kiểm tra');
+      const ok = ['YES', 'VALID', 'AVAILABLE'].includes(v);
+      return `<span class="badge ${ok ? 'badge-ok' : (v === 'NOT_CHECKED' || v === 'CHECK_FAILED' ? 'badge-muted' : 'badge-review')}">${ok ? '✓' : '•'} ${escapeHtml(lbl)}</span>`;
+    };
+    const lastTxt = st.last_attempt_at || st.last_checked_at;
     $('acc-drawer-title').textContent = 'ACCOUNT EVALUATION — ' + (p.name || ('#' + id));
-    $('acc-drawer-body').innerHTML =
-      `<div class="acc-head" style="margin-bottom:10px"><span class="meta-label">Profile / ${escapeHtml(p.name || '')}</span>`
-      + `<span class="acc-stage">${sDot} ${accStageBadge(st.stage)}</span></div>`
-      + `<div class="acc-grid">`
+    // Chrome runtime GIU NGUYEN tai card; panel chi danh gia
+    let head = `<div class="acc-head" style="margin-bottom:10px"><span class="meta-label">Chrome: ${p.status === 'running' ? '● Đang chạy' : '● Dừng'}</span>`
+      + `<span class="acc-stage">${evalBadge(ev)}</span></div>`;
+    if (ev === 'CHECKING') {
+      const live = st.eval_stage_live && EVAL_STAGE_VN[st.eval_stage_live] ? EVAL_STAGE_VN[st.eval_stage_live] : 'Đang kiểm tra...';
+      head += `<div class="eval-live" id="eval-live-stage">◌ ${escapeHtml(live)}</div>`;
+      pollEvalStage(id);
+    }
+    if (ev === 'ERROR' && st.last_known_status) {
+      head += `<div class="eval-prev">Trạng thái gần nhất: ${(EVAL_STATUS[st.last_known_status] || [])[0] || st.last_known_status}`
+        + (st.last_successful_check_at ? ` (${accRelTime(st.last_successful_check_at)})` : '') + `</div>`;
+    }
+    if (st.last_error) head += `<div class="eval-prev" title="${escapeAttr(st.last_error)}">⚠ Lần kiểm tra mới nhất thất bại</div>`;
+    $('acc-drawer-body').innerHTML = head
+      + `<div class="sync-label">Lần kiểm tra: ${lastTxt ? escapeHtml(lastTxt) + ` (${accRelTime(lastTxt)})` : 'chưa có'}</div>`
+      + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
+      + row('Đăng nhập', sig(st.login_state === 'ok' ? 'YES' : (st.login_state === 'failed' ? 'NO' : (st.login_state || 'NOT_CHECKED'))))
+      + row('Phiên', sig(st.session_state === 'ok' ? 'VALID' : (st.session_state === 'failed' ? 'INVALID' : (st.session_state || 'NOT_CHECKED'))))
+      + row('Bảo mật', st.security_challenge ? yn(true) : '<span class="badge badge-ok">✓ Bình thường</span>')
+      + `</div><div class="sync-label" style="margin-top:6px">NỀN TẢNG</div><div class="acc-grid">`
+      + row('YouTube', sig(st.youtube_state === 'ok' ? 'AVAILABLE' : (st.youtube_state === 'failed' ? 'UNAVAILABLE' : (st.youtube_state || 'NOT_CHECKED'))))
+      + row('Kênh', st.channel_state === 'exists' ? `<span class="badge badge-ok">✓ Hoạt động${st.channel_name ? ' (' + escapeHtml(st.channel_name) + ')' : ''}</span>`
+        : (st.channel_state === 'none' ? '<span class="badge badge-review">Chưa có kênh</span>' : sig('NOT_CHECKED')))
       + row('Giai đoạn', `${sLabel}`) + row('Quản lý', `${st.managed_days ?? '-'} ngày`)
       + row('Ổn định', `${st.stability} / 100`) + row('Tin cậy', `${st.confidence} / 100`)
-      + row('Đăng nhập', st.login_state) + row('Phiên', st.session_state)
-      + row('YouTube', st.youtube_state)
-      + row('Thử thách bảo mật', yn(st.security_challenge)) + row('Cần khôi phục', yn(st.recovery_required))
+      + `</div><div class="sync-label" style="margin-top:6px">THỐNG KÊ</div><div class="acc-grid">`
       + row('Check thành công', st.success_count) + row('Check thất bại', st.fail_count)
       + row('Lỗi liên tiếp', st.consec_fails)
-      + row('Trạng thái kênh', st.channel_state + (st.channel_name ? ` (${escapeHtml(st.channel_name)})` : ''))
-      + row('Lần check cuối', st.last_checked_at || 'chưa có')
-      + `</div><div class="sync-label">READINESS: ${readyTxt}</div>`
-      + (reasons.map(r => `<p class="reason-ok">✓ ${escapeHtml(r)}</p>`).join('') || '<p class="muted">-</p>')
+      + (st.last_duration_ms != null ? row('Thời gian check', `${st.last_duration_ms}ms`) : '')
+      + `</div>`
+      + (reasons.map(r => `<p class="reason-ok">✓ ${escapeHtml(r)}</p>`).join('') || '')
       + (warns.length ? `<div class="sync-label" style="margin-top:6px">Cảnh báo:</div>` + warns.map(w => `<p class="reason-warn">⚠ ${escapeHtml(w)}</p>`).join('') : '')
       + `<div class="sync-label" style="margin-top:8px">Lịch sử (${hist.length}):</div>`
-      + `<div class="acc-hist" style="display:none"><table class="data-table"><thead><tr><th>Thời gian</th><th>Ổn định</th><th>Tin cậy</th><th>Giai đoạn</th><th>Lý do</th></tr></thead><tbody>`
-      + (hist.map(h => `<tr><td class="mono">${escapeHtml(h.checked_at || '')}</td><td>${h.stability}</td><td>${h.confidence}</td><td>${accStageBadge(h.stage)}</td><td><small>${escapeHtml(vn(h.reasons).join('; '))}</small></td></tr>`).join('') || '<tr><td colspan="5">Chưa có lịch sử</td></tr>')
+      + `<div class="acc-hist" style="display:none"><table class="data-table"><thead><tr><th>Thời gian</th><th>Trạng thái</th><th>Lý do</th></tr></thead><tbody>`
+      + (hist.map(h => `<tr><td class="mono">${escapeHtml(h.checked_at || '')}</td><td>${evalBadge(h.eval_status || 'UNCHECKED')}</td><td><small>${escapeHtml(h.reason || vn(h.reasons).join('; '))}</small></td></tr>`).join('') || '<tr><td colspan="3">Chưa có lịch sử</td></tr>')
       + `</tbody></table></div>`;
-    $('acc-drawer-eval').onclick = async () => {
-      $('acc-drawer-eval').disabled = true;
-      const r = await sendJson(api + 'accounts.php?action=refresh', { id });
-      $('acc-drawer-eval').disabled = false;
-      if (r.ok) { openAccountDrawer(id); refreshAll(); }
-      else toast(r.message || 'Lỗi', 'error');
-    };
-    $('acc-drawer-open').onclick = () => { closeAccountDrawer(); openProfile(id); };
-    $('acc-drawer-hist').onclick = () => {
-      const h = document.querySelector('#acc-drawer-body .acc-hist');
-      if (h) h.style.display = h.style.display === 'none' ? '' : 'none';
-    };
+    setDrawerFoot('Kiểm tra lại', 'Mở Profile', 'Lịch sử',
+      async () => { await evaluateOneProfile(id); },
+      () => { closeAccountDrawer(); openProfile(id); },
+      () => {
+        const h = document.querySelector('#acc-drawer-body .acc-hist');
+        if (h) h.style.display = h.style.display === 'none' ? '' : 'none';
+      });
     $('acc-drawer-wrap').classList.remove('hidden');
   } catch (e) {
     toast('Lỗi tải chi tiết', 'error');
+  }
+}
+// Poll stage khi panel dang CHECKING (1s/lan, dung khi DONE/dong panel)
+async function pollEvalStage(id) {
+  for (let i = 0; i < 45; i++) {
+    if (accDrawerId !== Number(id)) return;
+    const el = $('eval-live-stage');
+    if (!el) return;
+    await sleep(1000);
+    if (accDrawerId !== Number(id)) return;
+    try {
+      const r = await getJson(api + `accounts.php?action=eval_stage&id=${id}`);
+      const s = r.ok && r.data ? r.data.stage : null;
+      if (!s || s === 'DONE') {
+        if (accDrawerId === Number(id)) openAccountDrawer(Number(id), true);
+        return;
+      }
+      const lbl = EVAL_STAGE_VN[s] || 'Đang kiểm tra...';
+      const el2 = $('eval-live-stage');
+      if (el2) el2.textContent = '◌ ' + lbl;
+    } catch (e) { return; }
   }
 }
 // ============ TAB SESSION (panel trong drawer chung) ============
@@ -1074,6 +1211,13 @@ async function refreshTabsPanel() {
     const esc2 = (s) => escapeHtml(s || '');
     let html = `<div class="sync-url-row" style="padding:0 0 8px"><button class="btn btn-sm" onclick="refreshTabsPanel()">↻ Làm mới</button>`
       + `<span class="summary-text">${running ? tabs.length + ' tab đang mở' : 'Chrome chưa chạy'}</span></div>`;
+    html += `<div class="sync-label">Mở nhiều tab (mỗi dòng 1 URL):</div>`
+      + `<textarea id="tab-batch-urls" rows="3" style="width:100%" placeholder="https://...\nhttps://..."></textarea>`
+      + `<div class="sync-url-row" style="padding:6px 0">`
+      + `<button class="btn btn-sm btn-primary" id="tab-batch-open-btn" onclick="openTabsBatch()">Mở hàng loạt</button>`
+      + `<button class="btn btn-sm btn-danger" onclick="closeAllTabsBatch(true)">Đóng hết (giữ 1)</button>`
+      + `<button class="btn btn-sm btn-danger" onclick="closeAllTabsBatch(false)">Đóng hết</button>`
+      + `<span class="summary-text" id="tab-batch-progress"></span></div>`;
     html += tabs.length
       ? tabs.map((t, i) => `<div class="sync-tab-item"><span>${i === (live.data.active || 0) ? '▶' : '○'}</span>`
         + `<div class="sync-tab-info"><div class="sync-tab-title">${esc2(t.title)}</div>`
@@ -1098,6 +1242,44 @@ async function restoreTabsPanel() {
   const res = await sendJson(api + 'tabsessions.php?action=restore', { id: tabsPanelId });
   toast(res.ok ? `Đã khôi phục ${res.count} tabs (${res.ms}ms)` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
   refreshTabsPanel();
+}
+// Batch open: 1 request duy nhat, UI phan hoi ngay + poll progress (khong refresh tung tab)
+async function openTabsBatch() {
+  if (!tabsPanelId) return;
+  const ta = $('tab-batch-urls');
+  const urls = (ta ? ta.value : '').split('\n').map(s => s.trim()).filter(Boolean);
+  if (!urls.length) { toast('Nhập ít nhất 1 URL', 'error'); return; }
+  const btn = $('tab-batch-open-btn');
+  const prog = $('tab-batch-progress');
+  if (btn) btn.disabled = true; // chong double-click
+  if (prog) prog.textContent = `Đang mở 0/${urls.length}...`;
+  try {
+    const res = await sendJson(api + 'tabsessions.php?action=open_batch', { id: tabsPanelId, urls, preserve_order: true, activate: 'LAST' });
+    if (prog) prog.textContent = '';
+    toast(res.ok ? `Đã mở ${res.count}/${urls.length} tabs (${res.ms}ms)` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  } catch (e) {
+    toast('Lỗi kết nối', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    if (ta) ta.value = '';
+    refreshTabsPanel(); // 1 render cuoi
+    refreshAll(); // cap nhat tab count 1 lan
+  }
+}
+async function closeAllTabsBatch(keepOne) {
+  if (!tabsPanelId) return;
+  const prog = $('tab-batch-progress');
+  if (prog) prog.textContent = 'Đang đóng...';
+  try {
+    const res = await sendJson(api + 'tabsessions.php?action=close_all', { id: tabsPanelId, keep_one: !!keepOne });
+    if (prog) prog.textContent = '';
+    toast(res.ok ? `Đã đóng ${res.closed} tabs${res.ms ? ' (' + res.ms + 'ms)' : ''}` : (res.message || 'Lỗi'), res.ok ? 'success' : 'error');
+  } catch (e) {
+    toast('Lỗi kết nối', 'error');
+  } finally {
+    refreshTabsPanel();
+    refreshAll();
+  }
 }
 async function clearTabsPanel() {
   if (!tabsPanelId) return;
@@ -1268,19 +1450,35 @@ function accBar(v, tip) {
 function accDaysVN(p) {
   return p.acc_days != null ? `${p.acc_days} ngày` : '–';
 }
-function buildAccountRow(p) {
+const EVAL_UI_VN = { YES: 'Đã đăng nhập', NO: 'Chưa đăng nhập', VALID: 'Hợp lệ', INVALID: 'Không hợp lệ', AVAILABLE: 'Truy cập được', UNAVAILABLE: 'Không truy cập được', NOT_CHECKED: 'Chưa kiểm tra', CHECK_FAILED: 'Không kiểm tra được' };
+function evalBlockInner(p) {
+  // Chrome status GIU NGUYEN o card-status; day chi evaluation (rieng biet)
+  const es = p.eval_status || 'UNCHECKED';
+  const last = p.eval_attempt || p.acc_checked;
+  const lastTxt = last ? accRelTime(last) : 'chưa kiểm tra';
+  let sub = '';
+  if (es === 'CHECKING' && p.eval_prev && p.eval_prev !== 'CHECKING' && p.eval_prev !== 'UNCHECKED') {
+    sub = `<div class="eval-prev">Trước đó: ${(EVAL_STATUS[p.eval_prev] || [])[0] || p.eval_prev}</div>`;
+  } else if (es === 'ERROR' && p.eval_known && p.eval_known !== 'ERROR' && p.eval_known !== 'UNCHECKED') {
+    sub = `<div class="eval-prev">⚠ Gần nhất: ${(EVAL_STATUS[p.eval_known] || [])[0] || p.eval_known}</div>`;
+  }
+  const err = (es === 'ERROR' && p.eval_error) ? `<div class="eval-prev" title="${escapeAttr(p.eval_error)}">⚠ Lần này thất bại</div>` : '';
   const stage = p.acc_stage || 'NEW';
   const [, , dot] = ACC_STAGES[stage] || ACC_STAGES.NEW;
-  const stabTip = `Ổn định: ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}\nCheck thành công: ${p.acc_success ?? 0}\nCheck thất bại: ${p.acc_fail ?? 0}\nLỗi liên tiếp: ${p.acc_consec ?? 0}`;
-  const confTip = `Tin cậy: ${p.acc_confidence ?? '-'}/100\nTheo dõi: ${accDaysVN(p)}\nChecks thành công: ${p.acc_success ?? 0}\nLần check cuối: ${p.acc_checked ? accRelTime(p.acc_checked) : 'chưa có'}`;
+  const stabTip = `Ổn định: ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
   const ch = p.acc_channel === 'exists'
     ? `<span class="acc-channel" title="${escapeAttr(p.acc_channel_name || 'Đã có kênh')}">📺 ${escapeHtml((p.acc_channel_name || 'Đã có kênh').slice(0, 18))}</span>`
     : '';
-  return `<div class="acc-block" onclick="openAccountDrawer(${p.id})" title="Xem chi tiết đánh giá">`
-    + `<div class="acc-head"><span class="meta-label">Account · ${accDaysVN(p)}</span>`
-    + `<span class="acc-stage">${dot} ${accStageBadge(stage)}</span></div>`
+  return `<div class="acc-head"><span class="meta-label">Đánh giá · ${lastTxt}</span>`
+    + `<span class="acc-stage">${evalBadge(es)}</span></div>`
+    + sub + err
     + `<div class="acc-meter"><span>Ổn định</span><strong>${p.acc_stability ?? '-'}</strong>${accBar(p.acc_stability, stabTip)}${ch}</div>`
-    + `<div class="acc-meter"><span>Tin cậy</span><strong>${p.acc_confidence ?? '-'}</strong>${accBar(p.acc_confidence, confTip)}</div></div>`;
+    + `<div class="acc-head" style="margin-top:4px"><span class="meta-label">Account · ${accDaysVN(p)}</span>`
+    + `<span class="acc-stage">${dot} ${accStageBadge(stage)}</span></div>`;
+}
+function buildAccountRow(p) {
+  return `<div class="acc-block eval-block" onclick="openAccountDrawer(${p.id})" title="Xem chi tiết đánh giá">`
+    + evalBlockInner(p) + `</div>`;
 }
 function accRelTime(s) {
   try {
@@ -1464,6 +1662,25 @@ function randomUA() {
   $('pf-ua').value = ua;
   toast('Đã tạo User-Agent ngẫu nhiên', 'success');
 }
+function pfFillMonitorSelect(selEl, monitors, cur) {
+  if (!selEl) return;
+  selEl.innerHTML = (monitors || []).map(m =>
+    `<option value="${escapeHtml(m.name || '')}">Màn hình ${m.id}${m.primary ? ' (chính)' : ''}</option>`
+  ).join('') || '<option value="">(chưa có màn hình)</option>';
+  if (cur) selEl.value = cur;
+}
+function pfRefreshMonitorHint() {
+  const p = profiles.find(x => String(x.id) === String($('pf-id').value));
+  const mode = $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST';
+  const fx = $('pf-monitor-fixed');
+  if (fx) fx.classList.toggle('hidden', mode !== 'FIXED');
+  const hint = $('pf-monitor-hint');
+  if (!hint) return;
+  if (!p) { hint.textContent = 'Mới: mặc định Nhớ màn hình lần cuối.'; return; }
+  const cur = p.last_monitor_device ? ('Hiện tại: ' + p.last_monitor_device) : 'Chưa chạy lần nào';
+  const last = p.last_monitor_device ? (' · Lần cuối: ' + p.last_monitor_device) : '';
+  hint.textContent = (p.status === 'running' ? cur : ('Không chạy.' + last));
+}
 function openProfileModal() {
   $('profile-modal-title').textContent = 'Tạo kênh mới';
   $('pf-id').value = '';
@@ -1474,6 +1691,9 @@ function openProfileModal() {
   $('pf-count').value = '5';
   $('pf-ua').value = '';
   $('pf-webrtc').value = 'default';
+  if ($('pf-monitor-mode')) $('pf-monitor-mode').value = 'LAST';
+  pfFillMonitorSelect($('pf-monitor-fixed'), cachedMonitors, '');
+  pfRefreshMonitorHint();
   setProfileMode('single');
   populateProxySelect();
   showModal('profile-modal');
@@ -1490,6 +1710,9 @@ function openProfileModalEdit(id) {
   $('pf-webrtc').value = p.webrtc_protection || 'default';
   setProfileMode('single');
   populateProxySelect(p.proxy_id);
+  if ($('pf-monitor-mode')) $('pf-monitor-mode').value = p.monitor_mode || 'LAST';
+  pfFillMonitorSelect($('pf-monitor-fixed'), cachedMonitors, p.fixed_monitor_device || '');
+  pfRefreshMonitorHint();
   showModal('profile-modal');
 }
 function populateProxySelect(selectedId) {
@@ -1523,7 +1746,9 @@ async function saveProfile() {
     channel_handle: $('pf-handle').value.trim() || null,
     user_agent: $('pf-ua').value.trim() || null,
     webrtc_protection: $('pf-webrtc').value,
-    proxy_id
+    proxy_id,
+    monitor_mode: $('pf-monitor-mode') ? $('pf-monitor-mode').value : 'LAST',
+    fixed_monitor_device: ($('pf-monitor-mode') && $('pf-monitor-mode').value === 'FIXED' && $('pf-monitor-fixed')) ? $('pf-monitor-fixed').value : ''
   };
   if (!data.name) { toast('Vui lòng nhập tên kênh', 'error'); return; }
   const res = await sendJson(api + 'profiles.php?action=' + (id ? 'update' : 'add'), data);

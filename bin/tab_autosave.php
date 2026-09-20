@@ -39,6 +39,12 @@ while (true) {
             // Guard §4: restore dang chay (lock tuoi) -> SKIP
             $gf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_srestore_' . $pid . '.lock';
             if (is_file($gf) && (time() - (int)@filemtime($gf)) < 120) continue;
+            // Tab batch dang chay -> KHONG save intermediate (3/20, 7/20...); batch tu save cuoi
+            $bf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tabbatch_' . $pid . '.json';
+            if (is_file($bf)) {
+                $bj = json_decode((string)@file_get_contents($bf), true);
+                if (is_array($bj) && ($bj['status'] ?? '') === 'running' && (time() - (int)@filemtime($bf)) < 300) continue;
+            }
             if (!empty($r['last_opened']) && (string)$r['last_opened'] >= $graceCut) continue;
             $ids[] = $pid;
         }

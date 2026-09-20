@@ -69,6 +69,143 @@ class SyncWindowLayoutManager
         } elseif (!empty($layout['rememberMonitors']) && !empty($layout['monitors'])) {
             $explicitNames = array_values($layout['monitors']);
         }
+        // Profile-affinity: giu monitor rieng tung kenh (Start All khong keo ve primary).
+        // monitor='profile' (hoac settings layout_monitor='profile'): group theo target monitor.
+        if ($monSetting === 'profile' && empty($opts['monitors']) && empty($explicitNames)) {
+            require_once __DIR__ . '/WindowPlacementManager.php';
+            $groups = []; // device(lower) => [liveIdx...]
+            $areaByKey = [];
+            foreach (SyncMonitorManager::allWorkAreas() as $a) {
+                $areaByKey[strtolower((string)($a['name'] ?? ''))] = $a;
+            }
+            // can profile rows de resolve (monitor_mode/last/fixed)
+            $profById = [];
+            try {
+                foreach (db()->query('SELECT * FROM profiles') as $r) $profById[(int)$r['id']] = $r;
+            } catch (Throwable $e) {
+            }
+            $groupAreas = [];
+            $groupLives = [];
+            foreach ($live as $w) {
+                $pr = $profById[(int)$w['profileId']] ?? ['id' => $w['profileId']];
+                $tm = WindowPlacementManager::resolve_target_monitor($pr);
+                $key = $tm ? strtolower((string)($tm['device_name'] ?? '')) : '__primary__';
+                $area = ($tm && isset($areaByKey[$key])) ? $areaByKey[$key] : null;
+                if ($area === null) {
+                    // fallback primary area
+                    foreach (SyncMonitorManager::allWorkAreas() as $a) {
+                        if (!empty($a['primary'])) {
+                            $area = $a;
+                            break;
+                        }
+                    }
+                    if ($area === null) $area = SyncMonitorManager::allWorkAreas()[0] ?? null;
+                    $key = $area ? strtolower((string)($area['name'] ?? '')) : '__primary__';
+                }
+                if ($area === null) continue;
+                if (!isset($groups[$key])) {
+                    $groups[$key] = [];
+                    $groupAreas[$key] = $area;
+                    $groupLives[$key] = [];
+                }
+                $groups[$key][] = $w;
+                $groupLives[$key][] = $w;
+            }
+            if (!$groupAreas) {
+                return ['ok' => false, 'partial' => false, 'message' => 'Khong lay duoc monitor',
+                    'session' => self::session($sessionId, $ids, $live, [], $layout, $win, []), 'results' => []];
+            }
+            // Tinh plan rieng tung work area (calculate), roi apply 1 batch chung (DeferWindowPos)
+            require_once __DIR__ . '/SmartLayoutEngine.php';
+            $allSlots = []; // liveIdx => slot
+            $breakdown = [];
+            // map profileId -> liveIdx
+            $idxByPid = [];
+            foreach ($live as $i => $w) $idxByPid[(int)$w['profileId']] = $i;
+            foreach ($groups as $key => $gwins) {
+                $area = $groupAreas[$key];
+                $sub = SmartLayoutEngine::plan(count($gwins), [$area], $layout, $win, !empty($opts['debug']));
+                if (empty($sub['ok'])) continue;
+                foreach ($gwins as $k => $w) {
+                    $slot = $sub['slots'][$k] ?? null;
+                    if ($slot === null) continue;
+                    $li = $idxByPid[(int)$w['profileId']] ?? null;
+                    if ($li !== null) $allSlots[$li] = $slot;
+                }
+                $breakdown[] = ['monitorId' => $area['monitorId'], 'count' => count($gwins)];
+                foreach ($area as $ak => $av) {
+                }
+                SyncLogger::info('layout_plan', '[Layout] Mon' . $area['monitorId'] . ' (' . ($area['name'] ?? '') . '): ' . count($gwins) . ' windows (profile affinity)');
+            }
+            ksort($allSlots);
+            $orderedSlots = [];
+            foreach ($live as $i => $w) {
+                if (isset($allSlots[$i])) $orderedSlots[] = $allSlots[$i];
+            }
+            if (!empty($opts['dryRun'])) {
+                return ['ok' => true, 'partial' => false, 'dryRun' => true,
+                    'message' => count($orderedSlots) . ' slots (preview, profile affinity)',
+                    'plan' => ['ok' => true, 'slots' => $orderedSlots, 'breakdown' => $breakdown],
+                    'breakdown' => $breakdown,
+                    'session' => self::session($sessionId, $ids, $live, array_values($groupAreas), $layout, $win, $orderedSlots),
+                    'results' => []];
+            }
+            // Apply 1 batch (giong duong chung, co guard placement_locked)
+            $noActivate = !array_key_exists('noActivate', $opts) || !empty($opts['noActivate']);
+            $freshByHwnd = [];
+            try {
+                foreach (SyncWindowDiscovery::discover(false)['windows'] as $ww) $freshByHwnd[$ww->hwnd] = true;
+            } catch (Throwable $e) {
+            }
+            $batchIn = [];
+            $skipped = [];
+            foreach ($live as $i => $w) {
+                // Khong danh nhau voi startup guard: bo qua window dang locked tru khi batch nay
+                // chinh la Start All (opts['allowLocked'] = true)
+                $gf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_guard_' . (int)$w['profileId'] . '.json';
+                if (is_file($gf) && empty($opts['allowLocked'])) {
+                    $skipped[] = $i;
+                    continue;
+                }
+                $slot = $allSlots[$i] ?? null;
+                if ($slot === null) {
+                    $skipped[] = $i;
+                    continue;
+                }
+                if (!isset($freshByHwnd[(int)$w['hwnd']])) {
+                    $skipped[] = $i;
+                    continue;
+                }
+                $batchIn[] = ['hwnd' => (int)$w['hwnd'], 'x' => (int)$slot['x'], 'y' => (int)$slot['y'], 'w' => (int)$slot['w'], 'h' => (int)$slot['h']];
+            }
+            $batchOut = SyncWindowManager::applyLayoutBatch($batchIn, $noActivate);
+            $results = [];
+            $okCount = 0;
+            foreach ($live as $i => $w) {
+                $slot = $allSlots[$i] ?? null;
+                $res = ['profileId' => $w['profileId'], 'profileName' => $w['profileName'], 'hwnd' => $w['hwnd'], 'slot' => $slot, 'ok' => false, 'error' => null, 'rect' => null];
+                if (in_array($i, $skipped, true)) {
+                    $res['error'] = 'Skip (placement locked hoac HWND mat)';
+                } else {
+                    $one = $batchOut[(string)(int)$w['hwnd']] ?? null;
+                    if ($one !== null && !empty($one['ok'])) {
+                        $res['ok'] = true;
+                        $res['rect'] = $one['rect'];
+                        $okCount++;
+                    } else {
+                        $res['error'] = (string)(($one['error'] ?? null) ?: 'moveResize that bai');
+                    }
+                }
+                $results[] = $res;
+            }
+            $failCount = count($results) - $okCount;
+            return ['ok' => $failCount === 0, 'partial' => $failCount > 0 && $okCount > 0,
+                'message' => $okCount . ' arranged (profile affinity)' . ($failCount > 0 ? ", $failCount failed" : ''),
+                'plan' => ['ok' => true, 'slots' => $orderedSlots, 'breakdown' => $breakdown],
+                'breakdown' => $breakdown,
+                'session' => self::session($sessionId, $ids, $live, array_values($groupAreas), $layout, $win, $orderedSlots),
+                'results' => $results];
+        }
         if ($explicitNames) {
             [$areas, $missingMonitors] = SyncMonitorManager::resolveTargetsByNames($explicitNames);
             if ($missingMonitors) {

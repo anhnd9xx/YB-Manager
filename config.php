@@ -659,7 +659,7 @@ function channel_fingerprint(int $profileId): array
  * Dung chung de launch Chrome (browser.php).
  * Gom cac cuoc goi chung: user-agent, WebRTC, remote-debugging, proxy.
  */
-function build_chrome_command(array $p, ?string $url = null, ?int $port = null, ?int $relayPort = null, array $startupUrls = []): array
+function build_chrome_command(array $p, ?string $url = null, ?int $port = null, ?int $relayPort = null, array $startupUrls = [], ?array $windowRect = null): array
 {
     // Trang mo mac dinh: lay tu setting "home_url" (mac dinh google.com)
     if ($url === null) {
@@ -723,6 +723,14 @@ function build_chrome_command(array $p, ?string $url = null, ?int $port = null, 
         $proxyAddr = proxy_server_arg($p, $relayPort);
         $cmd[] = '--proxy-server=' . $proxyAddr;
         $cmd[] = '--proxy-bypass-list=<local>';
+    }
+
+    // Multi-monitor placement: --window-position/--window-size TRUOC Popen de Chrome
+    // xuat hien truc tiep tai monitor dich (khong flash o primary). GIU toa do am
+    // (vd --window-position=-1920,0), KHONG sanitize ve 0.
+    if (is_array($windowRect) && isset($windowRect['x'], $windowRect['y'], $windowRect['w'], $windowRect['h'])) {
+        $cmd[] = '--window-position=' . (int)$windowRect['x'] . ',' . (int)$windowRect['y'];
+        $cmd[] = '--window-size=' . (int)$windowRect['w'] . ',' . (int)$windowRect['h'];
     }
 
     // Prelaunch session restore: append TOAN BO URLs theo dung thu tu de Chrome mo
@@ -828,7 +836,49 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
             $startupUrls = [];
         }
     }
-    $cmd = build_chrome_command($p, $url, $port, $relayPort, $startupUrls);
+    // Multi-monitor placement (flow: session -> monitor -> rect -> command -> Popen).
+    // Chrome mo truc tiep tai monitor dich, khong qua about:blank roi move.
+    $placeMonitor = null;
+    $placeRect = null;
+    try {
+        require_once __DIR__ . '/sync/WindowPlacementManager.php';
+        WindowPlacementManager::ensureDpiAwareness();
+        // Enrich monitor fields neu caller chua join (backward-compatible khi cot chua migrate)
+        if (!array_key_exists('monitor_mode', $p)) {
+            try {
+                $st = db()->prepare('SELECT monitor_mode, fixed_monitor_device, last_monitor_device, last_window_rect, last_window_rect_norm FROM profiles WHERE id=?');
+                $st->execute([(int)($p['id'] ?? 0)]);
+                if ($r = $st->fetch()) $p = array_merge($p, $r);
+            } catch (Throwable $e2) {
+            }
+        }
+        $placeMonitor = WindowPlacementManager::resolve_target_monitor($p);
+        $snap0 = null;
+        try {
+            require_once __DIR__ . '/sync/SettingsService.php';
+            $snap0 = SyncSettingsService::snapshot();
+        } catch (Throwable $e2) {
+            $snap0 = null;
+        }
+        $fbSize = $snap0 ? ['w' => (int)$snap0['width'], 'h' => (int)$snap0['height']] : ['w' => 1280, 'h' => 720];
+        $placeRect = WindowPlacementManager::resolve_startup_rect($p, $placeMonitor, $fbSize);
+        if ($placeMonitor !== null && $placeRect !== null) {
+            try {
+                require_once __DIR__ . '/sync/SyncLogger.php';
+                SyncLogger::info('placement', '[PLACEMENT PLAN] profile=#' . (int)($p['id'] ?? 0)
+                    . ' monitor=' . $placeMonitor['device_name']
+                    . ' rect=(' . $placeRect['x'] . ',' . $placeRect['y'] . ',' . $placeRect['w'] . 'x' . $placeRect['h'] . ')', (int)($p['id'] ?? 0));
+                SyncLogger::info('placement', '[LAUNCH] profile=#' . (int)($p['id'] ?? 0)
+                    . ' position=' . $placeRect['x'] . ',' . $placeRect['y']
+                    . ' size=' . $placeRect['w'] . 'x' . $placeRect['h'], (int)($p['id'] ?? 0));
+            } catch (Throwable $e2) {
+            }
+        }
+    } catch (Throwable $e) {
+        $placeMonitor = null;
+        $placeRect = null;
+    }
+    $cmd = build_chrome_command($p, $url, $port, $relayPort, $startupUrls, $placeRect);
     if ($startupUrls) {
         SyncLogger::info('tab_session', '[LAUNCH] #' . (int)($p['id'] ?? 0)
             . ' launching with ' . count($startupUrls) . ' startup tabs', (int)($p['id'] ?? 0));
@@ -873,14 +923,19 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
     } catch (Throwable $e) {
         // activator loi khong duoc pha launch Chrome
     }
-    // Global Window Settings (SSOT): snapshot TAI THOI DIEM launch roi giao cho
-    // tien trinh nen apply (poll HWND 100ms/timeout 10s). Fire-and-forget: khong bao gio
-    // block/throw launch chinh. Fixed OFF + Auto -> bo qua de giu hanh vi cu.
-    // Snapshot truyen qua FILE (khong qua argv: tranh vo quote/base64 tren cmd Windows).
+    // Window apply (SSOT + placement guard): luon spawn khi co placeRect (giam flash
+    // primary + guard Chrome tu restore sai monitor), ngoai ra giu hanh vi cu theo
+    // Global Window Settings. Snapshot truyen qua FILE.
     try {
         require_once __DIR__ . '/sync/SettingsService.php';
         $snap = SyncSettingsService::snapshot();
-        if ($snap['fixed'] || $snap['position'] !== 'auto') {
+        $needApply = ($snap['fixed'] || $snap['position'] !== 'auto') || ($placeRect !== null);
+        if ($needApply) {
+            // Gan placement dich vao snapshot de apply_window uu tien (khong ep ve primary)
+            if ($placeRect !== null) {
+                $snap['placement_rect'] = $placeRect;
+                $snap['placement_monitor'] = $placeMonitor['device_name'] ?? '';
+            }
             $php = php_cli_binary();
             $scr = __DIR__ . '/bin/apply_window.php';
             if ($php !== '' && is_file($scr)) {

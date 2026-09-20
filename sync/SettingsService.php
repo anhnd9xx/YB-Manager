@@ -168,7 +168,7 @@ class SyncSettingsService
             $sizeMode = 'auto_fit';
         }
         $mon = strtolower(trim((string)$g($in, 'layout_monitor', 'monitor', $d['layout_monitor'])));
-        if ($mon !== 'primary' && $mon !== 'all' && (!ctype_digit($mon) || (int)$mon <= 0)) {
+        if ($mon !== 'primary' && $mon !== 'all' && $mon !== 'profile' && (!ctype_digit($mon) || (int)$mon <= 0)) {
             $bad[] = 'monitor';
             $mon = 'primary';
         }
@@ -279,7 +279,7 @@ class SyncSettingsService
         }
         if ($has('layout_monitor')) {
             $mon = strtolower(trim((string)$in['layout_monitor']));
-            if ($mon !== 'primary' && $mon !== 'all' && (!ctype_digit($mon) || (int)$mon <= 0)) $errors[] = 'Monitor khong hop le';
+            if ($mon !== 'primary' && $mon !== 'all' && $mon !== 'profile' && (!ctype_digit($mon) || (int)$mon <= 0)) $errors[] = 'Monitor khong hop le';
         }
         foreach (['layout_gap_x' => [0, 100], 'layout_gap_y' => [0, 100]] as $k => [$lo, $hi]) {
             if ($has($k)) {

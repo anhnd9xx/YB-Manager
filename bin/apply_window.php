@@ -17,6 +17,7 @@ require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../sync/SettingsService.php';
 require_once __DIR__ . '/../sync/WindowManager.php';
 require_once __DIR__ . '/../sync/LayoutManager.php';
+require_once __DIR__ . '/../sync/WindowPlacementManager.php';
 require_once __DIR__ . '/../sync/SyncLogger.php';
 
 function aw_log(string $msg, ?int $pid = null): void
@@ -51,8 +52,18 @@ if ($profileId <= 0) {
 }
 aw_log("[Window] Target size: {$snap['width']}x{$snap['height']} (profile #$profileId)", $profileId);
 
-// Version dau: fixed OFF + auto -> giu hanh vi cu (khong cham window)
-if (!$snap['fixed'] && $snap['position'] === 'auto') {
+// Placement dich tu launch (uu tien so 1): Chrome da co --window-position truoc Popen,
+// day chi la guard verify/correct neu Chrome tu restore sai monitor.
+$placeRect = $snap['placement_rect'] ?? null;
+$placeMonName = (string)($snap['placement_monitor'] ?? '');
+if (is_array($placeRect) && isset($placeRect['x'], $placeRect['y'], $placeRect['w'], $placeRect['h'])) {
+    $placeRect = ['x' => (int)$placeRect['x'], 'y' => (int)$placeRect['y'],
+                  'w' => (int)$placeRect['w'], 'h' => (int)$placeRect['h']];
+} else {
+    $placeRect = null;
+}
+// Version dau: fixed OFF + auto + khong placement -> giu hanh vi cu (khong cham window)
+if (!$snap['fixed'] && $snap['position'] === 'auto' && $placeRect === null) {
     aw_log('[Window] Fixed OFF + Auto: khong ep kich thuoc/vi tri', $profileId);
     exit(0);
 }
@@ -102,11 +113,24 @@ try {
 } catch (Throwable $e) {
 }
 
-// ---- Resolve monitor (fallback Primary neu monitor chon bi thao) ----
+// ---- Resolve monitor: placement dich uu tien; fallback Primary neu bi thao ----
+$placeMon = $placeMonName !== '' ? WindowPlacementManager::findByDevice($placeMonName) : null;
+if ($placeMonName !== '' && $placeMon === null) {
+    SyncLogger::warn('window_apply', "[Window] Placement monitor $placeMonName mat -> fallback", $profileId);
+    WindowPlacementManager::refreshMonitors();
+    $placeMon = $placeMonName !== '' ? WindowPlacementManager::findByDevice($placeMonName) : null;
+}
 $monId = $snap['monitor'] === 'primary' ? null : (int)$snap['monitor'];
-$wa = SyncLayoutManager::workArea($monId);
-if ($wa === null) {
-    $wa = SyncLayoutManager::workArea(null);
+$wa = null;
+if ($placeMon !== null) {
+    $wa = ['x' => $placeMon['work_left'], 'y' => $placeMon['work_top'],
+            'w' => $placeMon['work_width'], 'h' => $placeMon['work_height'],
+            'monitorId' => $placeMon['id'], 'monitorName' => $placeMon['device_name']];
+} else {
+    $wa = SyncLayoutManager::workArea($monId);
+    if ($wa === null) {
+        $wa = SyncLayoutManager::workArea(null);
+    }
 }
 if ($wa === null) {
     $msg = '[Window] Khong lay duoc working area monitor, bo qua';
@@ -119,7 +143,15 @@ if ($monId !== null && (int)$wa['monitorId'] !== $monId) {
 }
 aw_log("[Window] Monitor: {$wa['monitorName']} (id {$wa['monitorId']})", $profileId);
 
-// ---- Tinh rect dich ----
+// ---- Tinh rect dich (placement uu tien tuyet doi) ----
+if ($placeRect !== null) {
+    // Giu am hop le, chi kep trong work area CHINH monitor dich
+    $W = max(200, min($placeRect['w'], $wa['w']));
+    $H = max(150, min($placeRect['h'], $wa['h']));
+    $x = max($wa['x'], min($placeRect['x'], $wa['x'] + $wa['w'] - $W));
+    $y = max($wa['y'], min($placeRect['y'], $wa['y'] + $wa['h'] - $H));
+    $snap['position'] = '__placement__';
+} else {
 $W = $snap['fixed'] ? $snap['width'] : (int)($curRect['w'] ?? $snap['width']);
 $H = $snap['fixed'] ? $snap['height'] : (int)($curRect['h'] ?? $snap['height']);
 $W = min($W, $wa['w']);
@@ -165,16 +197,44 @@ switch ($snap['position']) {
     default: // auto: giu vi tri hien tai, kep trong man hinh
         break;
 }
-// Kep trong working area: khong bao gio mo ngoai vung nhin thay
+// Kep trong working area CHINH monitor dich (giu am: wa.x co the -1920)
 $x = max($wa['x'], min($x, $wa['x'] + $wa['w'] - $W));
 $y = max($wa['y'], min($y, $wa['y'] + $wa['h'] - $H));
+} // end non-placement branch
 
 aw_log("[Window] Applying global window settings: {$W}x{$H} @ ($x,$y) mode={$snap['position']}", $profileId);
+try {
+    $profRow = WindowPlacementManager::profileRow($profileId);
+} catch (Throwable $e) {
+    $profRow = ['id' => $profileId];
+}
 $r = SyncWindowManager::moveResize((int)$win['hwnd'], $x, $y, $W, $H);
 if ($r['ok']) {
     $rc = $r['rect'] ?? null;
     $got = is_array($rc) ? " -> thuc te {$rc['w']}x{$rc['h']} @ ({$rc['x']},{$rc['y']})" : '';
     aw_log('[Window] Window configuration applied' . $got, $profileId);
+    // Placement guard chung: verify 100/350/800/1500ms trong ~1600ms (Chrome hay tu restore ve primary)
+    $tMon = $placeMon ?? WindowPlacementManager::monitorForRect($x, $y, $W, $H) ?? WindowPlacementManager::primary();
+    $tRect = ['x' => $x, 'y' => $y, 'w' => $W, 'h' => $H];
+    SyncLogger::info('placement', '[HWND] profile=#' . $profileId . ' hwnd=' . (int)$win['hwnd'], $profileId);
+    $checks = [100, 350, 800, 1500];
+    $t0 = microtime(true);
+    $prev = 0;
+    foreach ($checks as $ms) {
+        usleep(max(0, ($ms - $prev) * 1000));
+        $prev = $ms;
+        $v = WindowPlacementManager::verify_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
+        if (!$v['ok']) {
+            WindowPlacementManager::correct_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
+            SyncLogger::info('placement', '[PLACEMENT CORRECT] profile=#' . $profileId
+                . ' actual=' . $v['actual'] . ' target=' . ($tMon['device_name'] ?? ''), $profileId);
+        } else {
+            SyncLogger::debug('placement', '[PLACEMENT VERIFY] profile=#' . $profileId
+                . ' expected=' . $v['expected'] . ' actual=' . $v['actual'] . ' result=OK', $profileId);
+        }
+        if ((microtime(true) - $t0) * 1000 >= WindowPlacementManager::GUARD_DURATION_MS) break;
+    }
+    SyncLogger::info('placement', '[PLACEMENT STABLE] profile=#' . $profileId, $profileId);
     exit(0);
 }
 SyncLogger::warn('window_apply', '[Window] Apply that bai: ' . ($r['error'] ?? 'unknown'), $profileId);

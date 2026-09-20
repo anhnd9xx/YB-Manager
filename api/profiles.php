@@ -11,6 +11,15 @@ try {
             require_once __DIR__ . '/../sync/AccountRepository.php';
             require_once __DIR__ . '/../sync/TabSessionStore.php';
             AccountRepository::ensureAll();
+            $hasPlace = false;
+            $hasEval = false;
+            try {
+                $c = db()->query("SHOW COLUMNS FROM profiles LIKE 'monitor_mode'")->fetch();
+                $hasPlace = (bool)$c;
+                $e = db()->query("SHOW COLUMNS FROM account_states LIKE 'eval_status'")->fetch();
+                $hasEval = (bool)$e;
+            } catch (Throwable $e) {
+            }
             $profiles = db()->query(
                 'SELECT p.*, pr.host AS proxy_host, pr.port AS proxy_port, pr.protocol AS proxy_protocol,
                         pr.username AS proxy_user, pr.status AS proxy_status,
@@ -26,6 +35,18 @@ try {
                  LEFT JOIN account_states s ON s.profile_id = p.id
                  ORDER BY p.id DESC'
             )->fetchAll();
+            // Eval status rieng biet runtime Chrome (khong tron). Watchdog 1 lan/list.
+            $evalMap = [];
+            if ($hasEval) {
+                try {
+                    require_once __DIR__ . '/../sync/ChannelEvaluationManager.php';
+                    ChannelEvaluationManager::watchdog();
+                    foreach (db()->query('SELECT profile_id, eval_status, last_known_status, last_successful_check_at, last_attempt_at, last_error FROM account_states') as $er) {
+                        $evalMap[(int)$er['profile_id']] = $er;
+                    }
+                } catch (Throwable $e) {
+                }
+            }
             // Dong bo trang thai voi thuc te (Chrome bi tat/ngat tay thi cap nhat lai)
             $tabCounts = TabSessionStore::counts(array_map(fn($r) => (int)$r['id'], $profiles));
             foreach ($profiles as &$row) {
@@ -33,6 +54,11 @@ try {
                 $tc = $tabCounts[(int)$row['id']] ?? ['count' => 0, 'saved_at' => null];
                 $row['tab_count_saved'] = (int)$tc['count'];
                 $row['tab_saved_at'] = $tc['saved_at'];
+                $em = $evalMap[(int)$row['id']] ?? null;
+                $row['eval_status'] = $em ? (string)($em['eval_status'] ?? 'UNCHECKED') : 'UNCHECKED';
+                $row['eval_known'] = $em ? ($em['last_known_status'] ?? null) : null;
+                $row['eval_attempt'] = $em ? ($em['last_attempt_at'] ?? null) : null;
+                $row['eval_error'] = $em ? ($em['last_error'] ?? null) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);
@@ -191,7 +217,13 @@ try {
             if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
 
             // Lay gia tri hien tai de giu nguyen khi request khong gui (vd: doi ten, sua handle)
-            $cur = db()->prepare('SELECT name, platform, user_agent, webrtc_protection, proxy_id FROM profiles WHERE id = ?');
+            $hasPlace = false;
+            try {
+                $hasPlace = (bool)db()->query("SHOW COLUMNS FROM profiles LIKE 'monitor_mode'")->fetch();
+            } catch (Throwable $e) {
+            }
+            $cur = db()->prepare('SELECT name, platform, user_agent, webrtc_protection, proxy_id'
+                . ($hasPlace ? ', monitor_mode, fixed_monitor_device' : '') . ' FROM profiles WHERE id = ?');
             $cur->execute([$id]);
             $curRow = $cur->fetch();
             if (!$curRow) json_out(['ok' => false, 'message' => 'Khong tim thay profile'], 404);
@@ -215,17 +247,45 @@ try {
                 ? (!empty($b['proxy_id']) ? (int)$b['proxy_id'] : null)
                 : $curRow['proxy_id'];
 
-            $stmt = db()->prepare('UPDATE profiles SET name=?, platform=?, channel_handle=?, user_agent=?, webrtc_protection=?, proxy_id=? WHERE id=?');
-            $stmt->execute([
-                $newName,
-                $newPlatform,
-                $b['channel_handle'] ?? null,
-                $ua,
-                $webrtc,
-                $proxyId,
-                $id,
-            ]);
+            $monMode = $hasPlace
+                ? (isset($b['monitor_mode']) ? strtoupper(trim((string)$b['monitor_mode'])) : (string)($curRow['monitor_mode'] ?? 'LAST'))
+                : 'LAST';
+            if (!in_array($monMode, ['LAST', 'FIXED', 'AUTO'], true)) $monMode = 'LAST';
+            $fixedMon = $hasPlace
+                ? trim((string)($b['fixed_monitor_device'] ?? ($curRow['fixed_monitor_device'] ?? '')))
+                : '';
+            if ($hasPlace) {
+                $stmt = db()->prepare('UPDATE profiles SET name=?, platform=?, channel_handle=?, user_agent=?, webrtc_protection=?, proxy_id=?, monitor_mode=?, fixed_monitor_device=? WHERE id=?');
+                $stmt->execute([$newName, $newPlatform, $b['channel_handle'] ?? null, $ua, $webrtc, $proxyId, $monMode, $fixedMon, $id]);
+            } else {
+                $stmt = db()->prepare('UPDATE profiles SET name=?, platform=?, channel_handle=?, user_agent=?, webrtc_protection=?, proxy_id=? WHERE id=?');
+                $stmt->execute([$newName, $newPlatform, $b['channel_handle'] ?? null, $ua, $webrtc, $proxyId, $id]);
+            }
             json_out(['ok' => true]);
+            break;
+
+        // Luu placement hien tai (user keo tay xong bam luu / Stop tu luu)
+        case 'save_placement':
+            $b = json_body();
+            $pid = (int)($b['id'] ?? $_GET['id'] ?? 0);
+            if ($pid <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $st = db()->prepare('SELECT * FROM profiles WHERE id=?');
+            $st->execute([$pid]);
+            $pr = $st->fetch();
+            if (!$pr) json_out(['ok' => false, 'message' => 'Khong tim thay profile'], 404);
+            require_once __DIR__ . '/../sync/WindowPlacementManager.php';
+            $hwnd = null;
+            try {
+                foreach (SyncWindowDiscovery::discover(false)['windows'] as $w) {
+                    if ($w->profileId !== null && (int)$w->profileId === $pid && $w->class === 'Chrome_WidgetWin_1' && $w->visible) {
+                        $hwnd = $w->hwnd;
+                        break;
+                    }
+                }
+            } catch (Throwable $e) {
+            }
+            $ok = WindowPlacementManager::save_window_placement($pr, $hwnd);
+            json_out(['ok' => $ok]);
             break;
 
         case 'delete':

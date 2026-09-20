@@ -152,6 +152,7 @@ try {
             if (isset($b['sizeBalance']) && $b['sizeBalance'] !== '') $opts['sizeBalance'] = (string)$b['sizeBalance'];
             if (isset($b['sizeMode']) && $b['sizeMode'] !== '') $opts['sizeMode'] = (string)$b['sizeMode'];
             if (!empty($b['skipMinimized'])) $opts['skipMinimized'] = true;
+            if (!empty($b['allowLocked'])) $opts['allowLocked'] = true;
             if (isset($b['cols'])) $opts['cols'] = (int)$b['cols'];
             if (isset($b['minW'])) $opts['minW'] = (int)$b['minW'];
             if (isset($b['minH'])) $opts['minH'] = (int)$b['minH'];

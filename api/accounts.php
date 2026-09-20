@@ -8,6 +8,7 @@ declare(strict_types=1);
  * GET/POST ?action=monitor_start|monitor_stop|monitor_status
  */
 require_once __DIR__ . '/../sync/AccountService.php';
+require_once __DIR__ . '/../sync/ChannelEvaluationManager.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? 'list';
@@ -74,14 +75,59 @@ try {
 
         case 'get': {
             $id = (int)($_GET['id'] ?? 0);
-            $st = AccountRepository::ensure($id);
+            $st = ChannelEvaluationManager::get_evaluation($id);
             if (!$st) json_out(['ok' => false, 'message' => 'Khong thay account'], 404);
             $p = db()->prepare('SELECT id, name, status, last_opened, created_at FROM profiles WHERE id=?');
             $p->execute([$id]);
             $prof = $p->fetch() ?: null;
             $st['managed_days'] = (int)floor((time() - strtotime((string)$st['imported_at'])) / 86400);
+            // Hien thi khong "unknown" mai: fallback UI label khi field thieu
             json_out(['ok' => true, 'data' => ['state' => $st, 'profile' => $prof,
-                'history' => AccountRepository::history($id, 100)]]);
+                'history' => ChannelEvaluationManager::get_history($id, 100)]]);
+            break;
+        }
+
+        // Batch moi: start 1 lan (mark CHECKING) -> UI goi chunk (<=4) lap lai
+        case 'eval_start': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $ids = array_map('intval', (array)($b['ids'] ?? []));
+            $conc = (int)($b['concurrency'] ?? ChannelEvaluationManager::CONCURRENCY_DEFAULT);
+            $r = ChannelEvaluationManager::evaluate_many($ids, $conc);
+            if (empty($r['ok'])) json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], 400);
+            json_out(['ok' => true, 'data' => $r]);
+            break;
+        }
+
+        case 'eval_chunk': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $bid = (string)($b['batch_id'] ?? $b['batch'] ?? ($_GET['batch_id'] ?? ''));
+            if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+            $r = ChannelEvaluationManager::evaluate_chunk($bid, (int)($b['limit'] ?? ChannelEvaluationManager::CONCURRENCY_DEFAULT));
+            if (empty($r['ok'])) json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], 400);
+            json_out(['ok' => true, 'data' => $r]);
+            break;
+        }
+
+        case 'eval_cancel': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $bid = (string)($b['batch_id'] ?? $b['batch'] ?? ($_GET['batch_id'] ?? ''));
+            if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+            json_out(['ok' => true, 'data' => ['cancelled' => ChannelEvaluationManager::cancel_batch($bid)]]);
+            break;
+        }
+
+        case 'eval_state': {
+            $bid = (string)($_GET['batch_id'] ?? '');
+            if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+            $r = ChannelEvaluationManager::batch_state($bid);
+            if ($r === null) json_out(['ok' => false, 'message' => 'Batch khong ton tai'], 404);
+            json_out(['ok' => true, 'data' => ['batch' => $r, 'done' => ($r['status'] ?? '') !== 'running']]);
+            break;
+        }
+
+        case 'eval_stage': {
+            $id = (int)($_GET['id'] ?? 0);
+            json_out(['ok' => true, 'data' => ['stage' => ChannelEvaluationManager::getStage($id)]]);
             break;
         }
 
@@ -106,7 +152,16 @@ try {
             $b = $method === 'GET' ? $_GET : json_body();
             $id = (int)($b['id'] ?? 0);
             if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
-            json_out(['ok' => true, 'data' => AccountService::evaluateProfile($id)]);
+            // Di qua manager moi (structured result + giu last_known khi loi tool)
+            $r = ChannelEvaluationManager::evaluate_one($id);
+            // Tuong thich UI cu: gop them stage/stability tu state moi nhat
+            $st = AccountRepository::load($id);
+            if ($st) {
+                $r['stage'] = $st['stage'] ?? null;
+                $r['stability'] = isset($st['stability']) ? (int)$st['stability'] : null;
+                $r['confidence'] = isset($st['confidence']) ? (int)$st['confidence'] : null;
+            }
+            json_out(['ok' => true, 'data' => $r]);
             break;
         }
 

@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS profiles (
     user_data_dir VARCHAR(255) NOT NULL,
     status ENUM('running','stopped','error') DEFAULT 'stopped',
     sync_role ENUM('NONE','MAIN','CONTROLLED') NOT NULL DEFAULT 'NONE',
+    monitor_mode VARCHAR(10) NOT NULL DEFAULT 'LAST',
+    fixed_monitor_device VARCHAR(64) NOT NULL DEFAULT '',
+    last_monitor_device VARCHAR(64) NOT NULL DEFAULT '',
+    last_window_rect TEXT DEFAULT NULL,
+    last_window_rect_norm TEXT DEFAULT NULL,
+    last_window_state VARCHAR(10) NOT NULL DEFAULT 'normal',
     last_opened DATETIME DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     debug_port INT DEFAULT NULL,
@@ -106,6 +112,13 @@ CREATE TABLE IF NOT EXISTS account_states (
     stability INT NOT NULL DEFAULT 100,
     confidence INT NOT NULL DEFAULT 0,
     stage VARCHAR(30) NOT NULL DEFAULT 'NEW',
+    eval_status VARCHAR(24) NOT NULL DEFAULT 'UNCHECKED',
+    last_known_status VARCHAR(24) DEFAULT NULL,
+    last_successful_check_at DATETIME DEFAULT NULL,
+    last_attempt_at DATETIME DEFAULT NULL,
+    last_error VARCHAR(500) DEFAULT NULL,
+    last_duration_ms INT DEFAULT NULL,
+    eval_stage VARCHAR(24) DEFAULT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -119,8 +132,27 @@ CREATE TABLE IF NOT EXISTS account_history (
     stage VARCHAR(30) NOT NULL,
     reasons TEXT DEFAULT NULL,
     warnings TEXT DEFAULT NULL,
+    eval_status VARCHAR(24) DEFAULT NULL,
+    prev_status VARCHAR(24) DEFAULT NULL,
+    duration_ms INT DEFAULT NULL,
+    reason VARCHAR(200) DEFAULT NULL,
     INDEX idx_profile_time (profile_id, checked_at),
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS eval_batches (
+    batch_id VARCHAR(40) PRIMARY KEY,
+    ids TEXT NOT NULL,
+    total INT NOT NULL DEFAULT 0,
+    pending INT NOT NULL DEFAULT 0,
+    running INT NOT NULL DEFAULT 0,
+    completed INT NOT NULL DEFAULT 0,
+    failed INT NOT NULL DEFAULT 0,
+    cancelled INT NOT NULL DEFAULT 0,
+    status VARCHAR(12) NOT NULL DEFAULT 'running',
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============ Tab Session Manager (luu/khoi phuc tab theo profile) ============

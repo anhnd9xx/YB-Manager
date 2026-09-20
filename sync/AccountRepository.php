@@ -110,14 +110,16 @@ class AccountRepository
         }
     }
 
-    /** Lich su moi nhat truoc (limit 200). reasons/warnings decode san. */
-    public static function history(int $profileId, int $limit = 200): array
+    /** Lich su moi nhat truoc (limit 100). reasons/warnings decode san. */
+    public static function history(int $profileId, int $limit = 100): array
     {
         try {
-            $limit = max(1, min(500, $limit));
+            $limit = max(1, min(100, $limit));
+            $hasEval = (bool)db()->query("SHOW COLUMNS FROM account_history LIKE 'eval_status'")->fetch();
             $st = db()->prepare(
-                'SELECT checked_at, stability, confidence, stage, reasons, warnings
-                 FROM account_history WHERE profile_id=? ORDER BY id DESC LIMIT ' . $limit
+                'SELECT checked_at, stability, confidence, stage, reasons, warnings'
+                . ($hasEval ? ', eval_status, prev_status, duration_ms, reason' : '')
+                . ' FROM account_history WHERE profile_id=? ORDER BY id DESC LIMIT ' . $limit
             );
             $st->execute([$profileId]);
             $rows = $st->fetchAll();

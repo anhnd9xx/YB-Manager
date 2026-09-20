@@ -1,14 +1,20 @@
 <?php
 declare(strict_types=1);
 /**
- * api/tabsessions.php - Tab Session Manager endpoints.
+ * api/tabsessions.php - Tab Session + Tab Batch endpoints.
  * GET  ?action=tabs&id=      tabs SONG (cho panel, khong redraw lien tuc)
  * GET  ?action=get&id=       session da luu (current + last_good)
  * POST ?action=save {id}     snapshot ngay (CDP, timeout ngan)
- * POST ?action=restore {id}  khoi phuc ngay tren Chrome dang chay
+ * POST ?action=restore {id}  khoi phuc batch (1 WS, ordered, khong sleep tung tab)
  * POST ?action=clear {id}    xoa session
+ * POST ?action=open_batch {id, urls[], preserve_order, activate, avoid_duplicate_tabs}
+ * POST ?action=close_batch {id, targetIds[]}
+ * POST ?action=close_all {id, keep_one}
+ * GET  ?action=batch_state&id=   tien do batch (UI poll, khong refresh full)
+ * POST ?action=batch_cancel {id}
  */
 require_once __DIR__ . '/../sync/TabSessionStore.php';
+require_once __DIR__ . '/../sync/TabBatchManager.php';
 require_once __DIR__ . '/../sync/SyncLogger.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
@@ -114,45 +120,76 @@ try {
             $id = (int)($b['id'] ?? 0);
             $p = tabs_profile($id);
             if (!$p) json_out(['ok' => false, 'message' => 'Khong tim thay profile'], 404);
-            $port = (int)($p['debug_port'] ?? 0);
-            if (($p['status'] ?? '') !== 'running' || !cdp_reachable($port)) {
-                json_out(['ok' => false, 'message' => 'Chrome chua chay'], 409);
+            // Batch restore: 1 WS browser-level, ordered fast create, khong sleep tung tab
+            $r = TabBatchManager::restore_tabs($id);
+            if (empty($r['ok'])) {
+                $code = ($r['message'] ?? '') === 'Chrome chua chay' ? 409 : 400;
+                if (isset($r['duplicate'])) $code = 409;
+                json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], $code);
             }
-            $r = TabSessionStore::getRestorable($id);
-            if (($r['status'] ?? 'none') === 'empty') {
-                json_out(['ok' => false, 'message' => 'Session rong (khong co tab de khoi phuc)'], 404);
+            json_out(['ok' => true, 'count' => $r['count'] ?? 0, 'ms' => $r['ms'] ?? 0,
+                      'failed' => $r['failed'] ?? 0, 'batch_id' => $r['batch_id'] ?? null]);
+            break;
+        }
+
+        case 'open_batch': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $rawUrls = $b['urls'] ?? $b['list'] ?? [];
+            if (is_string($rawUrls)) $rawUrls = preg_split('/\r?\n/', $rawUrls);
+            $r = TabBatchManager::open_tabs($id, (array)$rawUrls, [
+                'preserve_order' => !array_key_exists('preserve_order', $b) || !empty($b['preserve_order']),
+                'activate' => (string)($b['activate'] ?? 'LAST'),
+                'avoid_duplicate_tabs' => !empty($b['avoid_duplicate_tabs']),
+            ]);
+            if (empty($r['ok'])) {
+                $code = isset($r['duplicate']) ? 409 : ((($r['message'] ?? '') === 'Chrome chua chay') ? 409 : 400);
+                json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], $code);
             }
-            if (($r['status'] ?? 'none') !== 'session') {
-                json_out(['ok' => false, 'message' => 'Khong co session de khoi phuc'], 404);
+            json_out(['ok' => true, 'count' => $r['count'] ?? 0, 'failed' => $r['failed'] ?? 0,
+                      'cancelled' => $r['cancelled'] ?? 0, 'ms' => $r['ms'] ?? 0,
+                      'batch_id' => $r['batch_id'] ?? null, 'created' => $r['created'] ?? []]);
+            break;
+        }
+
+        case 'close_batch': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $ids = (array)($b['targetIds'] ?? $b['ids'] ?? []);
+            $r = TabBatchManager::close_tabs($id, $ids);
+            if (empty($r['ok'])) {
+                $code = isset($r['duplicate']) ? 409 : 400;
+                json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], $code);
             }
-            $sess = $r['session'];
-            $t0 = microtime(true);
-            // Tab blank hien tai? (restore dung tab dau, khong thua New Tab)
-            $blankId = null;
-            foreach (cdp_page_targets($port) as $t) {
-                if (!TabSessionManager::is_restorable_url((string)($t['url'] ?? ''))) {
-                    $blankId = (string)$t['id'];
-                    break;
-                }
-            }
-            $steps = TabSessionManager::restoreSteps($sess['tabs'], $blankId !== null);
-            $opened = [];
-            foreach ($steps as $s) {
-                if ($s['action'] === 'navigate' && $blankId !== null) {
-                    if (tabs_navigate($port, $blankId, $s['url'])) $opened[] = $blankId;
-                } else {
-                    $nid = tabs_open_new($port, $s['url']);
-                    if ($nid !== null) $opened[] = $nid;
-                }
-                usleep(300000);
-            }
-            // Active lai dung tab da luu
-            $ai = min((int)$sess['active_index'], count($opened) - 1);
-            if ($ai >= 0 && isset($opened[$ai])) tabs_activate($port, $opened[$ai]);
-            $ms = (int)round((microtime(true) - $t0) * 1000);
-            SyncLogger::info('tab_session', "[SESSION] #$id restored " . count($opened) . " tabs: {$ms}ms", $id);
-            log_action($id, 'tab_restore', count($opened) . ' tabs');
-            json_out(['ok' => true, 'count' => count($opened), 'ms' => $ms]);
+            json_out(['ok' => true, 'closed' => $r['closed'] ?? 0, 'failed' => $r['failed'] ?? 0,
+                      'ms' => $r['ms'] ?? 0, 'batch_id' => $r['batch_id'] ?? null]);
+            break;
+        }
+
+        case 'close_all': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $r = TabBatchManager::close_all_tabs($id, !empty($b['keep_one']));
+            if (empty($r['ok'])) json_out(['ok' => false, 'message' => $r['message'] ?? 'Loi'], 400);
+            json_out(['ok' => true, 'closed' => $r['closed'] ?? 0, 'ms' => $r['ms'] ?? 0]);
+            break;
+        }
+
+        case 'batch_state': {
+            $id = (int)($_GET['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            json_out(['ok' => true, 'data' => TabBatchManager::get_batch_state($id)]);
+            break;
+        }
+
+        case 'batch_cancel': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            json_out(['ok' => true, 'cancelled' => TabBatchManager::cancel_batch($id)]);
             break;
         }
 

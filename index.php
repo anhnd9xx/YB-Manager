@@ -103,7 +103,8 @@
           <button class="btn btn-sm" onclick="openSelected()">▶ Mở đã chọn</button>
           <button class="btn btn-sm" onclick="closeSelected()">■ Đóng đã chọn</button>
           <button class="btn btn-sm tb-sec" onclick="assignProxySelected()">⇄ Gán proxy</button>
-          <button class="btn btn-sm tb-sec" onclick="evaluateSelected()" title="Đánh giá account đã chọn">✓ Đánh giá</button>
+          <button class="btn btn-sm tb-sec" id="btn-eval-bulk" onclick="evaluateSelected()" title="Đánh giá các kênh đã chọn (chọn ít nhất một kênh)">✓ Đánh giá</button>
+          <button class="btn btn-sm tb-sec hidden" id="btn-eval-cancel" onclick="evalCancelBatch()" title="Hủy batch đang chạy">✕ Hủy</button>
           <button class="btn btn-sm btn-danger tb-sec" onclick="deleteSelected()">🗑 Xóa đã chọn</button>
           <div class="arr-wrap">
             <div class="dropdown">
@@ -226,6 +227,16 @@
             <option value="REVIEW_REQUIRED">Cần xem</option>
             <option value="ACTION_REQUIRED">Cần xử lý</option>
             <option value="UNAVAILABLE">Mất kết nối</option>
+          </select>
+          <select id="profile-filter-eval" class="filter-select" onchange="reloadProfilesView()" title="Lọc theo trạng thái đánh giá">
+            <option value="">Mọi trạng thái ĐG</option>
+            <option value="ACTIVE">Hoạt động</option>
+            <option value="UNCHECKED">Chưa kiểm tra</option>
+            <option value="CHECKING">Đang kiểm tra</option>
+            <option value="LOGIN_REQUIRED">Cần đăng nhập</option>
+            <option value="VERIFICATION_REQUIRED">Cần xác minh</option>
+            <option value="UNAVAILABLE">Không truy cập được</option>
+            <option value="ERROR">Lỗi kiểm tra</option>
           </select>
           <select id="profile-filter-channel" class="filter-select" onchange="reloadProfilesView()" title="Lọc theo kênh YouTube">
             <option value="">Mọi kênh YT</option>
@@ -718,6 +729,14 @@
       </select>
       <label>Proxy</label>
       <select id="pf-proxy"><option value="">Không dùng proxy</option></select>
+      <label>Màn hình</label>
+      <select id="pf-monitor-mode" onchange="pfRefreshMonitorHint()">
+        <option value="LAST">Nhớ màn hình lần cuối</option>
+        <option value="AUTO">Tự động</option>
+        <option value="FIXED">Màn hình cố định…</option>
+      </select>
+      <select id="pf-monitor-fixed" class="hidden" style="margin-top:6px"></select>
+      <div class="hint" id="pf-monitor-hint"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('profile-modal')">Hủy</button>
