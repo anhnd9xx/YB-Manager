@@ -23,6 +23,7 @@ require_once __DIR__ . '/EvalStates.php';
 require_once __DIR__ . '/YoutubeSignals.php';
 require_once __DIR__ . '/AuthEvidenceCollector.php';
 require_once __DIR__ . '/AuthDecisionEngine.php';
+require_once __DIR__ . '/ChannelPresenceEvidenceCollector.php';
 require_once __DIR__ . '/EvaluationTarget.php';
 
 class HealthCheckPipeline
@@ -369,80 +370,67 @@ class HealthCheckPipeline
             $loginEv = $yDec['status'] === 'SIGNED_IN' ? 'ok'
                 : ($yDec['status'] === 'SIGNED_OUT' || $gDec['status'] === 'SIGNED_OUT' ? 'failed' : 'unknown');
             $ytEvSig = $loginEv;
+            $authLegacy = $yDec['status'] === 'SIGNED_IN' && $gDec['status'] === 'SIGNED_IN' ? 'LOGGED_IN'
+                : ($challenge || $recovery ? 'VERIFICATION_REQUIRED'
+                : (($yDec['status'] === 'SIGNED_OUT' || $gDec['status'] === 'SIGNED_OUT') ? 'LOGIN_REQUIRED' : 'UNKNOWN'));
             $signals = ['login' => $loginEv, 'session' => $pageError ? 'unknown' : 'ok', 'youtube' => $ytEvSig,
                 'channel' => 'unknown', 'channelName' => null,
                 'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => false,
-                'auth' => $yDec['status'] === 'SIGNED_IN' && $gDec['status'] === 'SIGNED_IN' ? 'LOGGED_IN'
-                    : ($challenge || $recovery ? 'VERIFICATION_REQUIRED'
-                    : (($yDec['status'] === 'SIGNED_OUT' || $gDec['status'] === 'SIGNED_OUT') ? 'LOGIN_REQUIRED' : 'UNKNOWN')),
+                'auth' => $authLegacy,
                 'presence' => 'NOT_CHECKED', 'presence_evidence' => null,
             ];
+            $youtubeStatus = $authLegacy === 'LOGGED_IN' ? 'ACCESSIBLE'
+                : ($authLegacy === 'LOGIN_REQUIRED' ? 'LOGIN_REQUIRED'
+                : ($pageError ? 'UNKNOWN' : 'NOT_CHECKED'));
+            $summaryAuth = $authLegacy === 'LOGGED_IN' ? 'SIGNED_IN'
+                : ($authLegacy === 'LOGIN_REQUIRED' ? 'SIGNED_OUT'
+                : ($authLegacy === 'VERIFICATION_REQUIRED' ? 'VERIFICATION_REQUIRED' : 'UNKNOWN'));
+            $summary = EvalStates::buildSummary(['auth' => $summaryAuth, 'youtube' => $youtubeStatus,
+                'presence' => 'NOT_CHECKED', 'access' => 'NOT_CHECKED', 'security' => $security,
+                'attempt' => $outcome === 'success' ? 'SUCCESS' : 'FAILED']);
             return self::finish($stages, $signals, $outcome, $code, $err, $chStatus, $err, $conf, null, $timings, $t0, $meta
                 + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
+                    'youtube_status' => $youtubeStatus,
                     'presence' => 'NOT_CHECKED', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
-                    'security' => $security, 'evidence_summary' => $evSummary]);
+                    'security' => $security, 'evidence_summary' => $evSummary,
+                    'account_channel_state' => $summary['account_channel_state'], 'readiness' => $summary['readiness']]);
         }
 
         // ---- CHECK_CHANNEL (PRESENCE + ACCESS): chi khi auth SIGNED_IN (§25-§27) ----
+        // Deadline 3-6s (§35). Retry RIENG channel toi da 1 lan neu transient (§36-§38),
+        // reuse evidence login da pass (khong chay lai Browser/CDP/Login) (§37).
         $t = microtime(true);
-        EvaluationTarget::navigate($port, $tabId, 'https://www.youtube.com/@me');
-        AccountDataCollector::waitLoad($port, $tabId, $deadline, self::TIMEOUTS['CHECK_CHANNEL']);
-        AccountDataCollector::waitUrlChange($port, $tabId, '/@me', $deadline, 2);
-        $chDict = AccountDataCollector::eval($port, $tabId, YoutubeSignals::channelEvidenceJs());
-        $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
-        $presence = 'UNKNOWN';
-        $presenceConf = 'LOW';
-        $presenceEv = null;
-        $access = 'NOT_CHECKED';
-        $chName = null;
-        $restricted = false;
-        if (is_array($chDict)) {
-            $challenge = $challenge || !empty($chDict['ch']);
-            $recovery = $recovery || !empty($chDict['rc']);
-            if ($recovery) $security = 'RECOVERY';
-            elseif (!empty($chDict['ch'])) $security = 'CHALLENGE';
-            $restricted = (bool)($chDict['restricted'] ?? false);
-            if ($restricted) $security = 'RESTRICTED';
-            $u = (string)($chDict['u'] ?? '');
-            $body = (string)($chDict['body'] ?? '');
-            $isPlaceholder = (bool)preg_match('#/(@me|me|mine|current)([/?#]|$)#i', $u);
-            $looksChannel = (bool)preg_match('#youtube\.com/(@|channel/|c/)#i', $u)
-                && !preg_match('#/signin|/signup#i', $u) && !$isPlaceholder;
-            $createMarkers = !empty($chDict['create']);
-            if ($looksChannel && !$createMarkers) {
-                // Trich handle that, loai placeholder (@me/...) (§8)
-                $nm = null;
-                if (preg_match('~youtube\.com/(@[^/?#]+)~i', $u, $m)) $nm = urldecode($m[1]);
-                elseif (preg_match('~youtube\.com/(channel|c)/([^/?#]+)~i', $u, $m)) $nm = $m[2];
-                if ($nm !== null && preg_match('/^(@me|me|mine|current)$/i', ltrim($nm, '@'))) {
-                    $presence = 'UNKNOWN';
-                    $presenceConf = 'LOW';
-                } else {
-                    $presence = 'HAS_CHANNEL';
-                    $presenceConf = 'HIGH'; // redirect that + khong create marker = strong
-                    $presenceEv = 'youtube_channel_identity_confirmed';
-                    $chName = $nm;
-                    $access = $restricted ? 'RESTRICTED' : 'ACCESSIBLE';
-                }
-            } elseif ($createMarkers && !$looksChannel) {
-                // Authenticated + explicit create marker = verified NO_CHANNEL (§26)
-                $presence = 'NO_CHANNEL';
-                $presenceConf = 'HIGH';
-                $presenceEv = 'authenticated_account_without_channel';
-                $access = 'NOT_CHECKED';
-            } else {
-                // Mo ho => UNKNOWN (§26: khong lay HTTP 200 lam evidence)
-                $presence = 'UNKNOWN';
-                $presenceConf = 'LOW';
+        $chDict = self::probeChannelOnce($port, $tabId, $deadline);
+        $chDec = ChannelPresenceEvidenceCollector::decide($chDict, true);
+        if (ChannelPresenceEvidenceCollector::shouldRetry($chDec) && !$over()) {
+            usleep(500000); // 1 retry cho transient
+            if (!$over()) {
+                $chDict = self::probeChannelOnce($port, $tabId, $deadline);
+                $chDec = ChannelPresenceEvidenceCollector::decide($chDict, true);
             }
         }
-        if ($presence === 'UNKNOWN') {
-            $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
+        $timings['channel'] = (int)round((microtime(true) - $t) * 1000);
+        $presence = $chDec['presence'];
+        $presenceConf = $chDec['confidence'];
+        $presenceEv = $presence === 'HAS_CHANNEL' ? 'youtube_channel_identity_confirmed'
+            : ($presence === 'NO_CHANNEL' ? 'authenticated_account_without_channel' : null);
+        $access = $chDec['access'];
+        $chName = $chDec['channel_name'];
+        $restricted = $chDec['restricted'];
+        $challenge = $challenge || $chDec['challenge'];
+        $recovery = $recovery || $chDec['recovery'];
+        if ($recovery) $security = 'RECOVERY';
+        elseif ($chDec['challenge']) $security = 'CHALLENGE';
+        if ($restricted) $security = 'RESTRICTED';
+        // Stage result: NO_CHANNEL la PASS value (khong phai FAIL) (§45)
+        if ($presence === 'HAS_CHANNEL' || $presence === 'NO_CHANNEL') {
+            $mark(self::stage('CHECK_CHANNEL', 'PASS', null,
+                $presence === 'NO_CHANNEL' ? 'no_channel' : null, $timings['channel']));
+        } elseif ($presence === 'TIMEOUT') {
+            $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', 'CHANNEL_TIMEOUT', 'Kiem tra kenh qua thoi gian', $timings['channel']));
         } else {
-            $mark(self::stage('CHECK_CHANNEL', 'PASS', null, null, $timings['channel']));
+            $mark(self::stage('CHECK_CHANNEL', 'TIMEOUT', null, 'Khong xac dinh duoc kenh', $timings['channel']));
         }
-        if ($restricted && $presence === 'HAS_CHANNEL') $access = 'RESTRICTED';
-        elseif ($presence === 'HAS_CHANNEL' && $access === 'NOT_CHECKED') $access = 'ACCESSIBLE';
 
         // ---- CHECK_SECURITY ----
         $t = microtime(true);
@@ -454,23 +442,31 @@ class HealthCheckPipeline
         }
         EvaluationTarget::release($port, $tabId, false);
 
-        // ---- FINALIZE: decision table (§29) ----
+        // ---- FINALIZE: decision table (§29) + precedence auth (§7) ----
         $mark(self::stage('FINALIZE', 'PASS', null, null, 0));
         $dt = EvalStates::decide(['browser' => 'READY', 'google' => 'SIGNED_IN', 'youtube' => 'SIGNED_IN',
             'presence' => $presence, 'access' => $access, 'security' => $security, 'infra' => 'OK']);
         $chStatus = $dt['channel_status'];
-        if ($chStatus === 'ERROR') {
-            // Channel technical => tool_error, giu last-known (§27: KHONG phai UNAVAILABLE)
+        $attempt = $dt['attempt']; // SUCCESS | PARTIAL
+        $youtubeStatus = EvalStates::youtubeStatus('SIGNED_IN');
+        if ($attempt === 'PARTIAL' || $chStatus === 'ERROR') {
+            // Auth + YouTube da verify, channel technical (TIMEOUT/UNKNOWN/CHECK_FAILED):
+            // PARTIAL - giu SIGNED_IN + ACCESSIBLE, presence UNKNOWN (§8, §21).
+            // TUYET DOI KHONG revert ve NEED_LOGIN/LOGIN_REQUIRED (§7).
             $signals = ['login' => 'ok', 'session' => 'ok', 'youtube' => 'ok',
                 'channel' => 'unknown', 'channelName' => null,
                 'challenge' => $challenge, 'recovery' => $recovery, 'restricted' => $restricted,
-                'auth' => 'LOGGED_IN', 'presence' => $presence === 'UNKNOWN' ? 'UNKNOWN' : 'NOT_CHECKED',
+                'auth' => 'LOGGED_IN', 'presence' => $presence === 'TIMEOUT' ? 'UNKNOWN' : $presence,
                 'presence_evidence' => null];
-            return self::finish($stages, $signals, 'tool_error', 'NETWORK_TIMEOUT', 'Khong xac dinh duoc kenh',
-                null, null, 'LOW', null, $timings, $t0, $meta
+            $summary = EvalStates::buildSummary(['auth' => 'SIGNED_IN', 'youtube' => $youtubeStatus,
+                'presence' => 'UNKNOWN', 'access' => 'NOT_CHECKED', 'security' => $security, 'attempt' => 'PARTIAL']);
+            return self::finish($stages, $signals, 'partial', 'CHANNEL_TIMEOUT', 'Kiem tra kenh qua thoi gian',
+                'ACTIVE', 'channel_timeout', 'MEDIUM', null, $timings, $t0, $meta
                 + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
-                    'presence' => $presence, 'presence_confidence' => $presenceConf, 'access' => $access,
-                    'security' => $security, 'evidence_summary' => $evSummary]);
+                    'youtube_status' => $youtubeStatus,
+                    'presence' => 'UNKNOWN', 'presence_confidence' => 'LOW', 'access' => 'NOT_CHECKED',
+                    'security' => $security, 'evidence_summary' => $evSummary,
+                    'account_channel_state' => $summary['account_channel_state'], 'readiness' => $summary['readiness']]);
         }
         $conf = $presenceConf === 'HIGH' && $gDec['confidence'] === 'HIGH' && $yDec['confidence'] === 'HIGH'
             ? 'HIGH' : 'MEDIUM';
@@ -484,10 +480,28 @@ class HealthCheckPipeline
         if ($chStatus === 'ACTIVE' && $presence === 'NO_CHANNEL') $reason = 'no_channel';
         elseif ($chStatus === 'RESTRICTED') $reason = 'restricted';
         elseif ($chStatus === 'VERIFICATION_REQUIRED') $reason = $recovery ? 'recovery_required' : 'security_challenge';
+        $youtubeStatus = EvalStates::youtubeStatus('SIGNED_IN');
+        $summary = EvalStates::buildSummary(['auth' => 'SIGNED_IN', 'youtube' => $youtubeStatus,
+            'presence' => $presence, 'access' => $access, 'security' => $security, 'attempt' => 'SUCCESS']);
         return self::finish($stages, $signals, 'success', null, null, $chStatus, $reason, $conf, null, $timings, $t0, $meta
             + ['browser_status' => 'READY', 'google' => $gDec, 'youtube' => $yDec,
+                'youtube_status' => $youtubeStatus,
                 'presence' => $presence, 'presence_confidence' => $presenceConf, 'access' => $access,
-                'security' => $security, 'evidence_summary' => $evSummary]);
+                'security' => $security, 'evidence_summary' => $evSummary,
+                'account_channel_state' => $summary['account_channel_state'], 'readiness' => $summary['readiness']]);
+    }
+
+    /**
+     * 1 lan probe channel: navigate @me (dedicated target) + doi redirect + eval.
+     * Tra ve dict hoac null (transport/timeout). Deadline cap ~6s.
+     */
+    private static function probeChannelOnce(int $port, string $tabId, float $deadline): ?array
+    {
+        EvaluationTarget::navigate($port, $tabId, 'https://www.youtube.com/@me');
+        AccountDataCollector::waitLoad($port, $tabId, $deadline, 4);
+        AccountDataCollector::waitUrlChange($port, $tabId, '/@me', $deadline, 2);
+        $d = AccountDataCollector::eval($port, $tabId, YoutubeSignals::channelEvidenceJs());
+        return is_array($d) ? $d : null;
     }
 
     private static function confRank(string $c): int

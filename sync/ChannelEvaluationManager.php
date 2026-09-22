@@ -87,6 +87,13 @@ class ChannelEvaluationManager
             'evaluation_version' => "INT NULL",
             'needs_recheck' => "TINYINT(1) NOT NULL DEFAULT 0",
             'auth_evidence' => "TEXT NULL",
+            'youtube_status' => "VARCHAR(20) NULL",
+            'account_channel_state' => "VARCHAR(30) NULL",
+            'readiness_status' => "VARCHAR(30) NULL",
+            'last_verified_auth_status' => "VARCHAR(30) NULL",
+            'last_auth_verified_at' => "DATETIME NULL",
+            'last_verified_channel_presence' => "VARCHAR(20) NULL",
+            'last_channel_verified_at' => "DATETIME NULL",
         ];
         try {
             $have = [];
@@ -102,10 +109,16 @@ class ChannelEvaluationManager
                 }
             }
             // Legacy khong co verified_at/evidence -> danh dau can danh gia lai (§58-§59)
+            // + cac result cu INCONSISTENT (login verify nhung summary NEED_LOGIN) (§54)
             try {
                 db()->exec("UPDATE account_states SET needs_recheck=1 WHERE needs_recheck=0"
                     . " AND ((auth_verified_at IS NULL AND channel_verified_at IS NULL)"
                     . " OR (eval_status IN ('ACTIVE','LOGIN_REQUIRED') AND auth_status IS NULL))");
+            } catch (Throwable $e) {
+            }
+            try {
+                db()->exec("UPDATE account_states SET needs_recheck=1 WHERE needs_recheck=0"
+                    . " AND eval_status='LOGIN_REQUIRED' AND auth_status='LOGGED_IN'");
             } catch (Throwable $e) {
             }
         } catch (Throwable $e) {
@@ -158,17 +171,28 @@ class ChannelEvaluationManager
         return rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalstage_' . $profileId . '.json';
     }
 
-    private static function setStage(int $profileId, string $stage): void
+    private static function setStage(int $profileId, string $stage, ?string $evaluationId = null): void
     {
-        @file_put_contents(self::stageFile($profileId), json_encode(['stage' => $stage, 'ts' => microtime(true)]));
+        @file_put_contents(self::stageFile($profileId), json_encode(
+            ['stage' => $stage, 'ts' => microtime(true), 'evaluation_id' => $evaluationId]));
     }
 
     public static function getStage(int $profileId): ?string
     {
         $f = self::stageFile($profileId);
         if (!is_file($f)) return null;
-        if (microtime(true) - (float)((json_decode((string)@file_get_contents($f), true)['ts'] ?? 0)) > 120) return null;
-        return (string)(json_decode((string)@file_get_contents($f), true)['stage'] ?? '');
+        $j = json_decode((string)@file_get_contents($f), true);
+        if (microtime(true) - (float)(($j['ts'] ?? 0)) > 120) return null;
+        return (string)($j['stage'] ?? '');
+    }
+
+    /** evaluation_id cua stage-live hien tại (de caller discard result cu den cham). */
+    public static function getStageEvalId(int $profileId): ?string
+    {
+        $f = self::stageFile($profileId);
+        if (!is_file($f)) return null;
+        $j = json_decode((string)@file_get_contents($f), true);
+        return isset($j['evaluation_id']) ? (string)$j['evaluation_id'] : null;
     }
 
     /**
@@ -339,6 +363,24 @@ class ChannelEvaluationManager
                 (string)($pipe['error_code'] ?? AccountDataCollector::E_INTERNAL), $perf,
                 (string)($pipe['infra'] ?? ''));
         }
+        // partial: auth + youtube da verify, channel technical (TIMEOUT/UNKNOWN).
+        // Precedence §7: commit auth tuoi, KHONG revert ve lastKnown cu.
+        if ($pipe['outcome'] === 'partial') {
+            $signals = (array)($pipe['signals'] ?? []);
+            $res = self::finishPartial($profileId, $prev, $prevStatus, $lastKnown, $t0,
+                $signals, $perf, (array)$pipe);
+            $ui = self::uiLabels($signals);
+            $res['loginUi'] = $ui['loginUi'];
+            $res['sessionUi'] = $ui['sessionUi'];
+            $res['youtubeUi'] = $ui['youtubeUi'];
+            $res['channelUi'] = $ui['channelUi'];
+            $res['confidence'] = (string)($pipe['confidence'] ?? 'MEDIUM');
+            $res['stages'] = array_values((array)($pipe['stages'] ?? []));
+            if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
+            self::setStage($profileId, 'SUCCESS', (string)($pipe['evaluation_id'] ?? null));
+            $res['run_state'] = 'PARTIAL';
+            return $res;
+        }
         // success: chi HIGH/MEDIUM duoc overwrite last_known (LOW khong bao gio toi day)
         $signals = (array)($pipe['signals'] ?? []);
         $res = self::finishAccount($profileId, $prev, $prevStatus, $lastKnown, $t0,
@@ -350,12 +392,12 @@ class ChannelEvaluationManager
         $res['youtubeUi'] = $ui['youtubeUi'];
         $res['channelUi'] = $ui['channelUi'];
         $res['confidence'] = (string)($pipe['confidence'] ?? 'HIGH');
-        $res['stages'] = array_values((array)($pipe['stages'] ?? []));
-        if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
-        self::setStage($profileId, 'SUCCESS');
-        $res['run_state'] = 'SUCCESS';
-        return $res;
-    }
+            $res['stages'] = array_values((array)($pipe['stages'] ?? []));
+            if ($autoStarted && !empty($policy['closeAfter'])) self::closeChromeQuiet($profileId);
+            self::setStage($profileId, 'SUCCESS', (string)($pipe['evaluation_id'] ?? null));
+            $res['run_state'] = 'SUCCESS';
+            return $res;
+        }
 
     /** Snapshot stages cho drawer (doc sau khi xong, khong can DB). */
     private static function saveStageSnapshot(int $profileId, array $stages): void
@@ -549,6 +591,44 @@ class ChannelEvaluationManager
         if (!in_array($presence, ['HAS_CHANNEL', 'NO_CHANNEL', 'UNKNOWN', 'NOT_CHECKED'], true)) $presence = 'NOT_CHECKED';
         $presenceEv = ($auth === 'LOGGED_IN' && isset($signals['presence_evidence'])) ? (string)$signals['presence_evidence'] : null;
         $verifiedPresence = $auth === 'LOGGED_IN' && in_array($presence, ['HAS_CHANNEL', 'NO_CHANNEL'], true);
+        // §5: NO_CHANNEL => access NOT_APPLICABLE (khong phai UNAVAILABLE vi chua co channel)
+        if ($presence === 'NO_CHANNEL') $access = 'NOT_APPLICABLE';
+        // Summary + validator (§23, §25): 1 noi duy nhat, khong tu suy o caller
+        $youtubeStatus = (string)($pipe['youtube_status'] ?? 'NOT_CHECKED');
+        $acs = (string)($pipe['account_channel_state'] ?? '');
+        $readiness = (string)($pipe['readiness'] ?? '');
+        if ($acs === '' || $readiness === '') {
+            require_once __DIR__ . '/EvalStates.php';
+            $sumAuth = $auth === 'LOGGED_IN' ? 'SIGNED_IN'
+                : ($auth === 'LOGIN_REQUIRED' ? 'SIGNED_OUT'
+                : ($auth === 'VERIFICATION_REQUIRED' ? 'VERIFICATION_REQUIRED' : 'UNKNOWN'));
+            $sum = EvalStates::buildSummary(['auth' => $sumAuth, 'youtube' => $youtubeStatus,
+                'presence' => $presence, 'access' => $access, 'security' => $security, 'attempt' => 'SUCCESS']);
+            $acs = $sum['account_channel_state'];
+            $readiness = $sum['readiness'];
+        }
+        require_once __DIR__ . '/EvalStates.php';
+        $loginPass = ($signals['login'] ?? '') === 'ok';
+        $v = EvalStates::validate(['login_pass' => $loginPass,
+            'auth' => $auth === 'LOGIN_REQUIRED' ? 'SIGNED_OUT' : $auth,
+            'presence' => $presence, 'access' => $access,
+            'account_channel_state' => $acs,
+            'channel_verified_at' => $verifiedPresence ? $now : null]);
+        if (!$v['ok']) {
+            try {
+                SyncLogger::error('evaluation', '[EVAL INVARIANT] profile=' . $profileId
+                    . ' success: ' . implode(',', $v['errors']), $profileId);
+            } catch (Throwable $e) {
+            }
+            // Khong commit inconsistent: sanitize an toan (§23)
+            if (in_array('presence_without_signed_in', $v['errors'], true)) {
+                $presence = 'NOT_CHECKED';
+                $access = 'NOT_CHECKED';
+            }
+            if (in_array('no_channel_access_must_be_na', $v['errors'], true)) {
+                $access = 'NOT_APPLICABLE';
+            }
+        }
         // Gate engine + persistence: chua verify -> channel 'unknown' (khong lifecycle HAS_CHANNEL gia)
         $gated = $signals;
         if (!$verifiedPresence) {
@@ -563,6 +643,8 @@ class ChannelEvaluationManager
             $policy = SyncSettingsService::getAccountPolicy();
             $st = AccountRepository::ensure($profileId);
             if ($st) {
+                // §14+§40: NO_CHANNEL (status ACTIVE + reason no_channel) la result HOP LE,
+                // KHONG phai loi: counters success, stability khong giam.
                 $outcome = $status === self::ACTIVE ? 'success' : 'failed';
                 $daysObs = max(0.0, (time() - strtotime((string)$st['imported_at'])) / 86400);
                 $counters = [
@@ -611,6 +693,7 @@ class ChannelEvaluationManager
                     $attParams[] = $now;
                 }
                 // V2 state model (§3, §32): browser/google/youtube/access/security/version
+                // + summary tong hop (§6) + last verified rieng (§20)
                 if (self::hasCol('browser_status')) {
                     $attCols .= ', browser_status=?, google_auth_status=?, google_auth_confidence=?,'
                         . ' youtube_auth_status=?, youtube_auth_confidence=?, channel_presence_confidence=?,'
@@ -627,6 +710,21 @@ class ChannelEvaluationManager
                     $attParams[] = $evalId;
                     $attParams[] = $evalVer;
                     $attParams[] = mb_substr($evSummary . ' | g:' . ($g['reason'] ?? '') . ' y:' . ($yt['reason'] ?? ''), 0, 2000);
+                }
+                if (self::hasCol('youtube_status')) {
+                    $attCols .= ', youtube_status=?, account_channel_state=?, readiness_status=?';
+                    $attParams[] = $youtubeStatus;
+                    $attParams[] = $acs;
+                    $attParams[] = $readiness;
+                }
+                if (self::hasCol('last_verified_auth_status')) {
+                    // Technical attempt khong overwrite verified (§20): chi khi verify that
+                    $attCols .= ', last_verified_auth_status=?, last_auth_verified_at=?,'
+                        . ' last_verified_channel_presence=?, last_channel_verified_at=?';
+                    $attParams[] = $auth === 'LOGGED_IN' ? 'SIGNED_IN' : ($prev['last_verified_auth_status'] ?? null);
+                    $attParams[] = $auth === 'LOGGED_IN' ? $now : ($prev['last_auth_verified_at'] ?? null);
+                    $attParams[] = $verifiedPresence ? $presence : ($prev['last_verified_channel_presence'] ?? null);
+                    $attParams[] = $verifiedPresence ? $now : ($prev['last_channel_verified_at'] ?? null);
                 }
                 db()->prepare('UPDATE account_states SET eval_status=?, last_known_status=?, last_successful_check_at=IF(? IN (\'ACTIVE\',\'LOGIN_REQUIRED\',\'VERIFICATION_REQUIRED\',\'CHANNEL_UNAVAILABLE\',\'RESTRICTED\'),?,last_successful_check_at), last_attempt_at=?, last_error=NULL, last_duration_ms=?, eval_stage=?' . $attCols . ' WHERE profile_id=?')
                     ->execute(array_merge([$status, $isSuccessCheck ? $status : $lastKnown, $status, $now, $now, $ms, 'SUCCESS'], $attParams, [$profileId]));
@@ -676,6 +774,8 @@ class ChannelEvaluationManager
             'channel_presence_confidence' => $presenceConf,
             'channel_access_status' => $access,
             'security_status' => $security,
+            'youtube_status' => $youtubeStatus,
+            'account_channel_state' => $acs, 'readiness_status' => $readiness,
             'evaluation_id' => $evalId, 'evaluation_version' => $evalVer,
             'presence_evidence' => $presenceEv,
             'channel_name' => $verifiedPresence ? ($signals['channelName'] ?? null) : null,
@@ -689,6 +789,139 @@ class ChannelEvaluationManager
             'reason' => $reason, 'duration_ms' => $ms, 'prev_status' => $prevStatus,
             'stability' => $stability, 'confidence' => $confidence, 'stage' => $stage,
             'tool_error' => false, 'perf' => $perf, 'run_state' => 'SUCCESS'];
+    }
+
+    /**
+     * PARTIAL (§8, §21): auth + YouTube da verify (SIGNED_IN/ACCESSIBLE),
+     * channel technical (TIMEOUT/UNKNOWN/CHECK_FAILED).
+     * Precedence §7: commit auth tuoi + eval_status ACTIVE (fresh), presence UNKNOWN,
+     * attempt PARTIAL. KHONG revert ve lastKnown cu, KHONG cham counters/scores (§41).
+     * last_verified_auth duoc cap nhat (auth verify that); verified presence giu nguyen (§20).
+     */
+    private static function finishPartial(int $profileId, ?array $prev, string $prevStatus, ?string $lastKnown,
+        float $t0, array $signals, array $perf = [], array $pipe = []): array
+    {
+        $ms = (int)round((microtime(true) - $t0) * 1000);
+        $now = date('Y-m-d H:i:s');
+        self::ensureEvalV2Cols();
+        $evalId = (string)($pipe['evaluation_id'] ?? ('ev_' . date('YmdHis') . '_' . $profileId));
+        $evalVer = (int)($pipe['version'] ?? 2);
+        $youtubeStatus = (string)($pipe['youtube_status'] ?? 'ACCESSIBLE');
+        $acs = (string)($pipe['account_channel_state'] ?? 'TECHNICAL_CHECK_FAILED');
+        $readiness = (string)($pipe['readiness'] ?? 'CHECK_REQUIRED');
+        $security = (string)($pipe['security'] ?? 'UNKNOWN');
+        $evSummary = (string)($pipe['evidence_summary'] ?? '');
+        $g = is_array($pipe['google'] ?? null) ? $pipe['google'] : ['status' => 'SIGNED_IN', 'confidence' => 'MEDIUM'];
+        $yt = is_array($pipe['youtube'] ?? null) ? $pipe['youtube'] : ['status' => 'SIGNED_IN', 'confidence' => 'MEDIUM'];
+
+        // Invariant: login pass => summary KHONG duoc NEED_LOGIN (§22-§23)
+        require_once __DIR__ . '/EvalStates.php';
+        $v = EvalStates::validate(['login_pass' => true, 'auth' => 'SIGNED_IN',
+            'presence' => 'UNKNOWN', 'access' => 'NOT_CHECKED',
+            'account_channel_state' => $acs, 'channel_verified_at' => null]);
+        if (!$v['ok']) {
+            try {
+                SyncLogger::error('evaluation', '[EVAL INVARIANT] profile=' . $profileId
+                    . ' partial: ' . implode(',', $v['errors']), $profileId);
+            } catch (Throwable $e) {
+            }
+        }
+
+        if (self::hasEvalCols()) {
+            try {
+                $cols = ', last_attempt_status=?, last_error_code=?, last_error_message=?, last_error=?,'
+                    . ' last_duration_ms=?, eval_stage=?, last_completed_at=?';
+                $params = ['PARTIAL', ($pipe['error_code'] ?? 'CHANNEL_TIMEOUT'), 'Kiem tra kenh qua thoi gian',
+                    'Kiem tra kenh qua thoi gian', $ms, 'SUCCESS', $now];
+                // Top-level theo AUTH tuoi (ACTIVE), KHONG phai lastKnown cu
+                $cols .= ', eval_status=?, last_known_status=?';
+                $params[] = self::ACTIVE;
+                $params[] = self::ACTIVE;
+                $cols .= ', auth_status=?, auth_verified_at=?, channel_presence=?, channel_presence_confidence=?';
+                $params[] = 'LOGGED_IN';
+                $params[] = $now;
+                $params[] = 'UNKNOWN';
+                $params[] = 'LOW';
+                if (self::hasCol('youtube_status')) {
+                    $cols .= ', youtube_status=?';
+                    $params[] = $youtubeStatus;
+                }
+                if (self::hasCol('account_channel_state')) {
+                    $cols .= ', account_channel_state=?, readiness_status=?';
+                    $params[] = $acs;
+                    $params[] = $readiness;
+                }
+                if (self::hasCol('last_verified_auth_status')) {
+                    $cols .= ', last_verified_auth_status=?, last_auth_verified_at=?';
+                    $params[] = 'SIGNED_IN';
+                    $params[] = $now;
+                }
+                if (self::hasCol('browser_status')) {
+                    $cols .= ', browser_status=?, google_auth_status=?, google_auth_confidence=?,'
+                        . ' youtube_auth_status=?, youtube_auth_confidence=?,'
+                        . ' channel_access_status=?, security_status=?, evaluation_id=?, evaluation_version=?,'
+                        . ' needs_recheck=0, auth_evidence=?';
+                    $params[] = 'READY';
+                    $params[] = (string)($g['status'] ?? 'SIGNED_IN');
+                    $params[] = (string)($g['confidence'] ?? 'MEDIUM');
+                    $params[] = (string)($yt['status'] ?? 'SIGNED_IN');
+                    $params[] = (string)($yt['confidence'] ?? 'MEDIUM');
+                    $params[] = 'NOT_CHECKED';
+                    $params[] = $security;
+                    $params[] = $evalId;
+                    $params[] = $evalVer;
+                    $params[] = mb_substr($evSummary, 0, 2000);
+                }
+                if (self::hasCol('infra_status')) {
+                    $cols .= ', infra_status=NULL';
+                }
+                $params[] = $profileId;
+                db()->prepare('UPDATE account_states SET last_attempt_at=?' . $cols . ' WHERE profile_id=?')
+                    ->execute(array_merge([$now], $params));
+                $st = AccountRepository::load($profileId);
+                db()->prepare('INSERT INTO account_history (profile_id, checked_at, stability, confidence, stage, reasons, warnings, eval_status, prev_status, duration_ms, reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+                    ->execute([$profileId, $now, (int)($st['stability'] ?? 0), (int)($st['confidence'] ?? 0),
+                        (string)($st['stage'] ?? 'NEW'), json_encode([]), json_encode([]), self::ACTIVE,
+                        $prevStatus !== self::CHECKING ? $prevStatus : null, $ms, 'channel_timeout']);
+            } catch (Throwable $e) {
+            }
+        }
+        try {
+            SyncLogger::info('evaluation', "[EVAL PARTIAL] profile=$profileId auth=SIGNED_IN youtube=$youtubeStatus presence=UNKNOWN (channel timeout, giu auth)", $profileId);
+            log_action($profileId, 'eval_result', 'ACTIVE (partial: channel_timeout)');
+        } catch (Throwable $e) {
+        }
+        self::setStage($profileId, 'SUCCESS');
+        $row = AccountRepository::load($profileId);
+        return ['profileId' => $profileId, 'status' => self::ACTIVE, 'attempt_status' => 'PARTIAL',
+            'error_code' => ($pipe['error_code'] ?? 'CHANNEL_TIMEOUT'), 'checked_at' => $now,
+            'last_completed_at' => iso_ts($now),
+            'last_successful_check_at' => iso_ts($now),
+            'channel_verified_at' => null,
+            'last_known_status' => self::ACTIVE,
+            'auth_status' => 'LOGGED_IN', 'channel_presence' => 'UNKNOWN',
+            'browser_status' => 'READY',
+            'google_auth_status' => (string)($g['status'] ?? 'SIGNED_IN'),
+            'google_auth_confidence' => (string)($g['confidence'] ?? 'MEDIUM'),
+            'youtube_auth_status' => (string)($yt['status'] ?? 'SIGNED_IN'),
+            'youtube_auth_confidence' => (string)($yt['confidence'] ?? 'MEDIUM'),
+            'youtube_status' => $youtubeStatus,
+            'channel_presence_confidence' => 'LOW',
+            'channel_access_status' => 'NOT_CHECKED',
+            'security_status' => $security,
+            'account_channel_state' => $acs, 'readiness_status' => $readiness,
+            'evaluation_id' => $evalId, 'evaluation_version' => $evalVer,
+            'presence_evidence' => null,
+            'channel_name' => null,
+            'last_known_presence' => ($prev['last_known_presence'] ?? null),
+            'login_state' => 'ok', 'session_state' => 'ok', 'youtube_state' => 'ok',
+            'security_challenge' => false, 'channel_state' => 'unknown',
+            'success_count' => (int)($row['success_count'] ?? 0), 'fail_count' => (int)($row['fail_count'] ?? 0),
+            'consecutive_errors' => (int)($row['consec_fails'] ?? 0),
+            'reason' => 'channel_timeout', 'duration_ms' => $ms, 'prev_status' => $prevStatus,
+            'stability' => (int)($row['stability'] ?? 0), 'confidence' => (int)($row['confidence'] ?? 0),
+            'stage' => (string)($row['stage'] ?? 'NEW'),
+            'tool_error' => false, 'partial' => true, 'perf' => $perf, 'run_state' => 'PARTIAL'];
     }
 
     /** Loi tool: GIU channel status + last_known + scores cu, chi ghi attempt + infra. */
@@ -931,25 +1164,31 @@ class ChannelEvaluationManager
         }
         $completed = (int)($batch['completed'] ?? 0);
         $failed = (int)($batch['failed'] ?? 0);
+        $partial = (int)($batch['partial'] ?? 0);
         foreach ($results as $r) {
             if (($r['status'] ?? '') === 'CANCELLED' || !empty($r['already_running'])) continue;
             if (($r['attempt_status'] ?? '') === self::ATT_SUCCESS) $completed++;
-            else $failed++;
+            elseif (($r['attempt_status'] ?? '') === 'PARTIAL') {
+                // PARTIAL: kenh xong (auth verify), dem rieng, KHONG phai failed (§32)
+                $completed++;
+                $partial++;
+            } else $failed++;
         }
         $pending = max(0, (int)($batch['total'] ?? count($ids)) - count($doneIds));
         $patch = ['completed' => $completed, 'failed' => $failed, 'pending' => $pending,
-                  'running' => 0, 'done_ids' => json_encode(array_values($doneIds))];
+                  'running' => 0, 'done_ids' => json_encode(array_values($doneIds)),
+                  'partial_add' => $partial - (int)($batch['partial'] ?? 0)];
         if ($pending <= 0) {
             $patch['status'] = 'done';
             try {
-                SyncLogger::info('evaluation', "[EVAL BATCH] id=$batchId done total=" . count($ids) . " ok=$completed fail=$failed");
+                SyncLogger::info('evaluation', "[EVAL BATCH] id=$batchId done total=" . count($ids) . " ok=$completed partial=$partial fail=$failed");
             } catch (Throwable $e) {
             }
         }
         self::saveBatch($batchId, $patch);
         // Watchdog: CHECKING qua 30s (treo tu batch cu/restart) -> revert last_known
         self::watchdog();
-        return ['ok' => true, 'batch' => self::loadBatch($batchId), 'results' => $results, 'done' => $pending <= 0];
+        return ['ok' => true, 'batch' => self::loadBatch($batchId), 'results' => $results, 'done' => $pending <= 0, 'partial' => $partial];
     }
 
     public static function batch_state(string $batchId): ?array
@@ -991,7 +1230,9 @@ class ChannelEvaluationManager
             if (is_file($f)) {
                 $j = json_decode((string)@file_get_contents($f), true);
                 if (is_array($j) && isset($j['done_ids'])) $r['done_ids'] = json_encode($j['done_ids']);
+                if (is_array($j) && isset($j['partial'])) $r['partial'] = (int)$j['partial'];
             }
+            if (!isset($r['partial'])) $r['partial'] = 0;
             return $r;
         } catch (Throwable $e) {
             return null;
@@ -1015,8 +1256,15 @@ class ChannelEvaluationManager
                 db()->prepare('UPDATE eval_batches SET ' . implode(',', $sets) . ' WHERE batch_id=?')->execute($params);
             }
             if (array_key_exists('done_ids', $patch)) {
-                @file_put_contents(rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalbatch_' . $batchId . '.json',
-                    json_encode(['done_ids' => json_decode((string)$patch['done_ids'], true) ?: []]));
+                $file = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_evalbatch_' . $batchId . '.json';
+                $prev = is_file($file) ? (json_decode((string)@file_get_contents($file), true) ?: []) : [];
+                $partialPrev = (int)($prev['partial'] ?? 0);
+                // partial dem don (khong co cot DB): cong don vao file tien do
+                $partialAdd = 0;
+                if (array_key_exists('partial_add', $patch)) $partialAdd = (int)$patch['partial_add'];
+                @file_put_contents($file,
+                    json_encode(['done_ids' => json_decode((string)$patch['done_ids'], true) ?: [],
+                        'partial' => $partialPrev + $partialAdd]));
             }
         } catch (Throwable $e) {
         }
@@ -1119,6 +1367,26 @@ class ChannelEvaluationManager
         }
         $row['eval_stage_live'] = self::getStage($profileId);
         $row['eval_stages'] = self::getStageSnapshot($profileId);
+        // Summary tong hop duy nhat (§25): derive tu state rieng, khong de UI tu suy.
+        // Row cu chua co cot moi -> tinh lai tu auth/presence hien co.
+        if (empty($row['account_channel_state']) || empty($row['readiness_status'])) {
+            try {
+                require_once __DIR__ . '/EvalStates.php';
+                $auth = (string)($row['auth_status'] ?? 'UNKNOWN');
+                $sumAuth = $auth === 'LOGGED_IN' ? 'SIGNED_IN'
+                    : ($auth === 'LOGIN_REQUIRED' ? 'SIGNED_OUT'
+                    : ($auth === 'VERIFICATION_REQUIRED' ? 'VERIFICATION_REQUIRED' : 'UNKNOWN'));
+                $sum = EvalStates::buildSummary(['auth' => $sumAuth,
+                    'youtube' => (string)($row['youtube_status'] ?? 'NOT_CHECKED'),
+                    'presence' => (string)($row['channel_presence'] ?? 'NOT_CHECKED'),
+                    'access' => (string)($row['channel_access_status'] ?? 'NOT_CHECKED'),
+                    'security' => (string)($row['security_status'] ?? 'UNKNOWN'),
+                    'attempt' => (string)($row['last_attempt_status'] ?? 'FAILED')]);
+                $row['account_channel_state'] = $sum['account_channel_state'];
+                $row['readiness_status'] = $sum['readiness'];
+            } catch (Throwable $e) {
+            }
+        }
         return $row;
     }
 

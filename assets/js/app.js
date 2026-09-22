@@ -258,6 +258,11 @@ function renderProfiles() {
     if (fchannel === 'exists' && p.acc_channel !== 'exists') return false;
     if (fchannel === 'none' && p.acc_channel !== 'none') return false;
     if (fchannel === 'unknown' && (p.acc_channel === 'exists' || p.acc_channel === 'none')) return false;
+    // Filter theo summary (§55): dung auth/presence/account_channel_state
+    if (fchannel === 'signed_in' && p.auth_status !== 'LOGGED_IN') return false;
+    if (fchannel === 'signed_out' && p.auth_status !== 'LOGIN_REQUIRED' && p.auth_status !== 'LOGGED_OUT') return false;
+    if (fchannel === 'ready' && (p.account_channel_state || evalSummary(p).state) !== 'SIGNED_IN_NO_CHANNEL') return false;
+    if (fchannel === 'recheck' && !p.needs_recheck) return false;
     if (fdays > 0 && (p.acc_days == null || p.acc_days < fdays)) return false;
     if (fstab > 0 && (p.acc_stability == null || p.acc_stability < fstab)) return false;
     if (fconf > 0 && (p.acc_confidence == null || p.acc_confidence < fconf)) return false;
@@ -1020,6 +1025,15 @@ function evalApplyResult(r) {
   if (r.channel_access_status) p.channel_access_status = r.channel_access_status;
   if (r.security_status) p.security_status = r.security_status;
   if (r.evaluation_id) p.evaluation_id = r.evaluation_id;
+  // Summary tong hop (§25): backend tinh san, frontend chi derive khi thieu
+  if (r.youtube_status) p.youtube_status = r.youtube_status;
+  if (r.account_channel_state) p.account_channel_state = r.account_channel_state;
+  if (r.readiness_status) p.readiness_status = r.readiness_status;
+  if (r.last_verified_auth_status) p.last_verified_auth_status = r.last_verified_auth_status;
+  if (r.last_auth_verified_at) p.last_auth_verified_at = r.last_auth_verified_at;
+  if (r.last_verified_channel_presence) p.last_verified_channel_presence = r.last_verified_channel_presence;
+  if (r.last_channel_verified_at) p.last_channel_verified_at = r.last_channel_verified_at;
+  if (r.attempt_status === 'PARTIAL') p.eval_attempt_status = 'PARTIAL';
   p.channel_verified_at = r.channel_verified_at || p.channel_verified_at;
   p.last_known_presence = r.last_known_presence ?? p.last_known_presence;
   if (r.channel_state) { p.acc_channel = r.channel_state; p.acc_channel_name = r.channel_name || null; }
@@ -1135,7 +1149,7 @@ async function runEvalBatchId(batchId, total, knownIds) {
   renderProfiles();
   const conc = (settings && [2, 4, 6, 8].includes(Number(settings.acc_concurrency))) ? Number(settings.acc_concurrency) : 4;
   const counts = {};
-  let done = 0, failed = 0, techErr = 0;
+  let done = 0, failed = 0, techErr = 0, partial = 0;
   try {
     // 2) Batch server da tao san
     evalBatch = { batch_id: batchId, total, done: 0, failed: 0, pending: total };
@@ -1165,10 +1179,11 @@ async function runEvalBatchId(batchId, total, knownIds) {
         if (r.already_running) { continue; }
         done++;
         if ((r.attempt_status || '') === 'SUCCESS') { if (r.status) counts[r.status] = (counts[r.status] || 0) + 1; }
+        else if ((r.attempt_status || '') === 'PARTIAL') { partial++; if (r.status) counts[r.status] = (counts[r.status] || 0) + 1; }
         else { failed++; if (r.tool_error) techErr++; }
         evalQueuePaint(r);
       }
-      evalBatch.done = done; evalBatch.failed = failed; evalBatch.pending = total - done;
+      evalBatch.done = done; evalBatch.failed = failed; evalBatch.partial = partial; evalBatch.pending = total - done;
       if (btn) btn.innerHTML = `◌ ${done}/${total}`;
       finished = !!ch.data.done;
       if (!finished && !(ch.data.results || []).length) break;
@@ -1195,7 +1210,7 @@ async function runEvalBatchId(batchId, total, knownIds) {
     evalBatch = null;
   }
   const sum = Object.entries(counts).map(([s, c]) => `${(EVAL_STATUS[s] || [])[0] || s}: ${c}`).join(' · ');
-  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}${techErr ? ` · lỗi kỹ thuật: ${techErr}` : ''}`, done === total ? 'success' : 'error');
+  toast(`Đánh giá hoàn tất${sum ? ' — ' + sum : ''}${partial ? ` · một phần: ${partial}` : ''}${techErr ? ` · lỗi kỹ thuật: ${techErr}` : ''}`, done === total ? 'success' : 'error');
 }
 // Mini popover trang thai batch (click toolbar khi running)
 function monEvalPopover() {
@@ -1213,6 +1228,7 @@ function monEvalPopover() {
     + `<div>Tổng: ${b.total || 0}</div>`
     + `<div>Hoàn tất: ${b.done || 0}</div><div>Đang chạy: ${Math.min(conc, (b.total || 0) - (b.done || 0))}</div>`
     + `<div>Đang chờ: ${b.pending || 0}</div><div>Thất bại: ${b.failed || 0}</div>`
+    + (b.partial ? `<div>Một phần: ${b.partial}</div>` : '')
     + `<button class="btn btn-sm" onclick="evalCancelBatch()">Hủy các mục đang chờ</button>`;
   const btn = $('btn-eval-bulk');
   const rc = btn ? btn.getBoundingClientRect() : { left: 100, bottom: 100 };
@@ -1299,8 +1315,16 @@ async function openAccountDrawer(id, keepOpen) {
       (list || []).forEach(s => { byName[s.stage] = s; });
       return `<table class="data-table"><tbody>` + STAGE_ORDER.map(n => {
         const s = byName[n];
-        const cell = s ? stageIcon(s.result) + (s.code ? ` <small class="muted">${escapeHtml(s.code)}</small>` : '')
+        // NO_CHANNEL la PASS value (khong phai FAIL) (§45)
+        let cell;
+        if (s && n === 'CHECK_CHANNEL' && s.result === 'PASS' && s.detail === 'no_channel') {
+          cell = '<span class="st-healthy">✓ No channel</span>';
+        } else if (s && n === 'CHECK_CHANNEL' && s.result === 'TIMEOUT' && s.code === 'CHANNEL_TIMEOUT') {
+          cell = '<span class="st-warning">◌ Timeout</span> <small class="muted">CHANNEL_TIMEOUT</small>';
+        } else {
+          cell = s ? stageIcon(s.result) + (s.code ? ` <small class="muted">${escapeHtml(s.code)}</small>` : '')
           : (live ? '<span class="st-info">◌ Checking</span>' : '<span class="muted">— Chưa chạy</span>');
+        }
         return `<tr><td>${STAGE_VN_SHORT[n]}</td><td title="${escapeAttr(s && s.detail ? s.detail : '')}">${cell}</td></tr>`;
       }).join('') + `</tbody></table>`;
     };
@@ -1349,18 +1373,33 @@ async function openAccountDrawer(id, keepOpen) {
     } catch (e) {}
     const gLbl = st.google_auth_status ? `${AUTH_VN[st.google_auth_status] || st.google_auth_status}${st.google_auth_confidence ? ' · ' + st.google_auth_confidence : ''}` : null;
     const yLbl = st.youtube_auth_status ? `${AUTH_VN[st.youtube_auth_status] || st.youtube_auth_status}${st.youtube_auth_confidence ? ' · ' + st.youtube_auth_confidence : ''}` : null;
+    // TỔNG QUAN (§43-§44): Google/Mail + YouTube + Kênh + Trạng thái (derive tu summary)
+    const ytStatusBadge = (() => {
+      const ys = st.youtube_status || null;
+      if (ys === 'ACCESSIBLE') return '<span class="badge badge-ok">✓ Truy cập được</span>';
+      if (ys === 'LOGIN_REQUIRED') return '<span class="badge badge-review">⚠ Cần đăng nhập</span>';
+      if (ys === 'UNAVAILABLE') return '<span class="badge badge-danger">● Không truy cập được</span>';
+      return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
+    })();
+    const READINESS_VN = { NEED_LOGIN: 'Cần đăng nhập', NEED_VERIFICATION: 'Cần xác minh', READY_TO_CREATE_CHANNEL: 'Sẵn sàng tạo kênh', CHANNEL_CREATED: 'Đã có kênh', CHANNEL_NEEDS_ATTENTION: 'Kênh cần chú ý', CHECK_REQUIRED: 'Cần kiểm tra lại' };
+    const readinessLbl = st.readiness_status ? (READINESS_VN[st.readiness_status] || st.readiness_status) : null;
+    // Invariant: stage Login PASS nhưng summary NEED_LOGIN => log (§22)
+    try {
+      const loginPass = (st.eval_stages || []).some(s => (s.stage === 'CHECK_LOGIN' || s.stage === 'CHECK_YOUTUBE') && s.result === 'PASS');
+      if (loginPass && st.account_channel_state === 'NEED_LOGIN') console.error('[EVAL INVARIANT] drawer: login PASS but NEED_LOGIN, profile=' + id);
+    } catch (e) {}
     $('acc-drawer-body').innerHTML = head
       + `<div class="sync-label">Lần kiểm tra gần nhất: ${completedTs ? relSpan(completedTs) : 'chưa có'}${attemptLine}</div>`
       + successLine + changedLine + staleLine
-      + `<div class="sync-label" style="margin-top:6px">TÀI KHOẢN</div><div class="acc-grid">`
-      + row('Đăng nhập', authBadge(st.auth_status, st.login_state))
-      + (gLbl ? row('Google', `<span class="badge badge-muted">G: ${escapeHtml(gLbl)}</span>`) : '')
-      + (yLbl ? row('YouTube TK', `<span class="badge badge-muted">Y: ${escapeHtml(yLbl)}</span>`) : '')
+      + `<div class="sync-label" style="margin-top:6px">TỔNG QUAN</div><div class="acc-grid">`
+      + row('Google/Mail', authBadge(st.auth_status, st.login_state))
+      + row('YouTube', ytStatusBadge)
+      + row('Kênh', channelPresenceBadge(st))
+      + (readinessLbl ? row('Trạng thái', `<strong>${escapeHtml(readinessLbl)}</strong>`) : '')
+      + `</div><div class="sync-label" style="margin-top:6px">CHI TIẾT</div><div class="acc-grid">`
       + row('Phiên', sig(st.session_state === 'ok' ? 'VALID' : (st.session_state === 'failed' ? 'INVALID' : (st.session_state || 'NOT_CHECKED'))))
       + row('Bảo mật', st.security_challenge ? yn(true) : '<span class="badge badge-ok">✓ Bình thường</span>')
       + `</div><div class="sync-label" style="margin-top:6px">NỀN TẢNG</div><div class="acc-grid">`
-      + row('YouTube', (st.auth_status && st.auth_status !== 'LOGGED_IN') ? sig('NOT_CHECKED') : sig(st.youtube_state === 'ok' ? 'AVAILABLE' : (st.youtube_state === 'failed' ? 'UNAVAILABLE' : (st.youtube_state || 'NOT_CHECKED'))))
-      + row('Kênh', channelPresenceBadge(st))
       + row('Giai đoạn', `${sLabel}`) + row('Quản lý', `${st.managed_days ?? '-'} ngày`)
       + row('Ổn định', `${st.stability} / 100`) + row('Tin cậy', `${st.confidence} / 100`)
       + `</div><div class="sync-label" style="margin-top:6px">THỐNG KÊ</div><div class="acc-grid">`
@@ -1709,9 +1748,26 @@ function evalBlockInner(p) {
   const stabTip = `Ổn định (điểm nội bộ do hệ thống tính toán, không phải chỉ số chính thức của YouTube): ${p.acc_stability ?? '-'}/100\nĐăng nhập: ${p.acc_login ?? '?'}\nPhiên: ${p.acc_session ?? '?'}\nYouTube: ${p.acc_youtube ?? '?'}`;
   // Badge kenh uu tien auth truoc presence (§11): chua login thi khong bao gio "Da co kenh"
   const ch = channelPresenceChip(p);
+  // Summary tong hop (§16-§19): readiness + partial warning, derive tu 1 nguon
+  const sum = evalSummary(p);
+  const READINESS_VN = { NEED_LOGIN: 'Cần đăng nhập', NEED_VERIFICATION: 'Cần xác minh', READY_TO_CREATE_CHANNEL: 'Sẵn sàng tạo kênh', CHANNEL_CREATED: 'Đã có kênh', CHANNEL_NEEDS_ATTENTION: 'Kênh cần chú ý', CHECK_REQUIRED: 'Cần kiểm tra lại' };
+  let sumLine = '';
+  if (p.eval_attempt_status === 'PARTIAL') {
+    // Technical: giu verified + canh bao attempt (§19), KHONG "Can dang nhap"
+    sumLine = `<div class="eval-prev">⚠ Kiểm tra mới nhất chưa hoàn tất (kênh quá thời gian)</div>`;
+    if (p.last_verified_channel_presence === 'NO_CHANNEL' || p.last_known_presence === 'NO_CHANNEL') {
+      sumLine += `<div class="eval-prev">Xác minh lần cuối: ○ Chưa có kênh${p.last_channel_verified_at ? ' · ' + formatRelativeTime(p.last_channel_verified_at) : ''}</div>`;
+    } else if (p.last_verified_auth_status === 'SIGNED_IN' || p.auth_status === 'LOGGED_IN') {
+      sumLine += `<div class="eval-prev">Xác minh lần cuối: ✓ Đã đăng nhập${p.last_auth_verified_at ? ' · ' + formatRelativeTime(p.last_auth_verified_at) : ''}</div>`;
+    }
+  } else if (sum.state === 'SIGNED_IN_NO_CHANNEL') {
+    sumLine = `<div class="eval-prev">Trạng thái: <strong>${READINESS_VN.READY_TO_CREATE_CHANNEL}</strong></div>`;
+  } else if (sum.state === 'TECHNICAL_CHECK_FAILED' && p.auth_status === 'LOGGED_IN') {
+    sumLine = `<div class="eval-prev">⚠ Chưa xác định trạng thái kênh</div>`;
+  }
   return `<div class="acc-head"><span class="meta-label">Đánh giá · ${relSpan(completed, 'chưa kiểm tra')}</span>`
     + `<span class="acc-stage">${evalBadgeFor(p)}</span></div>`
-    + sub + err
+    + sub + err + sumLine
     + `<div class="acc-meter"><span>Ổn định</span><strong>${p.acc_stability ?? '-'}</strong>${accBar(p.acc_stability, stabTip)}${ch}</div>`
     + `<div class="acc-head" style="margin-top:4px"><span class="meta-label">Account · ${accDaysVN(p)}</span>`
     + `<span class="acc-stage">${dot} ${accStageBadge(stage)}</span></div>`;
@@ -1740,6 +1796,43 @@ function channelPresenceBadge(st) {
   if (pres === 'HAS_CHANNEL') return `<span class="badge badge-ok">✓ Đã có kênh${st.channel_name ? ' (' + escapeHtml(st.channel_name) + ')' : ''}</span>`;
   if (pres === 'NO_CHANNEL') return '<span class="badge badge-review">○ Chưa có kênh</span>';
   return '<span class="badge badge-muted">— Chưa kiểm tra</span>';
+}
+// SINGLE SUMMARY BUILDER phía client (§25) — mirror EvalStates::buildSummary().
+// Card + Drawer + Monitoring đều derive từ đây, không tự suy status riêng.
+// Backend đã tính sẵn (account_channel_state); hàm này chỉ dùng khi thiếu.
+function evalSummary(p) {
+  if (p.account_channel_state) {
+    return { state: p.account_channel_state, readiness: p.readiness_status || 'CHECK_REQUIRED' };
+  }
+  const auth = p.auth_status || 'UNKNOWN';
+  const pres = p.channel_presence || 'NOT_CHECKED';
+  const acc = p.channel_access_status || 'NOT_CHECKED';
+  const sec = p.security_status || 'UNKNOWN';
+  if (auth === 'LOGIN_REQUIRED') return { state: 'NEED_LOGIN', readiness: 'NEED_LOGIN' };
+  if (auth === 'VERIFICATION_REQUIRED' || sec === 'CHALLENGE' || sec === 'RECOVERY') {
+    return { state: 'NEED_VERIFICATION', readiness: 'NEED_VERIFICATION' };
+  }
+  if (auth === 'LOGGED_IN') {
+    if (pres === 'HAS_CHANNEL') {
+      if (acc === 'UNAVAILABLE' || acc === 'RESTRICTED' || sec === 'RESTRICTED') {
+        return { state: 'CHANNEL_PROBLEM', readiness: 'CHANNEL_NEEDS_ATTENTION' };
+      }
+      return { state: 'CHANNEL_READY', readiness: 'CHANNEL_CREATED' };
+    }
+    if (pres === 'NO_CHANNEL') return { state: 'SIGNED_IN_NO_CHANNEL', readiness: 'READY_TO_CREATE_CHANNEL' };
+    return { state: 'TECHNICAL_CHECK_FAILED', readiness: 'CHECK_REQUIRED' };
+  }
+  return { state: 'UNVERIFIED', readiness: 'CHECK_REQUIRED' };
+}
+// Invariant runtime (§22-§23): Login stage PASS nhưng summary NEED_LOGIN => lỗi logic.
+function evalCheckInvariant(p, stages) {
+  try {
+    const loginPass = (stages || []).some(s => (s.stage === 'CHECK_LOGIN' || s.stage === 'CHECK_YOUTUBE') && s.result === 'PASS');
+    const sum = evalSummary(p);
+    if (loginPass && sum.state === 'NEED_LOGIN') {
+      console.error('[EVAL INVARIANT] login PASS but summary NEED_LOGIN, profile=' + p.id);
+    }
+  } catch (e) {}
 }
 function channelPresenceChip(p) {
   const auth = p.auth_status || null;
@@ -1773,6 +1866,10 @@ function channelPresenceChip(p) {
 function evalBadgeFor(p) {
   // Chua tung check thanh cong + attempt loi -> "Chua xac dinh" (khong ket luan hong)
   const es = p.eval_status || 'UNCHECKED';
+  // PARTIAL (auth verify, channel timeout): badge ky thuat, KHONG "Can dang nhap" (§8)
+  if (p.eval_attempt_status === 'PARTIAL') {
+    return `<span class="badge badge-warn">◌ Kiểm tra một phần</span>`;
+  }
   if (es === 'UNCHECKED' && (p.eval_attempt_status === 'FAILED' || p.eval_attempt_status === 'TIMEOUT')) {
     return `<span class="badge badge-muted">? Chưa xác định</span>`;
   }

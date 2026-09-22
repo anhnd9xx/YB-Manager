@@ -40,7 +40,8 @@ class MonitoringService
         try {
             $rows = db()->query(
                 'SELECT p.id, p.status AS runtime, p.proxy_id, pr.status AS proxy_status,'
-                . ' s.eval_status, s.last_known_status, s.last_attempt_status, s.stage'
+                . ' s.eval_status, s.last_known_status, s.last_attempt_status, s.stage,'
+                . ' s.auth_status, s.channel_presence, s.account_channel_state'
                 . ' FROM profiles p LEFT JOIN proxies pr ON pr.id=p.proxy_id'
                 . ' LEFT JOIN account_states s ON s.profile_id=p.id'
                 . " $w"
@@ -64,6 +65,12 @@ class MonitoringService
         $withProxy = 0;
         $proxyDead = 0;
         $evalErrors = 0; // attempt moi nhat loi, rieng voi channel status
+        // §56: thong ke rieng (NO_CHANNEL khong phai error)
+        $signedIn = 0;
+        $signedOut = 0;
+        $hasChannel = 0;
+        $noChannel = 0;
+        $readyToCreate = 0;
         foreach ($rows as $r) {
             // Dashboard dung last_known_channel_status (khong dung attempt status)
             $ev = (string)($r['last_known_status'] ?? '');
@@ -73,6 +80,14 @@ class MonitoringService
             if (!empty($r['proxy_id'])) $withProxy++;
             if (!empty($r['proxy_id']) && ($r['proxy_status'] ?? '') === 'dead') $proxyDead++;
             if (in_array(($r['last_attempt_status'] ?? ''), ['FAILED', 'TIMEOUT'], true)) $evalErrors++;
+            $auth = (string)($r['auth_status'] ?? '');
+            $pres = (string)($r['channel_presence'] ?? '');
+            $acs = (string)($r['account_channel_state'] ?? '');
+            if ($auth === 'LOGGED_IN') $signedIn++;
+            elseif (in_array($auth, ['LOGIN_REQUIRED', 'LOGGED_OUT'], true)) $signedOut++;
+            if ($pres === 'HAS_CHANNEL') $hasChannel++;
+            elseif ($pres === 'NO_CHANNEL') $noChannel++;
+            if ($acs === 'SIGNED_IN_NO_CHANNEL') $readyToCreate++;
             if ($ev === 'ACTIVE') $active++;
             elseif ($ev === 'UNCHECKED') $unchecked++;
             elseif ($ev === 'CHECKING') $checking++;
@@ -107,6 +122,9 @@ class MonitoringService
         return ['total' => $total, 'active' => $active, 'issues' => $issues,
             'unchecked' => $unchecked, 'checking' => $checking, 'running' => $running,
             'withProxy' => $withProxy, 'proxyDead' => $proxyDead, 'evalErrors' => $evalErrors,
+            'signedIn' => $signedIn, 'signedOut' => $signedOut,
+            'hasChannel' => $hasChannel, 'noChannel' => $noChannel,
+            'readyToCreate' => $readyToCreate,
             'proxyOk' => max(0, $withProxy - $proxyDead),
             'alerts' => $alerts['total'], 'alertsCritical' => $alerts['CRITICAL'],
             'coverage' => $coverage, 'watchlist' => $watchlist,

@@ -50,7 +50,10 @@ try {
                         foreach (['browser_status', 'google_auth_status', 'google_auth_confidence',
                                   'youtube_auth_status', 'youtube_auth_confidence', 'channel_presence_confidence',
                                   'channel_access_status', 'security_status', 'evaluation_id',
-                                  'evaluation_version', 'needs_recheck', 'auth_verified_at'] as $c) {
+                                  'evaluation_version', 'needs_recheck', 'auth_verified_at',
+                                  'youtube_status', 'account_channel_state', 'readiness_status',
+                                  'last_verified_auth_status', 'last_auth_verified_at',
+                                  'last_verified_channel_presence', 'last_channel_verified_at'] as $c) {
                             try {
                                 if (db()->query("SHOW COLUMNS FROM account_states LIKE '$c'")->fetch()) {
                                     $cols .= ", $c";
@@ -93,10 +96,14 @@ try {
                 foreach (['browser_status', 'google_auth_status', 'google_auth_confidence',
                           'youtube_auth_status', 'youtube_auth_confidence', 'channel_presence_confidence',
                           'channel_access_status', 'security_status', 'evaluation_id',
-                          'evaluation_version', 'needs_recheck'] as $k) {
+                          'evaluation_version', 'needs_recheck',
+                          'youtube_status', 'account_channel_state', 'readiness_status',
+                          'last_verified_auth_status', 'last_verified_channel_presence'] as $k) {
                     $row[$k] = $em ? ($em[$k] ?? null) : null;
                 }
                 $row['auth_verified_at'] = $em && !empty($em['auth_verified_at']) ? iso_ts($em['auth_verified_at']) : null;
+                $row['last_auth_verified_at'] = $em && !empty($em['last_auth_verified_at']) ? iso_ts($em['last_auth_verified_at']) : null;
+                $row['last_channel_verified_at'] = $em && !empty($em['last_channel_verified_at']) ? iso_ts($em['last_channel_verified_at']) : null;
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

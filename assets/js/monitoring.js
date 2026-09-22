@@ -167,6 +167,13 @@ async function monLoadOverview(quiet) {
       ['Có Proxy', s.withProxy, `${s.proxyDead} lỗi`, '', ''],
       ['Đang đánh giá', s.checking, pct(s.checking), 'st-info', 'CHECKING'],
       ['Cảnh báo mở', s.alerts, s.alertsCritical ? `${s.alertsCritical} nghiêm trọng` : 'không nghiêm trọng', s.alerts ? 'st-critical' : '', 'ALERTS'],
+      // §56: thong ke rieng (NO_CHANNEL khong phai error)
+      ['Đã đăng nhập', s.signedIn ?? 0, pct(s.signedIn ?? 0), 'st-healthy', ''],
+      ['Chưa đăng nhập', s.signedOut ?? 0, pct(s.signedOut ?? 0), '', ''],
+      ['Đã có kênh', s.hasChannel ?? 0, pct(s.hasChannel ?? 0), 'st-healthy', ''],
+      ['Chưa có kênh', s.noChannel ?? 0, pct(s.noChannel ?? 0), '', ''],
+      ['Sẵn sàng tạo kênh', s.readyToCreate ?? 0, pct(s.readyToCreate ?? 0), 'st-info', ''],
+      ['Lỗi đánh giá', s.evalErrors ?? 0, pct(s.evalErrors ?? 0), (s.evalErrors ?? 0) ? 'st-critical' : '', ''],
     ];
     $('mon-kpi').innerHTML = kpi.map(([l, v, sub, c, f]) =>
       `<div class="mon-kpi" ${f ? `onclick="monKpiFilter('${f}')"` : ''}>`

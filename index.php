@@ -258,6 +258,10 @@
             <option value="exists">Đã có kênh</option>
             <option value="none">Chưa có kênh</option>
             <option value="unknown">Không xác định</option>
+            <option value="signed_in">Đã đăng nhập</option>
+            <option value="signed_out">Chưa đăng nhập</option>
+            <option value="ready">Sẵn sàng tạo kênh</option>
+            <option value="recheck">Cần đánh giá lại</option>
           </select>
           <input type="number" id="profile-filter-days" class="filter-select" style="width:110px" min="0" placeholder="Số ngày ≥" title="Quản lý ít nhất N ngày" onchange="reloadProfilesView()">
           <select id="profile-filter-stab" class="filter-select" onchange="reloadProfilesView()" title="Lọc theo điểm ổn định">

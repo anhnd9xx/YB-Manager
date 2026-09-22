@@ -348,7 +348,7 @@ class AccountDataCollector
         $body = (string)($d['body'] ?? '');
         $out['restricted'] = (bool)preg_match('/restricted|bị hạn chế|account.*suspend|kênh.*vi phạm/i', $u . ' ' . mb_substr($body, 0, 1000));
         // Placeholder @me/me/mine/current KHONG chung minh co channel
-        $isPlaceholder = (bool)preg_match('#/(@me|me|mine|current)([/?#]|$)#i', $u);
+        $isPlaceholder = (bool)preg_match('~/(@me|me|mine|current)([/?#]|$)~i', $u);
         $looksChannel = (bool)preg_match('#youtube\.com/(@|channel/|c/)#i', $u)
             && !preg_match('#/signin|/signup#i', $u) && !$isPlaceholder;
         $createMarkers = (bool)preg_match('/create.*channel|tạo kênh|create a channel|tạo kênh/i', $body);
