@@ -34,6 +34,17 @@ class SyncWindowLayoutManager
     public static function arrange(array $profileIds, array $opts = []): array
     {
         $sessionId = 'lay_' . date('His') . '_' . substr(md5(json_encode($profileIds) . microtime(true)), 0, 6);
+        // §34-§35: Stop batch active -> KHONG arrange (32 close events khong trigger 32 arrange)
+        try {
+            require_once __DIR__ . '/ChromeBatchManager.php';
+            if (ChromeBatchManager::stopActive() && empty($opts['force'])) {
+                return ['ok' => false, 'partial' => false,
+                    'message' => 'Dang dong hang loat — tam dung tu xep',
+                    'session' => self::session($sessionId, [], [], [], [], [], []),
+                    'results' => [], 'suspended' => true];
+            }
+        } catch (Throwable $e) {
+        }
         $layout = SyncSettingsService::layoutSnapshot();
         $win = SyncSettingsService::snapshot();
         if (!empty($opts['mode']) && in_array($opts['mode'], SyncSettingsService::LAYOUT_MODES, true)) {
@@ -44,8 +55,9 @@ class SyncWindowLayoutManager
         SyncLogger::info('layout_start', "[Layout] Smart Arrange started (session $sessionId)");
 
         // 1) Resolve live windows (gom ca minimized de restore+arrange; chi managed profiles)
+        // §12: loai transitional (STARTING/VERIFYING/CLOSING) tru khi opts cho phep
         $ids = array_values(array_unique(array_filter(array_map('intval', $profileIds))));
-        $live = self::liveWindows($ids);
+        $live = self::liveWindows($ids, empty($opts['includeTransitional']));
         // mainFirst (spec muc 31): MAIN luon slot 0
         $mainFirst = (int)($opts['mainFirst'] ?? 0);
         if ($mainFirst > 0) {
@@ -483,9 +495,11 @@ class SyncWindowLayoutManager
      * Live windows cua cac managed profiles (gom minimized de restore).
      * $ids rong -> tat ca. Moi profile giu window dien tich lon nhat (main window that,
      * loai DevTools/popup theo class + visible + dien tich).
+     * $excludeTransitional=true: loai profile dang STARTING/VERIFYING/CLOSING de
+     * arrange khong danh nhau voi restore/guard (§12). Mac dinh false (discover day du).
      * @return array{profileId:int,profileName:string,hwnd:int,pid:int,minimized:bool}[]
      */
-    public static function liveWindows(array $ids = []): array
+    public static function liveWindows(array $ids = [], bool $excludeTransitional = false): array
     {
         $want = $ids ? array_flip(array_map('intval', $ids)) : null;
         $byProfile = [];
@@ -500,6 +514,10 @@ class SyncWindowLayoutManager
             if ($w->class !== 'Chrome_WidgetWin_1' || !$w->visible) continue;
             if ($w->rect === null || $w->rect['w'] <= 0 || $w->rect['h'] <= 0) continue;
             if ($want !== null && !isset($want[$w->profileId])) continue;
+            if ($excludeTransitional && class_exists('ChromeBatchManager')
+                && ChromeBatchManager::isBusy((int)$w->profileId)) {
+                continue; // dang STARTING/VERIFYING/CLOSING -> placement_locked (§12)
+            }
             $pid = (int)$w->profileId;
             $area = $w->rect['w'] * $w->rect['h'];
             if (!isset($byProfile[$pid]) || $area > $byProfile[$pid]['area']) {

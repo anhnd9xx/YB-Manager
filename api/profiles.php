@@ -92,6 +92,25 @@ try {
                 $row['channel_presence'] = $em ? ($em['channel_presence'] ?? 'NOT_CHECKED') : 'NOT_CHECKED';
                 $row['channel_verified_at'] = $em && !empty($em['channel_verified_at']) ? iso_ts($em['channel_verified_at']) : null;
                 $row['last_known_presence'] = $em ? ($em['last_known_presence'] ?? null) : null;
+                // Batch lifecycle overlay (§2, §42): transitional state cho card hien thi ngay
+                $lf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_life_' . (int)$row['id'] . '.json';
+                $row['life_state'] = null;
+                if (is_file($lf) && (time() - (int)@filemtime($lf)) < 120) {
+                    $lj = json_decode((string)@file_get_contents($lf), true);
+                    if (is_array($lj) && !empty($lj['state'])
+                        && !in_array($lj['state'], ['RUNNING', 'STOPPED'], true)) {
+                        $row['life_state'] = $lj['state'];
+                    }
+                }
+                // Tab verify that (§21): actual/expected thay vi saved gia
+                $row['tab_verify'] = null;
+                $tvf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tabverify_' . (int)$row['id'] . '.json';
+                if (is_file($tvf) && (time() - (int)@filemtime($tvf)) < 600) {
+                    $tv = json_decode((string)@file_get_contents($tvf), true);
+                    if (is_array($tv) && isset($tv['expected'], $tv['actual'])) {
+                        $row['tab_verify'] = $tv;
+                    }
+                }
                 // V2 single source of truth (§49): browser/google/youtube/access/security/version
                 foreach (['browser_status', 'google_auth_status', 'google_auth_confidence',
                           'youtube_auth_status', 'youtube_auth_confidence', 'channel_presence_confidence',

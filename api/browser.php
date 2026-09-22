@@ -7,18 +7,30 @@ require_once __DIR__ . '/../sync/WindowDiscovery.php';
 $action = $_GET['action'] ?? 'open';
 $profileId = (int)($_GET['id'] ?? 0);
 
-try {
-    $stmt = db()->prepare(
-        'SELECT p.*, pr.host AS proxy_host, pr.port AS proxy_port, pr.protocol AS proxy_protocol,
-                pr.username AS proxy_user, pr.password AS proxy_pass
-         FROM profiles p
-         LEFT JOIN proxies pr ON pr.id = p.proxy_id
-         WHERE p.id = ?'
-    );
-    $stmt->execute([$profileId]);
-    $p = $stmt->fetch();
+// Batch actions khong can profile don (engine tu load theo ids)
+if (str_starts_with($action, 'batch_')) {
+    // chuyen thang xuong switch ben duoi voi $p = null
+    $p = null;
+} else {
+    try {
+        $stmt = db()->prepare(
+            'SELECT p.*, pr.host AS proxy_host, pr.port AS proxy_port, pr.protocol AS proxy_protocol,
+                    pr.username AS proxy_user, pr.password AS proxy_pass
+             FROM profiles p
+             LEFT JOIN proxies pr ON pr.id = p.proxy_id
+             WHERE p.id = ?'
+        );
+        $stmt->execute([$profileId]);
+        $p = $stmt->fetch();
 
-    if (!$p) json_out(['ok' => false, 'message' => 'Khong tim thay profile'], 404);
+        if (!$p) json_out(['ok' => false, 'message' => 'Khong tim thay profile'], 404);
+    } catch (Throwable $e) {
+        json_out(['ok' => false, 'message' => 'Loi he thong: ' . $e->getMessage()], 500);
+    }
+}
+
+try {
+    // $p da load o tren (batch: null)
 
     if (!file_exists(chrome_path())) {
         json_out(['ok' => false, 'message' => 'Khong tim thay Chrome: ' . chrome_path()], 500);
@@ -47,6 +59,81 @@ try {
                 ->execute([$running ? 'running' : 'stopped', $p['id']]);
             json_out(['ok' => true, 'running' => $running]);
             break;
+
+        case 'batch_open_prepare':
+        case 'batch_open_chunk':
+        case 'batch_open_poll':
+        case 'batch_open_cancel':
+        case 'batch_close':
+        case 'batch_close_poll': {
+            // Batch lifecycle engine duy nhat (§1): start/stop all/selected chung code
+            @set_time_limit(120);
+            require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+            $b = json_body();
+            if ($action === 'batch_open_prepare') {
+                $ids = array_map('intval', (array)($b['ids'] ?? []));
+                if (!$ids && !empty($_GET['ids'])) {
+                    $ids = array_map('intval', explode(',', (string)$_GET['ids']));
+                }
+                if (!$ids) {
+                    // mac dinh: tat ca profiles (Mo tat ca)
+                    try {
+                        $ids = array_map('intval', db()->query('SELECT id FROM profiles ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
+                    } catch (Throwable $e) {
+                        $ids = [];
+                    }
+                }
+                if (!$ids) json_out(['ok' => false, 'message' => 'Chua co kenh nao'], 400);
+                json_out(['ok' => true, 'data' => ChromeBatchManager::startPrepare($ids)]);
+                break;
+            }
+            if ($action === 'batch_open_chunk') {
+                $bid = (string)($b['batch_id'] ?? ($_GET['batch_id'] ?? ''));
+                if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+                $limit = (int)($b['limit'] ?? ChromeBatchManager::MAX_PARALLEL_START);
+                json_out(['ok' => true, 'data' => ChromeBatchManager::startChunk($bid, $limit)]);
+                break;
+            }
+            if ($action === 'batch_open_poll') {
+                $bid = (string)($_GET['batch_id'] ?? '');
+                if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+                json_out(['ok' => true, 'data' => ChromeBatchManager::startPoll($bid)]);
+                break;
+            }
+            if ($action === 'batch_open_cancel') {
+                $bid = (string)($b['batch_id'] ?? ($_GET['batch_id'] ?? ''));
+                if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+                json_out(['ok' => true, 'data' => ['cancelled' => ChromeBatchManager::startCancel($bid)]]);
+                break;
+            }
+            if ($action === 'batch_close') {
+                $ids = array_map('intval', (array)($b['ids'] ?? []));
+                if (!$ids && !empty($_GET['ids'])) {
+                    $ids = array_map('intval', explode(',', (string)$_GET['ids']));
+                }
+                if (!$ids) {
+                    try {
+                        $ids = array_map('intval', db()->query("SELECT id FROM profiles WHERE status='running' ORDER BY id")->fetchAll(PDO::FETCH_COLUMN));
+                    } catch (Throwable $e) {
+                        $ids = [];
+                    }
+                }
+                if (!$ids) json_out(['ok' => true, 'data' => ['batch_id' => null, 'total' => 0, 'dispatched' => 0, 'done' => true]]);
+                // Huy start batch dang chay truoc (§39)
+                if (!empty($b['cancel_open_batch'])) {
+                    ChromeBatchManager::startCancel((string)$b['cancel_open_batch']);
+                }
+                $mode = (string)($b['mode'] ?? get_setting('close_mode', 'safe'));
+                if (!in_array($mode, ['safe', 'fast'], true)) $mode = 'safe';
+                json_out(['ok' => true, 'data' => ChromeBatchManager::stopBatch($ids, $mode)]);
+                break;
+            }
+            // batch_close_poll
+            $bid = (string)($_GET['batch_id'] ?? '');
+            if ($bid === '') json_out(['ok' => false, 'message' => 'Thieu batch_id'], 400);
+            json_out(['ok' => true, 'data' => ChromeBatchManager::stopPoll($bid)]);
+            break;
+        }
 
         default:
             json_out(['ok' => false, 'message' => 'Action khong hop le'], 400);

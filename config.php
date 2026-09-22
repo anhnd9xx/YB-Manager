@@ -296,13 +296,15 @@ function php_cli_binary(): string
     return is_file($cand) ? $cand : '';
 }
 
-/** Khoi dong relay local (proxy_relay.php) de Chrome goi khong credential; relay them Authorization ra proxy that. Tra ve port hoac null. */
-function start_proxy_relay(array $p): ?int
+/** Khoi dong relay local (proxy_relay.php) de Chrome goi khong credential; relay them Authorization ra proxy that. Tra ve port hoac null.
+ *  $quick=true (batch open): tin relay_listening, KHONG cho relay_healthy 12s (mo hang loat muot). */
+function start_proxy_relay(array $p, bool $quick = false): ?int
 {
     $port = expected_relay_port($p);
     if ($port === null) return null;
     // Relay dang len PORT va THUC SU phuc vu duoc -> dung ngay (khong khoi dong lai)
     if (relay_listening($port)) {
+        if ($quick) return $port;
         if (relay_healthy($port)) return $port;
         // Relay song port nhung chua/phuc-vu cham -> KHONG giet (tranh mat ket noi kenh dang chay);
         // qui ve kiem tra lai o vong sau. Tra ve port de khoi treo open kenh.
@@ -366,12 +368,26 @@ function start_overlay_keeper(): void
     @shell_exec($cmd);
 }
 
-/** Khoi dong relay watchdog (auto-heal relay chet cho kenh dang chay). Lock file trong script loai trung lap. */
+/** Khoi dong relay watchdog (auto-heal relay chet cho kenh dang chay). Lock file trong script loai trung lap.
+ *  Test lock truoc khi spawn: dang chay thi skip (mo hang loat khong spawn thua ps moi launch). */
 function start_relay_watchdog(): void
 {
     $wd = __DIR__ . '/bin/relay_watchdog.php';
     $php = php_cli_binary();
     if ($php === '' || !is_file($wd)) return;
+    try {
+        $lockFile = __DIR__ . '/bin/.relay_watchdog.lock';
+        $fh = @fopen($lockFile, 'c');
+        if ($fh) {
+            if (!@flock($fh, LOCK_EX | LOCK_NB)) {
+                @fclose($fh);
+                return; // dang chay -> skip spawn
+            }
+            @flock($fh, LOCK_UN);
+            @fclose($fh);
+        }
+    } catch (Throwable $e) {
+    }
     // Launch detached: second instance tu-exit via lock file
     $args = "'-f','" . str_replace("'", "''", $wd) . "'";
     $ps = "Start-Process -FilePath '" . str_replace("'", "''", $php) . "' -ArgumentList @($args) -WindowStyle Hidden";
@@ -874,11 +890,12 @@ function ensure_chrome_profile_name(array $p): void
  * Voi proxy co credential: start_proxy_relay BEEN LA guard song/chet cua proxy
  * (khong can test_proxy rieng -> mo kenh nhanh, khong 2 lan noi len proxy lien tiep).
  * $opts['skipSessionInject']=true: mo URL chi dinh (Studio/Dashboard), khong inject session.
+ * $opts['quickRelay']=true: batch open — tin relay_listening, khong cho healthy 12s.
  * Mac dinh: prelaunch restore - load session tu DB (nhanh, khong can Chrome chay)
  * va append URLs vao command de Chrome mo dung tabs ngay frame dau. */
 function launch_chrome(array $p, string $url, ?int $port, array $opts = []): void
 {
-    $relayPort = start_proxy_relay($p);
+    $relayPort = start_proxy_relay($p, !empty($opts['quickRelay']));
     // proxy co credential nhung relay khong len duoc (proxy chet/hong) -> dung mo Chrome,
     // tra loi loi de UI bao ngay (tranh mo ra "no internet").
     if ($relayPort === null && expected_relay_port($p) !== null) {
@@ -973,6 +990,15 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
             $restoreSnapFile = null;
         }
     }
+    // Placement lock TRUOC Popen (§12): STARTING/VERIFYING -> locked,
+    // AutoArrange khong duoc move. apply_window clear khi STABLE/xong.
+    try {
+        if ($placeRect !== null && $placeMonitor !== null) {
+            require_once __DIR__ . '/sync/WindowPlacementManager.php';
+            WindowPlacementManager::startGuard((int)($p['id'] ?? 0), 0, $placeRect, $placeMonitor);
+        }
+    } catch (Throwable $e) {
+    }
     $quoted = array_map(function ($arg) {
         return '"' . $arg . '"';
     }, $cmd);
@@ -1030,6 +1056,19 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
         }
     } catch (Throwable $e) {
         // applier loi khong duoc pha launch Chrome
+    }
+}
+
+/** Proxy non-relay vua test alive (<5ph) -> skip retest khi mo hang loat. */
+function proxy_recently_alive(array $p): bool
+{
+    if (empty($p['proxy_host']) || expected_relay_port($p) !== null) return false;
+    if (($p['proxy_status'] ?? '') !== 'alive') return false;
+    if (empty($p['proxy_last_check'])) return false;
+    try {
+        return (time() - strtotime((string)$p['proxy_last_check'])) < 300;
+    } catch (Throwable $e) {
+        return false;
     }
 }
 
@@ -1103,8 +1142,7 @@ function close_chrome_gracefully(array $p): bool
 function kill_chrome_processes(array $p): void
 {
     // Graceful truoc: WM_CLOSE de Chrome flush profile/cookie (3s), that bai -> fallback kill
-    close_chrome_gracefully($p);
-    $udir = $p['user_data_dir'];
+    close_chrome_gracefully($p);    $udir = $p['user_data_dir'];
     $ps = 'powershell -NoProfile -Command '
         . '"Get-CimInstance Win32_Process -Filter \"Name=' . "'" . 'chrome.exe' . "'" . '\" '
         . '| Where-Object { $_.CommandLine -like ' . "'" . '*' . $udir . '*' . "'" . ' } '
@@ -1120,6 +1158,12 @@ function kill_chrome_processes(array $p): void
     kill_tab_title_keeper((int)($p['debug_port'] ?? 0));
     // don relay neu khong con profile nao dung proxy nay
     stop_proxy_relay_if_unused($p);
+    // mo khoa placement guard (window khong con)
+    try {
+        require_once __DIR__ . '/sync/WindowPlacementManager.php';
+        WindowPlacementManager::clearGuard((int)($p['id'] ?? 0));
+    } catch (Throwable $e) {
+    }
 }
 
 /**

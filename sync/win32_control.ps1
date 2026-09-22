@@ -1,7 +1,7 @@
 ###############################################################################
 # win32_control.ps1 - PHASE 1: dieu khien 1 window theo HWND.
 # Dung: powershell -NoProfile -ExecutionPolicy Bypass -File win32_control.ps1 `
-#         -Hwnd <so> -Action <move|resize|moveresize|front|minimize|restore|show|hide> `
+#         -Hwnd <so> -Action <move|resize|moveresize|maximize|front|minimize|restore|show|hide> `
 #         [-PosX <x>] [-PosY <y>] [-Width <w>] [-Height <h>]
 # LUU Y: ten param dai tuong minh (PosX/Width/Height) de PowerShell khong bind
 # nham prefix (VD -H bi nhan thanh -Hwnd).
@@ -49,7 +49,7 @@ if (-not [WC]::IsWindow($hWndPtr)) { Out-Result $false "HWND $Hwnd khong ton tai
 # SWP flags: giu Z-order + khong kich hoat (tranh cuop focus khi move/resize ngam)
 $SWP_NOZORDER = 0x0004; $SWP_NOACTIVATE = 0x0010
 # ShowWindow cmds
-$SW_RESTORE = 9; $SW_MINIMIZE = 6; $SW_SHOW = 5; $SW_HIDE = 0
+$SW_RESTORE = 9; $SW_MINIMIZE = 6; $SW_SHOW = 5; $SW_HIDE = 0; $SW_MAXIMIZE = 3
 
 # Cua so MAXIMIZED bo qua SetWindowPos (Windows giu nguyen maximized) -> restore
 # truoc de resize/move co hieu luc. Chrome hay mo maximized theo state lan truoc.
@@ -99,6 +99,10 @@ switch ($Action.ToLower()) {
     }
     'restore' {
         if (-not [WC]::ShowWindow($hWndPtr, $SW_RESTORE)) { Out-Result $false "restore that bai" }
+        Out-Result $true $null
+    }
+    'maximize' {
+        if (-not [WC]::ShowWindow($hWndPtr, $SW_MAXIMIZE)) { Out-Result $false "maximize that bai" }
         Out-Result $true $null
     }
     'show' {

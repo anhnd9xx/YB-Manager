@@ -148,7 +148,14 @@ class AccountRepository
                  ORDER BY s.last_checked_at IS NULL DESC, s.last_checked_at ASC LIMIT $limit"
             );
             $st->execute([$intervalMin]);
-            return array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+            $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+            // Bo profile dang transitional (STARTING/CLOSING): khong danh gia giua batch (§36)
+            try {
+                require_once __DIR__ . '/ChromeBatchManager.php';
+                $ids = array_values(array_filter($ids, fn($pid) => !ChromeBatchManager::isBusy($pid)));
+            } catch (Throwable $e) {
+            }
+            return $ids;
         } catch (Throwable $e) {
             return [];
         }

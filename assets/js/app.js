@@ -312,7 +312,7 @@ function renderProfiles() {
     const tabInfo = p.debug_port
       ? `<div class="meta-row"><span class="meta-label">Debug port</span><span class="meta-value mono">${p.debug_port}</span></div>`
       : '';
-    const sessInfo = `<div class="meta-row"><span class="meta-label">Tabs</span><span class="meta-value"><button class="btn btn-xs" onclick="openTabsPanel(${p.id})" title="Xem/lưu/khôi phục tabs">${p.tab_count_saved || 0} tabs · Xem</button></span></div>`;
+    const sessInfo = `<div class="meta-row"><span class="meta-label">Tabs</span><span class="meta-value"><button class="btn btn-xs" onclick="openTabsPanel(${p.id})" title="${tabCountTip(p)}">${tabCountLabel(p)} · Xem</button></span></div>`;
     const accInfo = buildAccountRow(p);
     const checked = selectedProfileIds.has(Number(p.id));
     return `
@@ -819,16 +819,17 @@ async function applyPreviewArrange() {
   if (lastPreviewPayload) await arrangeCall(lastPreviewPayload);
 }
 
-// ============ PHASE 9: Auto Arrange sau Multi Launch (spec muc 27) ============
-// Doi HWND tung Chrome (poll 1s/timeout 20s, KHONG sleep mu), roi arrange theo
-// dung thu tu ids (slot theo profile order, khong phu thuoc launch nhanh/cham).
+// ============ PHASE 9: Auto Arrange sau Multi Launch ============
+// Guards (ytm_guard_<id>) do launch_chrome viet + apply_window xoa khi STABLE:
+// arrange KHONG truyen allowLocked -> tu bo qua window dang locked (§12).
+// Chi arrange sau khi poll on dinh (khong keo ve primary, khong nay man).
 async function autoArrangeAfterLaunch(ids) {
   try {
     if (!settings || !settings.layout_auto_launch) return;
     ids = (ids || []).map(Number).filter(x => x > 0);
     if (!ids.length) return;
     arrangeResultMsg('⏳ Đợi Chrome hiện cửa sổ...', null);
-    const deadline = Date.now() + 20000;
+    const deadline = Date.now() + 25000;
     let ready = [];
     while (Date.now() < deadline) {
       try {
@@ -840,8 +841,9 @@ async function autoArrangeAfterLaunch(ids) {
       await sleep(1000);
     }
     if (!ready.length) { arrangeResultMsg('✗ Không thấy cửa sổ nào sau khi mở', false); return; }
-    // Giu monitor affinity sau Start All: khong keo ve primary
-    await arrangeCall({ profileIds: ready, monitor: 'profile', allowLocked: true });
+    // Giu monitor affinity sau Start All: khong keo ve primary.
+    // KHONG allowLocked: window dang STARTING/VERIFYING (guard file) tu duoc bo qua.
+    await arrangeCall({ profileIds: ready, monitor: 'profile' });
     if (ready.length < ids.length) {
       toast(`Tự xếp ${ready.length}/${ids.length} kênh (số còn lại chưa hiện cửa sổ)`, 'error');
     }
@@ -861,23 +863,114 @@ function startBulkTracker() {
 function stopBulkTracker() {
   if (window.__ytmBulkTimer) { clearInterval(window.__ytmBulkTimer); window.__ytmBulkTimer = null; }
 }
+// ============ BATCH LIFECYCLE (ChromeBatchManager — 1 engine cho cả 4 action) ============
+// Start: prepare -> chunk (bounded 5, stagger 100ms) -> poll verify (HWND/placement/tabs).
+// Stop: 2-phase (snapshot + WM_CLOSE dispatch 1 lần) -> poll actual exit (closed/total).
+const START_CONCURRENCY = 5;
+async function batchOpenIds(ids, btnId, label) {
+  ids = (ids || []).map(Number).filter(x => x > 0);
+  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return { ok: 0, fail: 0 }; }
+  if (activeBatch) { toast(`Đang ${activeBatch.kind === 'open' ? 'mở' : 'đóng'} hàng loạt — thử lại sau`, 'error'); return { ok: 0, fail: 0 }; }
+  const seq = ++batchSeq;
+  const ui = batchBtn(btnId, label || 'Đang mở');
+  window.__ytmBulkOp = true; // freeze reflow/arrange xen vao (§34-§35)
+  startBulkTracker();
+  let launched = 0, failed = 0, stable = 0;
+  try {
+    const prep = await sendJson(api + 'browser.php?action=batch_open_prepare', { ids });
+    if (!prep.ok) { toast(prep.message || 'Lỗi tạo batch mở', 'error'); return { ok: 0, fail: ids.length }; }
+    const batchId = prep.data.batch_id;
+    activeBatch = { kind: 'open', seq, batch_id: batchId };
+    const total = prep.data.total || ids.length;
+    if (prep.data.skipped && prep.data.skipped.length) {
+      toast(`Bỏ qua ${prep.data.skipped.length} kênh (đang chạy/bận)`, '');
+    }
+    // Chunk loop: bounded parallel, slot release khi PID có (không chờ web load)
+    for (;;) {
+      if (activeBatch == null || activeBatch.seq !== seq) return { ok: launched, fail: failed, cancelled: true };
+      const ch = await sendJson(api + 'browser.php?action=batch_open_chunk', { batch_id: batchId, limit: START_CONCURRENCY });
+      if (!ch.ok) { toast(ch.message || 'Lỗi mở batch', 'error'); break; }
+      launched += (ch.data.launched || []).length;
+      failed += (ch.data.errors || []).length;
+      for (const e of (ch.data.errors || [])) {
+        if (e.error === 'proxy_dead') loadProxies();
+      }
+      if (btnId) { const b = $(btnId); if (b) b.textContent = `◌ ${label || 'Đang mở'} ${launched}/${total}`; }
+      if (ch.data.done) break;
+    }
+    // Verify poll: HWND ready + placement stable + tab verify (không chờ website load)
+    const vDeadline = Date.now() + 45000;
+    for (;;) {
+      let poll = null;
+      try { poll = await getJson(api + `browser.php?action=batch_open_poll&batch_id=${batchId}`); } catch (e) {}
+      if (poll && poll.ok && poll.data && poll.data.counts) {
+        const c = poll.data.counts;
+        stable = c.stable || 0;
+        if (btnId) { const b = $(btnId); if (b) b.textContent = `◌ ${label || 'Đang mở'} ${c.windows || 0}/${total}`; }
+        if (poll.data.done) break;
+      }
+      if (Date.now() > vDeadline) break;
+      await sleep(800);
+    }
+    markProfileChanged();
+    return { ok: launched, fail: failed, stable, batch_id: batchId, total };
+  } finally {
+    window.__ytmBulkOp = false;
+    stopBulkTracker();
+    ui.done();
+    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
+  }
+}
 async function openSelected() {
   const ids = getSelectedIds();
-  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  if (activeBatch) { toast(`Đang ${activeBatch.kind === 'open' ? 'mở' : 'đóng'} hàng loạt — thử lại sau`, 'error'); return; }
+  const r = await batchOpenIds(ids, null, 'Đang mở');
+  if (r.cancelled) { toast('Đã hủy mở hàng loạt', 'error'); refreshAll(); return; }
+  toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+  refreshAll();
+  await autoArrangeAfterLaunch(ids);
+}
+async function batchCloseIds(ids, btnId, label, opts) {
+  ids = (ids || []).map(Number).filter(x => x > 0);
+  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return { closed: 0 }; }
+  opts = opts || {};
+  if (activeBatch && activeBatch.kind === 'close') { toast('Đang đóng — thử lại sau', 'error'); return { closed: 0 }; }
+  // Stop chen ngang Start (§39): cancel queued start jobs truoc
+  let cancelOpen = null;
+  if (activeBatch && activeBatch.kind === 'open' && activeBatch.batch_id) cancelOpen = activeBatch.batch_id;
   const seq = ++batchSeq;
-  activeBatch = { kind: 'open', seq };
-  const ui = batchBtn(null, 'Đang mở');
-  window.__ytmBulkOp = true; // chan reflow xen vao giua bulk launch (Phase 12)
-  startBulkTracker(); // card cap nhat RUNNING truc tiep trong batch
+  const ui = batchBtn(btnId, label || 'Đang đóng');
+  window.__ytmBulkOp = true;
+  startBulkTracker();
   try {
-    // Pool 5 song song + stagger (mo tuan tu 20 kenh mat hang phut)
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở', { seq, onTick: ui.tick.bind(ui) });
+    activeBatch = { kind: 'close', seq };
+    const r = await sendJson(api + 'browser.php?action=batch_close',
+      { ids, mode: opts.mode || 'safe', cancel_open_batch: cancelOpen });
+    if (!r.ok) { toast(r.message || 'Lỗi đóng batch', 'error'); return { closed: 0 }; }
+    if (!r.data.batch_id) { toast('Không có kênh nào đang chạy', ''); return { closed: 0 }; }
+    const batchId = r.data.batch_id;
+    activeBatch.batch_id = batchId;
+    const total = r.data.total || ids.length;
+    // Poll shared monitor: progress = ACTUAL EXIT (closed/total), khong phai dispatched
+    let closed = 0, stuck = [];
+    const deadline = Date.now() + 60000;
+    for (;;) {
+      let poll = null;
+      try { poll = await getJson(api + `browser.php?action=batch_close_poll&batch_id=${batchId}`); } catch (e) {}
+      if (poll && poll.ok && poll.data) {
+        closed = poll.data.closed || 0;
+        stuck = poll.data.stuck || [];
+        const b = btnId ? $(btnId) : null;
+        const tip = `Đã gửi lệnh: ${poll.data.dispatched || 0} · Đã đóng: ${closed} · Còn lại: ${total - closed}`;
+        if (b) { b.textContent = `◌ ${label || 'Đang đóng'} ${closed}/${total}`; b.title = tip; }
+        const el = $('selected-count');
+        if (el && !btnId) { el.textContent = `${label || 'Đang đóng'} ${closed}/${total}…`; el.title = tip; }
+        if (poll.data.done) break;
+      }
+      if (Date.now() > deadline) break;
+      await sleep(400);
+    }
     markProfileChanged();
-    if (r.cancelled) { toast('Đã hủy mở hàng loạt', 'error'); refreshAll(); return; }
-    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-    refreshAll();
-    await autoArrangeAfterLaunch(ids);
+    return { closed, total, stuck, snapshot_ms: r.data.snapshot_ms, dispatch_ms: r.data.dispatch_ms };
   } finally {
     window.__ytmBulkOp = false;
     stopBulkTracker();
@@ -887,25 +980,9 @@ async function openSelected() {
 }
 async function closeSelected() {
   const ids = getSelectedIds();
-  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  if (activeBatch) { toast('Đang chạy batch khác — thử lại sau', 'error'); return; }
-  const seq = ++batchSeq; // huy batch Start dang chay (QUEUED dung, STARTING/RUNNING -> CLOSING)
-  activeBatch = { kind: 'close', seq };
-  const ui = batchBtn(null, 'Đang đóng');
-  window.__ytmBulkOp = true;
-  startBulkTracker();
-  try {
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng', { seq, onTick: ui.tick.bind(ui) });
-    markProfileChanged();
-    if (r.cancelled) { toast('Đã hủy', 'error'); refreshAll(); return; }
-    toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-    refreshAll();
-  } finally {
-    window.__ytmBulkOp = false;
-    stopBulkTracker();
-    ui.done();
-    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
-  }
+  const r = await batchCloseIds(ids, null, 'Đang đóng');
+  toast(`Đã đóng ${r.closed || 0}/${ids.length} kênh`, (r.closed || 0) < ids.length ? 'error' : 'success');
+  refreshAll();
 }
 // Pool dispatch song song co gioi han (B1-B3): toi da 5 request dong thoi,
 // worker thu w nghi w*150ms truoc khi chay (stagger chong spike). Tra ve {ok,fail,cancelled}.
@@ -1685,6 +1762,9 @@ function buildProxyRow(p) {
 }
 
 function liveProfileStatus(p) {
+  // Batch lifecycle overlay (§2, §42): server truth hien thi ngay, khong cho tracker
+  const LIFE_VN = { QUEUED: 'Đang chờ…', PREPARING: 'Chuẩn bị…', STARTING: 'Đang mở…', WINDOW_READY: 'Đang mở…', VERIFYING: 'Đang kiểm tra…', CLOSING: 'Đang đóng…', STOPPING: 'Đang đóng…', ERROR: 'Lỗi' };
+  if (p.life_state && LIFE_VN[p.life_state]) return { state: 'busy', label: LIFE_VN[p.life_state] };
   const op = pendingOps.get(p.id);
   if (op === 'opening') return { state: 'busy', label: 'Đang mở…' };
   if (op === 'closing') return { state: 'busy', label: 'Đang đóng…' };
@@ -1696,6 +1776,23 @@ function liveProfileStatus(p) {
 
 function platLabel(p) {
   return { youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook', other: 'Khác' }[p] || 'YouTube';
+}
+// Tab count that (§21): actual verified thay vi saved gia; mismatch -> "2/3" + tooltip
+function tabCountLabel(p) {
+  const tv = p.tab_verify;
+  if (tv && Number(tv.expected) > 0) {
+    if (Number(tv.actual) === Number(tv.expected)) return `${tv.actual} tabs`;
+    return `${tv.actual}/${tv.expected} tabs`;
+  }
+  return `${p.tab_count_saved || 0} tabs`;
+}
+function tabCountTip(p) {
+  const tv = p.tab_verify;
+  if (tv && Number(tv.expected) > 0 && Number(tv.actual) !== Number(tv.expected)) {
+    const miss = Number(tv.expected) - Number(tv.actual);
+    return `Thiếu ${miss} tab khi khôi phục — Xem/lưu/khôi phục tabs`;
+  }
+  return 'Xem/lưu/khôi phục tabs';
 }
 
 // ============ ACCOUNT EVALUATION (hien thi) ============
@@ -1936,12 +2033,10 @@ async function openProfile(id) {
   if (pendingOps.has(id)) return;
   pendingOps.set(id, 'opening');
   renderProfiles();
-  let res;
   try {
-    res = await getJson(api + `browser.php?action=open&id=${id}`);
-    toast(res.message || 'Đã mở', res.ok ? 'success' : 'error');
-    if (res.proxy_dead) loadProxies();
-    if (res.ok) { markProfileChanged(); refreshAll(); }
+    const r = await batchOpenIds([id], null, 'Đang mở');
+    if (r.fail) toast('Lỗi khi mở kênh', 'error');
+    else if (!r.cancelled) { markProfileChanged(); }
   } catch (e) {
     toast('Lỗi khi mở kênh', 'error');
   } finally {
@@ -1963,11 +2058,10 @@ async function closeProfile(id) {
   if (pendingOps.has(id)) return;
   pendingOps.set(id, 'closing');
   renderProfiles();
-  let res;
   try {
-    res = await getJson(api + `browser.php?action=close&id=${id}`);
-    toast(res.message || 'Đã đóng', res.ok ? 'success' : 'error');
-    if (res.ok) markProfileChanged();
+    const r = await batchCloseIds([id], null, 'Đang đóng');
+    toast((r.closed || 0) > 0 ? 'Đã đóng' : 'Lỗi khi đóng kênh', (r.closed || 0) > 0 ? 'success' : 'error');
+    if ((r.closed || 0) > 0) markProfileChanged();
     refreshAll();
   } catch (e) {
     toast('Lỗi khi đóng kênh', 'error');
@@ -1979,47 +2073,20 @@ async function closeProfile(id) {
 async function openAllProfiles() {
   const ids = profiles.map(p => p.id);
   if (!ids.length) { toast('Chưa có kênh nào', 'error'); return; }
-  if (activeBatch) { toast(`Đang ${activeBatch.kind === 'open' ? 'mở' : 'đóng'} hàng loạt — thử lại sau`, 'error'); return; }
-  const seq = ++batchSeq;
-  activeBatch = { kind: 'open', seq };
-  const ui = batchBtn('btn-open-all', 'Đang mở');
-  window.__ytmBulkOp = true;
-  startBulkTracker();
-  try {
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=open&id=${id}`), 'Đang mở', { seq, onTick: ui.tick.bind(ui) });
-    markProfileChanged();
-    if (r.cancelled) { toast('Đã hủy mở tất cả', 'error'); refreshAll(); return; }
-    toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-    refreshAll();
-    await autoArrangeAfterLaunch(ids);
-  } finally {
-    window.__ytmBulkOp = false;
-    stopBulkTracker();
-    ui.done();
-    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
-  }
+  const r = await batchOpenIds(ids, 'btn-open-all', 'Đang mở');
+  if (r.cancelled) { toast('Đã hủy mở tất cả', 'error'); refreshAll(); return; }
+  markProfileChanged();
+  toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+  refreshAll();
+  await autoArrangeAfterLaunch(ids);
 }
 async function closeAllProfiles() {
   const ids = profiles.map(p => p.id);
   if (!ids.length) { toast('Chưa có kênh nào', 'error'); return; }
-  if (activeBatch && activeBatch.kind === 'close') { toast('Đang đóng — thử lại sau', 'error'); return; }
-  const seq = ++batchSeq; // huy Start dang chay: QUEUED dung, STARTING/RUNNING -> CLOSING
-  activeBatch = { kind: 'close', seq };
-  const ui = batchBtn('btn-close-all', 'Đang đóng');
-  window.__ytmBulkOp = true;
-  startBulkTracker();
-  try {
-    const r = await poolEach(ids, id => getJson(api + `browser.php?action=close&id=${id}`), 'Đang đóng', { seq, onTick: ui.tick.bind(ui) });
-    markProfileChanged();
-    if (r.cancelled) { toast('Đã hủy', 'error'); refreshAll(); return; }
-    toast(`Đã đóng ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
-    refreshAll();
-  } finally {
-    window.__ytmBulkOp = false;
-    stopBulkTracker();
-    ui.done();
-    if (activeBatch && activeBatch.seq === seq) activeBatch = null;
-  }
+  const r = await batchCloseIds(ids, 'btn-close-all', 'Đang đóng');
+  markProfileChanged();
+  toast(`Đã đóng ${r.closed || 0}/${ids.length} kênh`, (r.closed || 0) < ids.length ? 'error' : 'success');
+  refreshAll();
 }
 
 // ---- đổi tên / handle nhanh trên card ----

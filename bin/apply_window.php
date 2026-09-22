@@ -65,6 +65,7 @@ if (is_array($placeRect) && isset($placeRect['x'], $placeRect['y'], $placeRect['
 // Version dau: fixed OFF + auto + khong placement -> giu hanh vi cu (khong cham window)
 if (!$snap['fixed'] && $snap['position'] === 'auto' && $placeRect === null) {
     aw_log('[Window] Fixed OFF + Auto: khong ep kich thuoc/vi tri', $profileId);
+    WindowPlacementManager::clearGuard($profileId);
     exit(0);
 }
 
@@ -101,9 +102,11 @@ if ($win === null) {
     $msg = "[Window] HWND khong xuat hien sau 10s (profile #$profileId)";
     SyncLogger::warn('window_apply', $msg, $profileId);
     echo date('H:i:s') . " $msg\n";
+    WindowPlacementManager::clearGuard($profileId);
     exit(1);
 }
 aw_log('[Window] HWND found: ' . $win['hwnd'], $profileId);
+WindowPlacementManager::updateGuardHwnd($profileId, (int)$win['hwnd']);
 
 // Rect hien tai: 1 lan discovery duy nhat (khong poll) de tinh vi tri giu/clamp
 $curRect = null;
@@ -213,9 +216,24 @@ if ($r['ok']) {
     $rc = $r['rect'] ?? null;
     $got = is_array($rc) ? " -> thuc te {$rc['w']}x{$rc['h']} @ ({$rc['x']},{$rc['y']})" : '';
     aw_log('[Window] Window configuration applied' . $got, $profileId);
+    // Maximized (§54): restore state da luu sau khi dat normal rect
+    $wantMax = false;
+    try {
+        $wantMax = WindowPlacementManager::resolve_startup_state($profRow ?? ['id' => $profileId]) === 'maximized';
+    } catch (Throwable $e) {
+    }
+    if ($wantMax) {
+        $mr = SyncWindowManager::maximizeWindow((int)$win['hwnd']);
+        aw_log('[Window] Restored maximized state: ' . (!empty($mr['ok']) ? 'ok' : 'fail'), $profileId);
+    }
     // Placement guard chung: verify 100/350/800/1500ms trong ~1600ms (Chrome hay tu restore ve primary)
     $tMon = $placeMon ?? WindowPlacementManager::monitorForRect($x, $y, $W, $H) ?? WindowPlacementManager::primary();
     $tRect = ['x' => $x, 'y' => $y, 'w' => $W, 'h' => $H];
+    if ($wantMax && $tMon !== null) {
+        // Maximized: target la work area monitor dich (khong phai normal rect)
+        $tRect = ['x' => (int)$tMon['work_left'], 'y' => (int)$tMon['work_top'],
+                  'w' => (int)$tMon['work_width'], 'h' => (int)$tMon['work_height']];
+    }
     SyncLogger::info('placement', '[HWND] profile=#' . $profileId . ' hwnd=' . (int)$win['hwnd'], $profileId);
     $checks = [100, 350, 800, 1500];
     $t0 = microtime(true);
@@ -225,7 +243,11 @@ if ($r['ok']) {
         $prev = $ms;
         $v = WindowPlacementManager::verify_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
         if (!$v['ok']) {
-            WindowPlacementManager::correct_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
+            if ($wantMax) {
+                SyncWindowManager::maximizeWindow((int)$win['hwnd']);
+            } else {
+                WindowPlacementManager::correct_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
+            }
             SyncLogger::info('placement', '[PLACEMENT CORRECT] profile=#' . $profileId
                 . ' actual=' . $v['actual'] . ' target=' . ($tMon['device_name'] ?? ''), $profileId);
         } else {
@@ -235,7 +257,9 @@ if ($r['ok']) {
         if ((microtime(true) - $t0) * 1000 >= WindowPlacementManager::GUARD_DURATION_MS) break;
     }
     SyncLogger::info('placement', '[PLACEMENT STABLE] profile=#' . $profileId, $profileId);
+    WindowPlacementManager::clearGuard($profileId); // mo khoa cho AutoArrange (§12)
     exit(0);
 }
 SyncLogger::warn('window_apply', '[Window] Apply that bai: ' . ($r['error'] ?? 'unknown'), $profileId);
+WindowPlacementManager::clearGuard($profileId);
 exit(2);

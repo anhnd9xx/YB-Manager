@@ -16,8 +16,11 @@ class SyncWindowInfo
     public string $class = '';
     public bool $visible = false;
     public bool $minimized = false;
+    public bool $maximized = false;
     /** @var array{x:int,y:int,w:int,h:int}|null */
     public ?array $rect = null;
+    /** @var array{x:int,y:int,w:int,h:int}|null normal rect khi maximized (rcNormalPosition) */
+    public ?array $normalRect = null;
     /** @var array{x:int,y:int,w:int,h:int}|null client area, goc toa do SCREEN */
     public ?array $clientRect = null;
     public int $dpi = 96;
@@ -33,7 +36,9 @@ class SyncWindowInfo
         $o->class = (string)($a['class'] ?? '');
         $o->visible = (bool)($a['visible'] ?? false);
         $o->minimized = (bool)($a['minimized'] ?? false);
+        $o->maximized = (bool)($a['maximized'] ?? false);
         $o->rect = self::rectOrNull($a['rect'] ?? null);
+        $o->normalRect = self::rectOrNull($a['normalRect'] ?? null);
         $o->clientRect = self::rectOrNull($a['clientRect'] ?? null);
         $o->dpi = (int)($a['dpi'] ?? 96);
         $o->dpiScale = isset($a['dpiScale']) ? (float)$a['dpiScale'] : round($o->dpi / 96, 4);
@@ -68,6 +73,7 @@ class SyncWindowInfo
             'profileId' => $this->profileId, 'profileName' => $this->profileName,
             'title' => $this->title, 'class' => $this->class,
             'visible' => $this->visible, 'minimized' => $this->minimized,
+            'maximized' => $this->maximized, 'normalRect' => $this->normalRect,
             'rect' => $this->rect, 'clientRect' => $this->clientRect,
             'dpi' => $this->dpi, 'dpiScale' => $this->dpiScale, 'monitorId' => $this->monitorId,
         ];

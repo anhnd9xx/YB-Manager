@@ -197,10 +197,11 @@ class WindowPlacementManager
     // ================= Save on close =================
 
     /**
-     * Luu placement TRUOC WM_CLOSE. Bo qua neu minimized (rect icon vo nghia).
-     * Tra ve true neu da luu.
+     * Luu placement TRUOC WM_CLOSE (§8). Bo qua neu minimized (rect icon vo nghia).
+     * Maximized: luu rcNormalPosition + state=MAXIMIZED (khong lay full-monitor rect).
+     * @param SyncWindowInfo[]|null $windows scan chung (1 scan cho ca batch, khong scan lai)
      */
-    public static function save_window_placement(array $profile, ?int $hwnd = null): bool
+    public static function save_window_placement(array $profile, ?int $hwnd = null, ?array $windows = null): bool
     {
         if (!self::hasPlacementCols()) return false;
         $id = (int)($profile['id'] ?? 0);
@@ -213,7 +214,8 @@ class WindowPlacementManager
             // Lay window info tuoi (khong cache) de co rect + minimized + monitorId
             $w = null;
             try {
-                foreach (SyncWindowDiscovery::discover(false)['windows'] as $cand) {
+                $list = $windows ?? SyncWindowDiscovery::discover(false)['windows'];
+                foreach ($list as $cand) {
                     if ($cand->hwnd === $hwnd) {
                         $w = $cand;
                         break;
@@ -223,10 +225,20 @@ class WindowPlacementManager
             }
             if ($w === null || $w->rect === null) return false;
             if ($w->minimized) return false; // khong lay rect khi minimized
+            // Maximized: dung normal rect (§8, §54)
+            $state = 'normal';
             $x = (int)$w->rect['x'];
             $y = (int)$w->rect['y'];
             $ww = (int)$w->rect['w'];
             $hh = (int)$w->rect['h'];
+            if (!empty($w->maximized) && $w->normalRect !== null
+                && $w->normalRect['w'] > 0 && $w->normalRect['h'] > 0) {
+                $x = (int)$w->normalRect['x'];
+                $y = (int)$w->normalRect['y'];
+                $ww = (int)$w->normalRect['w'];
+                $hh = (int)$w->normalRect['h'];
+                $state = 'maximized';
+            }
             if ($ww <= 0 || $hh <= 0) return false;
             $mon = self::monitorForHwnd($hwnd);
             if ($mon === null) $mon = self::monitorForRect($x, $y, $ww, $hh);
@@ -251,11 +263,11 @@ class WindowPlacementManager
                     (string)$mon['device_name'],
                     json_encode(['x' => $x, 'y' => $y, 'width' => $ww, 'height' => $hh], JSON_UNESCAPED_UNICODE),
                     json_encode($norm, JSON_UNESCAPED_UNICODE),
-                    'normal',
+                    $state,
                     $id,
                 ]);
             SyncLogger::info('placement', '[PLACEMENT SAVE] profile=#' . $id
-                . ' monitor=' . $mon['device_name'] . ' rect=(' . $x . ',' . $y . ',' . $ww . 'x' . $hh . ')', $id);
+                . ' monitor=' . $mon['device_name'] . ' rect=(' . $x . ',' . $y . ',' . $ww . 'x' . $hh . ') state=' . $state, $id);
             return true;
         } catch (Throwable $e) {
             return false;
@@ -371,6 +383,13 @@ class WindowPlacementManager
         return ['x' => $x, 'y' => $y, 'w' => $fw, 'h' => $fh];
     }
 
+    /** Window state da luu: 'maximized'|'normal' (§54). */
+    public static function resolve_startup_state(array $profile): string
+    {
+        return strtolower(trim((string)($profile['last_window_state'] ?? 'normal'))) === 'maximized'
+            ? 'maximized' : 'normal';
+    }
+
     /** Build placement plan cho batch Start All (giữ assignment, launch parallel khong doi). */
     public static function buildPlacementPlan(array $profiles, ?array $fallbackSize = null): array
     {
@@ -461,6 +480,20 @@ class WindowPlacementManager
         @unlink(self::guardFile($profileId));
     }
 
+    /** Cap nhat HWND vao guard (viet luc Popen voi hwnd=0, apply_window dien sau). */
+    public static function updateGuardHwnd(int $profileId, int $hwnd): void
+    {
+        $f = self::guardFile($profileId);
+        if (!is_file($f)) return;
+        try {
+            $g = json_decode((string)@file_get_contents($f), true);
+            if (!is_array($g)) return;
+            $g['hwnd'] = $hwnd;
+            @file_put_contents($f, json_encode($g, JSON_UNESCAPED_UNICODE));
+        } catch (Throwable $e) {
+        }
+    }
+
     /** 1 tick guard (goi tu apply_window loop): tra ve 'stable'|'wait'|'done'. */
     public static function guardTick(int $profileId, array $profile): string
     {
@@ -500,10 +533,11 @@ class WindowPlacementManager
         if ($done) return;
         $done = true;
         try {
-            $ps = 'powershell -NoProfile -Command "'
-                . 'Add-Type -MemberDefinition \'[DllImport(\\\"user32.dll\\\")] public static extern bool SetProcessDpiAwarenessContext(int v);\' -Name DpiAw -Namespace YTM; '
-                . '[YTM.DpiAw]::SetProcessDpiAwarenessContext(-4) | Out-Null"';
-            @shell_exec($ps);
+            // File ps1 rieng (khong inline C# qua command-line: quoting 3 lop de vo).
+            $script = __DIR__ . '/win32_dpi.ps1';
+            if (is_file($script)) {
+                @shell_exec('powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"');
+            }
         } catch (Throwable $e) {
         }
     }

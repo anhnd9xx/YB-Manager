@@ -82,6 +82,11 @@ class SyncWindowManager
         return self::control($hwnd, 'restore');
     }
 
+    public static function maximizeWindow(int $hwnd): array
+    {
+        return self::control($hwnd, 'maximize');
+    }
+
     public static function minimizeWindow(int $hwnd): array
     {
         return self::control($hwnd, 'minimize');

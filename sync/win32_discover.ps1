@@ -22,6 +22,16 @@ public static class W32 {
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT {
+        public int length;
+        public int flags;
+        public int showCmd;
+        public POINT ptMinPosition;
+        public POINT ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct MONITORINFOEX {
         public int cbSize;
@@ -49,6 +59,8 @@ public static class W32 {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -157,13 +169,33 @@ foreach ($pk in $byPid.Keys) {
         } catch {}
         $w = if ($hasRect) { ($rc.Right - $rc.Left) } else { 0 }
         $hh = if ($hasRect) { ($rc.Bottom - $rc.Top) } else { 0 }
+        $isMin = [bool][W32]::IsIconic($h)
+        $isMax = [bool][W32]::IsZoomed($h)
+        # Normal rect (rcNormalPosition) cho maximized: GetWindowRect tra full-monitor
+        # vo nghia de restore size. Minimized: bo qua (icon rect).
+        $normRect = $null
+        if ($isMax) {
+            try {
+                $wp = New-Object W32+WINDOWPLACEMENT
+                $wp.length = [Runtime.InteropServices.Marshal]::SizeOf($wp)
+                if ([W32]::GetWindowPlacement($h, [ref]$wp)) {
+                    $nr = $wp.rcNormalPosition
+                    $nw = $nr.Right - $nr.Left; $nh = $nr.Bottom - $nr.Top
+                    if ($nw -gt 0 -and $nh -gt 0) {
+                        $normRect = @{ x = $nr.Left; y = $nr.Top; w = $nw; h = $nh }
+                    }
+                }
+            } catch {}
+        }
         $wins += [ordered]@{
             hwnd = $h.ToInt64()
             pid = [int]$pk
             title = $sb.ToString()
             class = $cb.ToString()
             visible = [bool]$visible
-            minimized = [bool][W32]::IsIconic($h)
+            minimized = $isMin
+            maximized = $isMax
+            normalRect = $normRect
             rect = if ($hasRect) { @{ x = $rc.Left; y = $rc.Top; w = $w; h = $hh } } else { $null }
             clientRect = if ($hasClient) { @{ x = $clientOrigin.x; y = $clientOrigin.y; w = ($cr.Right - $cr.Left); h = ($cr.Bottom - $cr.Top) } } else { $null }
             dpi = $dpi
