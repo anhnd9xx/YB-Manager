@@ -72,11 +72,16 @@ async function tgSetupView() {
       const stColor = { CONNECTED: 'ok', DISCONNECTED: 'muted', CONNECTING: 'warn', ERROR: 'err', INVALID_TOKEN: 'err', ARCHIVED: 'muted' };
       const stLabel = { CONNECTED: 'Đã kết nối', DISCONNECTED: 'Đã ngắt', CONNECTING: 'Đang kết nối', ERROR: 'Có lỗi', INVALID_TOKEN: 'Token không hợp lệ', ARCHIVED: 'Đã lưu trữ' };
       const cst = conn.status || 'CONNECTED';
+      const cred = conn.credential_status || 'VALID';
+      const credLabel = cred === 'VALID' ? 'Token: hợp lệ' : 'Token không hợp lệ';
       el.innerHTML = `<div class="sync-label">Kết nối Telegram <span class="badge badge-${stColor[cst] || 'ok'}">${stLabel[cst] || cst}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Người nhận</span><span class="meta-value">${escapeHtml(c.display_name || c.username || '?')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Token</span><span class="meta-value mono">${escapeHtml(conn.token_preview || '')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Tự kết nối khi mở Tool</span><span class="meta-value"><input type="checkbox" id="tg-auto-conn" ${conn.auto_connect ? 'checked' : ''} onchange="tgBotAutoConn(${(conn.id || 0)}, this.checked)" style="width:auto"></span></div>`
         + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${escapeHtml(polLabel)}${polSub ? ' <small class="muted">' + escapeHtml(polSub) + '</small>' : ''}</span></div>`
+        + (cred !== 'VALID' ? `<div class="eval-prev">⚠ ${escapeHtml(credLabel)} — nhập token mới hoặc kiểm tra lại.</div>` : '')
         + `<div class="meta-row"><span class="meta-label">Nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
         + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">`
@@ -91,6 +96,8 @@ async function tgSetupView() {
         + `<button onclick="tgBotRename(${(conn.id || 0)})">Chỉnh sửa tên</button>`
         + `<button onclick="tgBotReplace(${(conn.id || 0)})">Thay Token</button>`
         + `<button onclick="tgBotCheck(${(conn.id || 0)})">Kiểm tra Token</button>`
+        + `<button onclick="tgBotRestart(${(conn.id || 0)})">Restart Receiver</button>`
+        + `<button onclick="tgChangeReceiver()">Đổi người nhận</button>`
         + `<button onclick="tgBotPrimary(${(conn.id || 0)})">Đặt Primary</button>`
         + `<button onclick="tgBotRemove(${(conn.id || 0)})">Xóa Bot</button>`
         + `<button onclick="tgBotAdd()">+ Thêm Bot</button>`
@@ -324,6 +331,25 @@ async function tgBotConnect(id) {
   const r = await sendJson(api + 'notify.php?action=bot_connect', { id });
   toast(r.ok ? 'Đã kết nối.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   tgSetupView();
+}
+async function tgBotAutoConn(id, checked) {
+  const r = await sendJson(api + 'notify.php?action=bot_update', { id, auto_connect: checked ? 1 : 0 });
+  toast(r.ok ? (checked ? 'Đã bật tự kết nối.' : 'Đã tắt tự kết nối.') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+}
+async function tgBotRestart(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  toast('Đang restart receiver...', '');
+  const r = await sendJson(api + 'notify.php?action=supervisor_restart', { connection_id: id });
+  toast(r.ok ? 'Đã restart receiver.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  tgSetupView();
+}
+async function tgChangeReceiver() {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  const r = await sendJson(api + 'notify.php?action=setup_start_existing', {});
+  if (!r.ok) { toast(r.message || 'Lỗi', 'error'); return; }
+  tgSetupWaiting({ status: 'WAITING_MESSAGE', expires_at: r.data.expires_at }, r.data);
 }
 async function tgBotDisconnect(id) {
   const m = $('tg-bot-menu');

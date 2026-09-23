@@ -110,6 +110,8 @@ class TelegramGateway
                 }
                 $prim = $prim ?? $conns[0];
                 if (($prim['status'] ?? '') !== TgBotStore::ST_CONNECTED) return false;
+                // Credential INVALID (401 that) -> khong poll (§20, §48)
+                if (isset($prim['credential_status']) && $prim['credential_status'] === 'INVALID') return false;
                 if (self::inboundEnabled()) return true;
                 require_once __DIR__ . '/TelegramSetup.php';
                 return TelegramSetup::active() !== null;

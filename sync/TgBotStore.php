@@ -68,11 +68,18 @@ class TgBotStore
             $add = [
                 'enabled' => 'TINYINT(1) NOT NULL DEFAULT 1',
                 'auto_connect' => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'credential_status' => "VARCHAR(20) NOT NULL DEFAULT 'VALID'",
+                'primary_chat_id' => 'VARCHAR(64) NULL',
+                'primary_user_id' => 'VARCHAR(64) NULL',
+                'primary_username' => 'VARCHAR(100) NULL',
+                'primary_display_name' => 'VARCHAR(190) NULL',
+                'paired_at' => 'DATETIME NULL',
                 'runtime_state' => 'VARCHAR(20) NULL',
                 'last_update_id' => 'BIGINT NULL',
                 'last_poll_at' => 'DATETIME NULL',
                 'last_poll_success_at' => 'DATETIME NULL',
                 'last_inbound_at' => 'DATETIME NULL',
+                'last_outbound_at' => 'DATETIME NULL',
                 'last_error_code' => 'VARCHAR(40) NULL',
                 'last_error_at' => 'DATETIME NULL',
                 'reconnect_count' => 'INT NOT NULL DEFAULT 0',
@@ -117,8 +124,12 @@ class TgBotStore
             $w = $includeArchived ? '' : "WHERE deleted_at IS NULL";
             $rows = db()->query('SELECT id, name, bot_id, bot_username, bot_first_name,
                     token_preview, (token_encrypted IS NOT NULL AND token_encrypted<>\'\') AS has_token,
-                    status, is_primary, inbound_enabled, outbound_enabled,
-                    created_at, updated_at, last_connected_at, last_disconnected_at, last_error, deleted_at
+                    status, credential_status, is_primary, enabled, auto_connect,
+                    inbound_enabled, outbound_enabled,
+                    primary_chat_id, primary_user_id, primary_username, primary_display_name, paired_at,
+                    created_at, updated_at, last_connected_at, last_disconnected_at,
+                    last_poll_at, last_poll_success_at, last_inbound_at, last_outbound_at,
+                    last_error, last_error_code, last_error_at, reconnect_count, deleted_at
                 FROM telegram_bot_connections ' . $w . ' ORDER BY is_primary DESC, id ASC')->fetchAll();
             foreach ($rows as &$r) {
                 $r['destinations'] = self::destinations((int)$r['id']);
@@ -172,6 +183,69 @@ class TgBotStore
     }
 
     /**
+     * Luu token tu setup flow (one-field): validate getMe truoc, encrypt,
+     * tao/merge connection (enabled + auto_connect ON), status CONNECTING.
+     * KHONG plaintext settings (§3). Transaction: all-or-nothing (§30).
+     * @return array{ok, error?, connection_id?, bot?, created?}
+     */
+    public static function storeSetupToken(string $token, string $name = 'Telegram Bot'): array
+    {
+        self::ensureTables();
+        $token = trim($token);
+        if (!preg_match('/^\d{5,}:[A-Za-z0-9_-]{20,}$/', $token)) {
+            return ['ok' => false, 'error' => 'Bot Token không đúng định dạng.'];
+        }
+        require_once __DIR__ . '/TelegramProvider.php';
+        $me = TelegramProvider::getMeVia($token);
+        if (empty($me['ok'])) {
+            return ['ok' => false, 'error' => 'Bot Token không hợp lệ hoặc không thể kết nối Telegram.'];
+        }
+        $enc = TgSecret::protect($token);
+        if ($enc === null) {
+            return ['ok' => false, 'error' => 'Không mã hóa được token (DPAPI).'];
+        }
+        $botId = (string)($me['bot']['id'] ?? '');
+        try {
+            db()->beginTransaction();
+            $st = db()->prepare('SELECT id FROM telegram_bot_connections WHERE bot_id=? AND deleted_at IS NULL LIMIT 1');
+            $st->execute([$botId]);
+            $ex = $st->fetchColumn();
+            if ($ex) {
+                db()->prepare('UPDATE telegram_bot_connections SET token_encrypted=?, token_preview=?,
+                        bot_username=?, bot_first_name=?, credential_status=?, status=?,
+                        enabled=1, auto_connect=1, updated_at=NOW() WHERE id=?')
+                    ->execute([$enc, self::preview($token),
+                        (string)($me['bot']['username'] ?? ''), (string)($me['bot']['first_name'] ?? ''),
+                        'VALID', self::ST_CONNECTING, (int)$ex]);
+                $cid = (int)$ex;
+                $created = false;
+            } else {
+                $has = (int)db()->query('SELECT COUNT(*) FROM telegram_bot_connections WHERE deleted_at IS NULL')->fetchColumn();
+                db()->prepare('INSERT INTO telegram_bot_connections (name, bot_id, bot_username, bot_first_name,
+                        token_encrypted, token_preview, credential_status, status, is_primary,
+                        enabled, auto_connect, inbound_enabled, outbound_enabled, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,1,1,1,1,1,NOW())')
+                    ->execute([$name !== '' ? mb_substr($name, 0, 120) : 'Telegram Bot',
+                        $botId, (string)($me['bot']['username'] ?? ''), (string)($me['bot']['first_name'] ?? ''),
+                        $enc, self::preview($token), 'VALID', self::ST_CONNECTING, $has === 0 ? 1 : 0]);
+                $cid = (int)db()->lastInsertId();
+                $created = true;
+                if ($has === 0) {
+                    db()->prepare('UPDATE telegram_bot_connections SET is_primary=0 WHERE id<>?')->execute([$cid]);
+                }
+            }
+            db()->commit();
+            return ['ok' => true, 'connection_id' => $cid, 'bot' => $me['bot'], 'created' => $created];
+        } catch (Throwable $e) {
+            try {
+                db()->rollBack();
+            } catch (Throwable $e2) {
+            }
+            return ['ok' => false, 'error' => 'Không lưu được token.'];
+        }
+    }
+
+    /**
      * Them bot: validate getMe truoc, chi luu khi valid (§24-§25).
      * @return array{ok, error?, connection?, bot?, different_bot?}
      */
@@ -195,11 +269,11 @@ class TgBotStore
         try {
             $has = (int)db()->query('SELECT COUNT(*) FROM telegram_bot_connections WHERE deleted_at IS NULL')->fetchColumn();
             $st = db()->prepare('INSERT INTO telegram_bot_connections (name, bot_id, bot_username, bot_first_name,
-                    token_encrypted, token_preview, status, is_primary, inbound_enabled, outbound_enabled, created_at)
-                VALUES (?,?,?,?,?,?,?, ?,1,1,NOW())');
+                    token_encrypted, token_preview, credential_status, status, is_primary, inbound_enabled, outbound_enabled, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,1,1,NOW())');
             $st->execute([$name, (string)($me['bot']['id'] ?? ''), (string)($me['bot']['username'] ?? ''),
                 (string)($me['bot']['first_name'] ?? ''), $enc, self::preview($token),
-                self::ST_DISCONNECTED, $has === 0 ? 1 : 0]);
+                'VALID', self::ST_DISCONNECTED, $has === 0 ? 1 : 0]);
             $id = (int)db()->lastInsertId();
             if ($has === 0) {
                 db()->prepare('UPDATE telegram_bot_connections SET is_primary=0 WHERE id<>?')->execute([$id]);
@@ -239,10 +313,10 @@ class TgBotStore
         if ($enc === null) return ['ok' => false, 'error' => 'Không mã hóa được token (DPAPI).'];
         try {
             db()->prepare('UPDATE telegram_bot_connections SET token_encrypted=?, token_preview=?,
-                    bot_id=?, bot_username=?, bot_first_name=?, status=?, last_error=NULL, updated_at=NOW() WHERE id=?')
+                    bot_id=?, bot_username=?, bot_first_name=?, credential_status=?, status=?, last_error=NULL, updated_at=NOW() WHERE id=?')
                 ->execute([$enc, self::preview($token), $newBotId,
                     (string)($me['bot']['username'] ?? ''), (string)($me['bot']['first_name'] ?? ''),
-                    self::ST_DISCONNECTED, $id]);
+                    'VALID', self::ST_DISCONNECTED, $id]);
             return ['ok' => true, 'connection' => self::get($id)];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Không lưu được token.'];
@@ -326,8 +400,21 @@ class TgBotStore
         }
     }
 
+    /** Credential status (§1, §20): chi 401 moi INVALID. */
+    public static function setCredential(int $id, string $status): void
+    {
+        if (!in_array($status, ['VALID', 'INVALID'], true)) return;
+        try {
+            self::ensureTables();
+            db()->prepare('UPDATE telegram_bot_connections SET credential_status=? WHERE id=?')
+                ->execute([$status, $id]);
+        } catch (Throwable $e) {
+        }
+    }
+
     /**
      * Connect (§28): decrypt -> getMe -> polling -> CONNECTED. Khong can nhap lai token.
+     * getMe fail (401/invalid): credential INVALID, giu row (§20, §48).
      * @return array{ok, error?}
      */
     public static function connect(int $id): array
@@ -342,11 +429,18 @@ class TgBotStore
             return ['ok' => false, 'error' => 'Không giải mã được token.'];
         }
         require_once __DIR__ . '/TelegramProvider.php';
-        $me = TelegramProvider::getMeVia($token);
+        $me = TelegramProvider::getMeRaw($token);
         if (empty($me['ok'])) {
-            self::setStatus($id, self::ST_INVALID_TOKEN, 'Token không hợp lệ.');
-            return ['ok' => false, 'error' => 'Token không hợp lệ hoặc không kết nối được Telegram.'];
+            if (!empty($me['unauthorized'])) {
+                // Chi 401 moi INVALID (§20). Mang -> ERROR, giu credential VALID.
+                self::setCredential($id, 'INVALID');
+                self::setStatus($id, self::ST_INVALID_TOKEN, 'Token không hợp lệ.');
+                return ['ok' => false, 'error' => 'Token không hợp lệ (unauthorized).'];
+            }
+            self::setStatus($id, self::ST_ERROR, $me['error'] ?? 'Lỗi kết nối.');
+            return ['ok' => false, 'error' => $me['error'] ?? 'Không kết nối được Telegram.'];
         }
+        self::setCredential($id, 'VALID');
         try {
             db()->prepare('UPDATE telegram_bot_connections SET bot_id=?, bot_username=?, bot_first_name=?,
                     last_error=NULL, updated_at=NOW() WHERE id=?')
@@ -471,18 +565,42 @@ class TgBotStore
 
     /**
      * Migrate legacy token/settings -> connections+destinations. Idempotent.
+     * Ca truong hop legacy token XUAT HIEN LAI sau migrate (preview khac) (§44).
      * @return array{ok, migrated, connection_id?}
      */
     public static function migrateLegacy(): array
     {
         self::ensureTables();
         try {
-            // Da migrate?
-            $n = (int)db()->query('SELECT COUNT(*) FROM telegram_bot_connections')->fetchColumn();
-            if ($n > 0) return ['ok' => true, 'migrated' => false];
             require_once __DIR__ . '/TelegramConfig.php';
             $token = TelegramConfig::token();
             if ($token === '') return ['ok' => true, 'migrated' => false];
+            $n = (int)db()->query('SELECT COUNT(*) FROM telegram_bot_connections')->fetchColumn();
+            if ($n > 0) {
+                // Legacy token xuat hien lai (user nhap theo flow cu)? So preview:
+                // khac -> encrypt vao primary (validate truoc), giong -> chi xoa plaintext thua.
+                $prim = self::primary();
+                if ($prim && self::preview($token) !== (string)($prim['token_preview'] ?? '')) {
+                    require_once __DIR__ . '/TelegramProvider.php';
+                    $me = TelegramProvider::getMeVia($token);
+                    if (!empty($me['ok'])) {
+                        $enc = TgSecret::protect($token);
+                        if ($enc !== null) {
+                            db()->prepare('UPDATE telegram_bot_connections SET token_encrypted=?,
+                                    token_preview=?, bot_id=?, bot_username=?, bot_first_name=?,
+                                    credential_status=?, updated_at=NOW() WHERE id=?')
+                                ->execute([$enc, self::preview($token),
+                                    (string)($me['bot']['id'] ?? ''), (string)($me['bot']['username'] ?? ''),
+                                    (string)($me['bot']['first_name'] ?? ''), 'VALID', (int)$prim['id']]);
+                            foreach (['notify_bot_token', 'tg_token'] as $k) {
+                                db()->prepare('DELETE FROM settings WHERE skey=?')->execute([$k]);
+                            }
+                            return ['ok' => true, 'migrated' => true, 'connection_id' => (int)$prim['id']];
+                        }
+                    }
+                }
+                return ['ok' => true, 'migrated' => false];
+            }
             // Validate neu co mang (offline -> migrate muted voi ERROR status)
             require_once __DIR__ . '/TelegramProvider.php';
             $me = TelegramProvider::getMeVia($token);
@@ -504,10 +622,11 @@ class TgBotStore
             $status = empty($me['ok']) ? self::ST_ERROR
                 : ($wasLive ? self::ST_CONNECTED : self::ST_DISCONNECTED);
             db()->prepare('INSERT INTO telegram_bot_connections (name, bot_id, bot_username, bot_first_name,
-                    token_encrypted, token_preview, status, is_primary, inbound_enabled, outbound_enabled, created_at)
-                VALUES (?,?,?,?,?,?,?,?,1,1,NOW())')
+                    token_encrypted, token_preview, credential_status, status, is_primary, inbound_enabled, outbound_enabled, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,1,1,NOW())')
                 ->execute(['Telegram Bot', (string)($bot['id'] ?? ''), (string)($bot['username'] ?? ''),
-                    (string)($bot['first_name'] ?? ''), $enc, self::preview($token), $status, 1]);
+                    (string)($bot['first_name'] ?? ''), $enc, self::preview($token),
+                    empty($me['ok']) ? 'INVALID' : 'VALID', $status, 1]);
             $cid = (int)db()->lastInsertId();
             // Destination tu pairing hien tai (§45)
             $chatId = TelegramConfig::primaryChatId();

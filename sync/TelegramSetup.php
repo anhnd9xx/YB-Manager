@@ -53,6 +53,7 @@ class TelegramSetup
 
     /**
      * Buoc 1: validate + getMe + webhook check + tao session.
+     * Token luu NGAY vao connection encrypted (khong plaintext settings) (§3).
      * @return array{ok, error?, bot?, webhook_active?, session_id?, bot_username?}
      */
     public static function start(string $token, bool $forceTakeover = false): array
@@ -62,10 +63,14 @@ class TelegramSetup
         if (!self::validFormat($token)) {
             return ['ok' => false, 'error' => 'Bot Token không đúng định dạng.'];
         }
-        $me = TelegramProvider::getMeVia($token);
-        if (empty($me['ok'])) {
-            return ['ok' => false, 'error' => 'Bot Token không hợp lệ hoặc không thể kết nối Telegram.'];
+        // Webhook check truoc khi luu? Can getMe de biet bot — luu token truoc (§3),
+        // webhook check sau (khong delete am tham §17).
+        require_once __DIR__ . '/TgBotStore.php';
+        $stored = TgBotStore::storeSetupToken($token);
+        if (empty($stored['ok'])) {
+            return ['ok' => false, 'error' => $stored['error'] ?? 'Lỗi.'];
         }
+        $me = ['bot' => $stored['bot']];
         // Webhook check (§17): khong delete am tham
         $wh = TelegramProvider::webhookInfoVia($token);
         if (!empty($wh['active']) && !$forceTakeover) {
@@ -76,8 +81,7 @@ class TelegramSetup
         if (!empty($wh['active']) && $forceTakeover) {
             TelegramProvider::deleteWebhookVia($token);
         }
-        // Luu token + bot info (getMe success moi luu §3)
-        TelegramConfig::saveToken($token);
+        // Bot info hien thi (khong secret)
         TelegramConfig::set('bot_id', (string)($me['bot']['id'] ?? ''));
         TelegramConfig::set('bot_username', (string)($me['bot']['username'] ?? ''));
         TelegramConfig::set('bot_first_name', (string)($me['bot']['first_name'] ?? ''));

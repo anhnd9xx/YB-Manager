@@ -72,6 +72,18 @@ class TelegramConfigService
         TelegramConfig::set('inbound_enabled', '1');
         TelegramConfig::set('outbound_enabled', '1');
         TelegramConfig::setStatus('CONNECTED');
+        // Pairing thanh cong tren token hop le -> credential VALID + primary_* tren connection
+        try {
+            require_once __DIR__ . '/TgBotStore.php';
+            $conn = TgBotStore::primary();
+            if ($conn) {
+                TgBotStore::setCredential((int)$conn['id'], 'VALID');
+                db()->prepare('UPDATE telegram_bot_connections SET primary_chat_id=?, primary_user_id=?,
+                        primary_username=?, primary_display_name=?, paired_at=NOW() WHERE id=?')
+                    ->execute([$chatId, $userId, $username, mb_substr($displayName, 0, 190), (int)$conn['id']]);
+            }
+        } catch (Throwable $e) {
+        }
         require_once __DIR__ . '/PermissionService.php';
         $list = PermissionService::allowed();
         $kept = [];

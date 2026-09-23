@@ -309,8 +309,15 @@ try {
         }
 
         case 'setup_start_existing': {
-            // Doi nguoi nhan: dung token da luu, tao session moi (§15)
-            $token = TelegramConfig::token();
+            // Doi nguoi nhan: dung token da luu (decrypt), fallback legacy plaintext (§15, §44)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $token = '';
+            try {
+                $prim = TgBotStore::primary();
+                if ($prim) $token = TgBotStore::runtimeToken($prim);
+            } catch (Throwable $e) {
+            }
+            if ($token === '') $token = TelegramConfig::token();
             if ($token === '') json_out(['ok' => false, 'message' => 'Chưa có Bot Token'], 400);
             $me = TelegramProvider::getMeVia($token);
             if (empty($me['ok'])) json_out(['ok' => false, 'message' => 'Token không còn hợp lệ'], 400);
@@ -397,6 +404,33 @@ try {
             break;
         }
 
+        case 'bot_update': {
+            // Autosave: auto_connect / inbound / outbound (§24, §31)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            $allow = ['auto_connect', 'inbound_enabled', 'outbound_enabled', 'enabled'];
+            $sets = [];
+            $params = [];
+            foreach ($allow as $k) {
+                if (array_key_exists($k, $b)) {
+                    $sets[] = "$k=?";
+                    $params[] = !empty($b[$k]) ? 1 : 0;
+                }
+            }
+            if (!$sets || $id <= 0) json_out(['ok' => false, 'message' => 'Không có gì để lưu'], 400);
+            try {
+                TgBotStore::ensureTables();
+                $params[] = $id;
+                db()->prepare('UPDATE telegram_bot_connections SET ' . implode(',', $sets) . ', updated_at=NOW() WHERE id=?')
+                    ->execute($params);
+                json_out(['ok' => true, 'data' => ['saved' => true]]);
+            } catch (Throwable $e) {
+                json_out(['ok' => false, 'message' => 'Lỗi lưu'], 500);
+            }
+            break;
+        }
+
         case 'bot_primary': {
             require_once __DIR__ . '/../sync/TgBotStore.php';
             $b = $method === 'GET' ? $_GET : json_body();
@@ -405,18 +439,25 @@ try {
         }
 
         case 'bot_check': {
-            // [Kiểm tra Token]: getMe bang token da luu (decrypt), khong doi gi
+            // [Kiểm tra Token]: getMe bang token da luu (decrypt), khong doi gi.
+            // Chi 401 moi INVALID; mang -> ERROR, giu credential.
             require_once __DIR__ . '/../sync/TgBotStore.php';
             $id = (int)(($method === 'GET' ? $_GET : json_body())['id'] ?? 0);
             $conn = TgBotStore::get($id);
             if (!$conn) json_out(['ok' => false, 'message' => 'Không thấy Bot'], 404);
             $token = TgBotStore::runtimeToken($conn);
             if ($token === '') json_out(['ok' => false, 'message' => 'Không đọc được token đã lưu'], 500);
-            $me = TelegramProvider::getMeVia($token);
+            $me = TelegramProvider::getMeRaw($token);
             if (empty($me['ok'])) {
-                TgBotStore::setStatus($id, TgBotStore::ST_INVALID_TOKEN, 'Token không hợp lệ.');
-                json_out(['ok' => false, 'message' => 'Token không hợp lệ hoặc không kết nối được Telegram.']);
+                if (!empty($me['unauthorized'])) {
+                    TgBotStore::setCredential($id, 'INVALID');
+                    TgBotStore::setStatus($id, TgBotStore::ST_INVALID_TOKEN, 'Token không hợp lệ.');
+                    json_out(['ok' => false, 'message' => 'Token không hợp lệ (unauthorized).']);
+                }
+                TgBotStore::setStatus($id, TgBotStore::ST_ERROR, $me['error'] ?? 'Lỗi kết nối.');
+                json_out(['ok' => false, 'message' => $me['error'] ?? 'Không kết nối được Telegram.']);
             }
+            TgBotStore::setCredential($id, 'VALID');
             json_out(['ok' => true, 'data' => ['bot' => $me['bot']]]);
             break;
         }

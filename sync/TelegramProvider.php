@@ -107,6 +107,32 @@ class TelegramProvider
         return ['ok' => false, 'error' => self::friendly($r)];
     }
 
+    /**
+     * getMe RAW (giu error code): de phan biet 401 (INVALID) vs mang (ERROR).
+     * @return array{ok, bot?, unauthorized, network, error}
+     */
+    public static function getMeRaw(string $token): array
+    {
+        if (trim($token) === '') {
+            return ['ok' => false, 'bot' => null, 'unauthorized' => false, 'network' => false, 'error' => 'empty_token'];
+        }
+        $r = self::post($token, 'getMe', []);
+        if (!empty($r['ok'])) {
+            $u = $r['result'] ?? [];
+            return ['ok' => true, 'bot' => [
+                'id' => (string)($u['id'] ?? ''),
+                'username' => (string)($u['username'] ?? ''),
+                'first_name' => (string)($u['first_name'] ?? '')],
+                'unauthorized' => false, 'network' => false, 'error' => ''];
+        }
+        $e = (string)($r['error'] ?? '');
+        $d = strtolower((string)($r['description'] ?? ''));
+        $unauth = $e === 'api_401' || str_contains($d, 'unauthorized');
+        $net = $e === 'network' || $e === 'bad_response';
+        return ['ok' => false, 'bot' => null, 'unauthorized' => $unauth, 'network' => $net,
+            'error' => self::friendly($r)];
+    }
+
     /** @return array{active, url?} */
     public static function webhookInfoVia(string $token): array
     {

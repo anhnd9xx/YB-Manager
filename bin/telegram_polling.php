@@ -154,14 +154,18 @@ while (true) {
                 continue;
             }
             if ($msg === 'poll_unauthorized') {
+                // 401 that: credential INVALID, khong retry forever (§20, §23, §48)
                 TelegramGateway::heartbeat('poll_unauthorized', null, 'AUTH_ERROR');
                 tg_conn_touch(['runtime_state' => 'AUTH_ERROR', 'last_error_code' => 'AUTH_ERROR',
                     'last_error_at' => date('Y-m-d H:i:s')]);
                 try {
-                    SyncLogger::error('telegram', '[TG POLL] 401 AUTH_ERROR, stop polling');
+                    require_once __DIR__ . '/../sync/TgBotStore.php';
+                    $pc = TgBotStore::primary();
+                    if ($pc) TgBotStore::setCredential((int)$pc['id'], 'INVALID');
+                    SyncLogger::error('telegram', '[TG POLL] 401 AUTH_ERROR, credential INVALID (stop polling)');
                 } catch (Throwable $e2) {
                 }
-                sleep(60);
+                sleep(300); // cho 5 phut roi kiem tra lai 1 lan, khong reconnect storm
                 continue;
             }
             // Temporary network: backoff 1/2/5/10/30 (§18)
