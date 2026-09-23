@@ -22,9 +22,14 @@ require_once __DIR__ . '/SyncLogger.php';
 class WindowPlacementManager
 {
     public const POSITION_TOLERANCE = 20;
+    public const SIZE_TOLERANCE = 20;
     public const GUARD_DURATION_MS = 1600;
-    /** @var int[] cac moc verify trong guard */
+    /** @var int[] cac moc verify trong guard ngan (apply_window cu) */
     public const GUARD_CHECKS_MS = [100, 350, 800, 1500];
+    /** Startup placement protection 10s, sparse (§5): khong poll lien tuc */
+    public const PROTECTION_MS = 10000;
+    /** @var int[] moc verify sparse trong 10s dau */
+    public const PROTECTION_CHECKS_MS = [100, 350, 800, 1500, 3000, 5000, 7500, 10000];
 
     /** Cache topology 5s de khong EnumDisplayMonitors lien tuc */
     private static ?array $monCache = null;
@@ -199,6 +204,9 @@ class WindowPlacementManager
     /**
      * Luu placement TRUOC WM_CLOSE (§8). Bo qua neu minimized (rect icon vo nghia).
      * Maximized: luu rcNormalPosition + state=MAXIMIZED (khong lay full-monitor rect).
+     * KHONG save trong startup (§20-§21): placement_locked hoac life transitional
+     * (QUEUED/PREPARING/STARTING/WINDOW_READY/VERIFYING) -> bo qua de vi tri
+     * sai tam thoi khong poison "last monitor" cho lan mo sau.
      * @param SyncWindowInfo[]|null $windows scan chung (1 scan cho ca batch, khong scan lai)
      */
     public static function save_window_placement(array $profile, ?int $hwnd = null, ?array $windows = null): bool
@@ -206,6 +214,12 @@ class WindowPlacementManager
         if (!self::hasPlacementCols()) return false;
         $id = (int)($profile['id'] ?? 0);
         if ($id <= 0) return false;
+        try {
+            require_once __DIR__ . '/ChromeBatchManager.php';
+            if (ChromeBatchManager::placementLocked($id)) return false;
+            if (ChromeBatchManager::isBusy($id)) return false;
+        } catch (Throwable $e) {
+        }
         try {
             if ($hwnd === null || $hwnd <= 0) {
                 $hwnd = self::hwndForProfile($id, (string)($profile['user_data_dir'] ?? ''));
@@ -298,11 +312,27 @@ class WindowPlacementManager
         // FIXED: monitor user chon
         if ($mode === 'FIXED') {
             $m = self::findByDevice((string)($profile['fixed_monitor_device'] ?? ''));
+            if ($m === null && trim((string)($profile['fixed_monitor_device'] ?? '')) !== '') {
+                // §14: refresh topology 1 lan + lookup lai truoc khi fallback
+                // (khong fallback primary chi vi cache dang refresh)
+                try {
+                    self::refreshMonitors();
+                    $m = self::findByDevice((string)($profile['fixed_monitor_device'] ?? ''));
+                } catch (Throwable $e) {
+                }
+            }
             if ($m !== null) return $m;
         }
         // LAST: man hinh cuoi
         if ($mode === 'LAST' || $mode === 'FIXED') {
             $m = self::findByDevice((string)($profile['last_monitor_device'] ?? ''));
+            if ($m === null && trim((string)($profile['last_monitor_device'] ?? '')) !== '') {
+                try {
+                    self::refreshMonitors();
+                    $m = self::findByDevice((string)($profile['last_monitor_device'] ?? ''));
+                } catch (Throwable $e) {
+                }
+            }
             if ($m !== null) return $m;
             // FIXED fallback: neu last rong thi dung fixed (da check) -> xuong fallback chung
             if ($mode === 'FIXED') {
@@ -438,11 +468,11 @@ class WindowPlacementManager
     }
 
     /** Apply rect that (SetWindowPos NOACTIVATE, khong SetForeground). */
-    public static function apply_rect(int $hwnd, int $x, int $y, int $w, int $h): bool
+    public static function apply_rect(int $hwnd, int $x, int $y, int $w, int $h, array $trace = []): bool
     {
         if ($hwnd <= 0 || $w <= 0 || $h <= 0) return false;
         try {
-            $r = SyncWindowManager::moveResize($hwnd, $x, $y, $w, $h);
+            $r = SyncWindowManager::moveResize($hwnd, $x, $y, $w, $h, $trace);
             return !empty($r['ok']);
         } catch (Throwable $e) {
             return false;
@@ -455,7 +485,8 @@ class WindowPlacementManager
         SyncLogger::info('placement', '[PLACEMENT CORRECT] profile=#' . $id
             . ' target=' . ($targetMonitor['device_name'] ?? '')
             . ' rect=(' . $targetRect['x'] . ',' . $targetRect['y'] . ',' . $targetRect['w'] . 'x' . $targetRect['h'] . ')', $id);
-        return self::apply_rect($hwnd, $targetRect['x'], $targetRect['y'], $targetRect['w'], $targetRect['h']);
+        return self::apply_rect($hwnd, $targetRect['x'], $targetRect['y'], $targetRect['w'], $targetRect['h'],
+            ['profileId' => $id, 'reason' => 'placement_correct']);
     }
 
     // ================= Guard (1 timer chung) =================
@@ -465,13 +496,22 @@ class WindowPlacementManager
         return rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_guard_' . $profileId . '.json';
     }
 
-    /** Bat dau guard sau khi HWND ready (ghi file de apply_window poll chung). */
-    public static function startGuard(int $profileId, int $hwnd, array $rect, array $monitor): void
+    /**
+     * Bat dau guard sau khi HWND ready (ghi file de apply_window poll chung).
+     * Ownership (§4): target + owner STARTUP + generation. Worker cu (batch/gen
+     * khac) thay guard doi phai exit ngay (stale callback discard §27-§29).
+     */
+    public static function startGuard(int $profileId, int $hwnd, array $rect, array $monitor,
+        ?string $batchId = null, ?int $generation = null): void
     {
         @file_put_contents(self::guardFile($profileId), json_encode([
             'hwnd' => $hwnd, 'rect' => $rect,
             'monitor' => $monitor['device_name'] ?? '',
-            't0' => microtime(true), 'checks' => self::GUARD_CHECKS_MS,
+            't0' => microtime(true), 'checks' => self::PROTECTION_CHECKS_MS,
+            'batch_id' => $batchId, 'generation' => $generation,
+            'owner' => 'STARTUP', 'locked' => true,
+            'lock_until' => microtime(true) + self::PROTECTION_MS / 1000,
+            'stable' => false,
         ], JSON_UNESCAPED_UNICODE));
     }
 

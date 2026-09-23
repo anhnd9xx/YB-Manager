@@ -190,7 +190,7 @@ class SyncWindowLayoutManager
                 }
                 $batchIn[] = ['hwnd' => (int)$w['hwnd'], 'x' => (int)$slot['x'], 'y' => (int)$slot['y'], 'w' => (int)$slot['w'], 'h' => (int)$slot['h']];
             }
-            $batchOut = SyncWindowManager::applyLayoutBatch($batchIn, $noActivate);
+            $batchOut = SyncWindowManager::applyLayoutBatch($batchIn, $noActivate, ['reason' => 'auto_arrange']);
             $results = [];
             $okCount = 0;
             foreach ($live as $i => $w) {

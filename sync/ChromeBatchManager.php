@@ -318,6 +318,23 @@ class ChromeBatchManager
             'errors' => $errors, 'remaining' => $remaining, 'done' => $remaining <= 0];
     }
 
+    /** Generation token (§28): moi start tang 1; callback cu mang gen cu -> discard. */
+    public static function nextGeneration(int $id): int
+    {
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_gen_' . $id . '.json';
+        $gen = 0;
+        try {
+            if (is_file($f)) {
+                $j = json_decode((string)@file_get_contents($f), true);
+                $gen = (int)(is_array($j) ? ($j['gen'] ?? 0) : 0);
+            }
+        } catch (Throwable $e) {
+        }
+        $gen++;
+        @file_put_contents($f, json_encode(['gen' => $gen], JSON_UNESCAPED_UNICODE));
+        return $gen;
+    }
+
     /** Launch 1 profile: checks -> port -> Popen (reuse launch_chrome) -> DB running. */
     private static function launchOne(int $id, string $batchId, array $plan): array
     {
@@ -380,8 +397,27 @@ class ChromeBatchManager
             $url = get_setting('home_url', 'https://www.google.com/');
             $tp = microtime(true);
             try {
+                // StartPlan bat bien (§26) + generation (§28): target lay tu plan,
+                // khong resolve lai; worker cu thay gen doi phai discard.
+                $gen = self::nextGeneration($id);
+                $override = [];
+                if (!empty($plan['target_rect']) && !empty($plan['target_monitor'])) {
+                    try {
+                        $mon = WindowPlacementManager::findByDevice((string)$plan['target_monitor']);
+                        if ($mon === null) {
+                            WindowPlacementManager::refreshMonitors();
+                            $mon = WindowPlacementManager::findByDevice((string)$plan['target_monitor']);
+                        }
+                        if ($mon !== null) {
+                            $override = ['placeOverride' => [
+                                'monitor' => $mon, 'rect' => $plan['target_rect']]];
+                        }
+                    } catch (Throwable $e) {
+                    }
+                }
                 // quickRelay: batch mo hang loat, khong cho relay_healthy 12s/profile
-                launch_chrome($p, $url, $port, ['quickRelay' => true]);
+                launch_chrome($p, $url, $port, ['quickRelay' => true, 'batchId' => $batchId,
+                    'generation' => $gen] + $override);
             } catch (RuntimeException $e) {
                 return ['ok' => false, 'error' => mb_substr($e->getMessage(), 0, 200), 'proxy_dead' => true];
             }
@@ -575,8 +611,6 @@ class ChromeBatchManager
             if ($life !== null && in_array($life['state'], [self::ST_QUEUED, self::ST_PREPARING], true)) {
                 self::lifeClear($id);
             }
-            self::lifeSet($id, self::ST_CLOSING, $batchId);
-            $states[$id] = self::ST_CLOSING;
             try {
                 $st = db()->prepare('SELECT * FROM profiles WHERE id=?');
                 $st->execute([$id]);
@@ -598,12 +632,14 @@ class ChromeBatchManager
                 }
             } catch (Throwable $e) {
             }
-            // Placement (dung scan chung, khong scan lai) (§8)
+            // Placement: save TRUOC khi mark CLOSING (save tu choi transitional) (§20)
             try {
                 $hwnd = $hwndByPid[$id] ?? null;
                 WindowPlacementManager::save_window_placement($p, $hwnd, $windows);
             } catch (Throwable $e) {
             }
+            self::lifeSet($id, self::ST_CLOSING, $batchId);
+            $states[$id] = self::ST_CLOSING;
         }
         $snapshotMs = (int)round((microtime(true) - $tSnap) * 1000);
         // Phase B: dispatch WM_CLOSE 1 lan cho TAT CA (§27-§28)

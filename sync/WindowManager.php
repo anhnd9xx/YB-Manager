@@ -36,7 +36,7 @@ class SyncWindowManager
         return $w?->clientRect;
     }
 
-    private static function control(int $hwnd, string $action, int $x = 0, int $y = 0, int $w = 0, int $h = 0): array
+    private static function control(int $hwnd, string $action, int $x = 0, int $y = 0, int $w = 0, int $h = 0, array $trace = []): array
     {
         if ($hwnd <= 0) return ['ok' => false, 'error' => 'HWND khong hop le'];
         try {
@@ -53,28 +53,30 @@ class SyncWindowManager
             if (!$r['ok']) {
                 SyncLogger::warn('window_control', "Control '$action' hwnd=$hwnd that bai: " . ($r['error'] ?? ''));
             }
-            return ['ok' => (bool)$r['ok'], 'error' => $r['error'] ?? null, 'rect' => $r['rect'] ?? null];
+            $res = ['ok' => (bool)$r['ok'], 'error' => $r['error'] ?? null, 'rect' => $r['rect'] ?? null];
+            self::traceMove($hwnd, $action, $x, $y, $w, $h, $res, $trace);
+            return $res;
         } catch (Throwable $e) {
             SyncLogger::error('window_control', "Exception control '$action' hwnd=$hwnd", null, $e);
             return ['ok' => false, 'error' => mb_substr($e->getMessage(), 0, 200)];
         }
     }
 
-    public static function moveWindow(int $hwnd, int $x, int $y): array
+    public static function moveWindow(int $hwnd, int $x, int $y, array $trace = []): array
     {
-        return self::control($hwnd, 'move', $x, $y);
+        return self::control($hwnd, 'move', $x, $y, 0, 0, $trace);
     }
 
-    public static function resizeWindow(int $hwnd, int $w, int $h): array
+    public static function resizeWindow(int $hwnd, int $w, int $h, array $trace = []): array
     {
         if ($w <= 0 || $h <= 0) return ['ok' => false, 'error' => 'Kich thuoc phai > 0'];
-        return self::control($hwnd, 'resize', 0, 0, $w, $h);
+        return self::control($hwnd, 'resize', 0, 0, $w, $h, $trace);
     }
 
-    public static function moveResize(int $hwnd, int $x, int $y, int $w, int $h): array
+    public static function moveResize(int $hwnd, int $x, int $y, int $w, int $h, array $trace = []): array
     {
         if ($w <= 0 || $h <= 0) return ['ok' => false, 'error' => 'Kich thuoc phai > 0'];
-        return self::control($hwnd, 'moveresize', $x, $y, $w, $h);
+        return self::control($hwnd, 'moveresize', $x, $y, $w, $h, $trace);
     }
 
     public static function restoreWindow(int $hwnd): array
@@ -82,9 +84,9 @@ class SyncWindowManager
         return self::control($hwnd, 'restore');
     }
 
-    public static function maximizeWindow(int $hwnd): array
+    public static function maximizeWindow(int $hwnd, array $trace = []): array
     {
-        return self::control($hwnd, 'maximize');
+        return self::control($hwnd, 'maximize', 0, 0, 0, 0, $trace);
     }
 
     public static function minimizeWindow(int $hwnd): array
@@ -114,7 +116,7 @@ class SyncWindowManager
      * @param bool $noActivate true = khong kich hoat window (mac dinh)
      * @return array hwnd(string) => ['ok'=>bool,'error'=>?string,'rect'=>?array]
      */
-    public static function applyLayoutBatch(array $rects, bool $noActivate = true): array
+    public static function applyLayoutBatch(array $rects, bool $noActivate = true, array $trace = []): array
     {
         $out = [];
         $items = [];
@@ -152,6 +154,15 @@ class SyncWindowManager
                             'rect' => $one['rect'] ?? null];
                 if (empty($one['ok'])) {
                     SyncLogger::warn('window_batch', "Batch hwnd=$k that bai: " . ($one['error'] ?? ''));
+                } else {
+                    // Trace batch move (tim target rect da gui)
+                    foreach ($items as $it) {
+                        if ((string)$it['hwnd'] === $k) {
+                            self::traceMove((int)$k, 'batch', $it['x'], $it['y'], $it['w'], $it['h'],
+                                $out[$k], $trace);
+                            break;
+                        }
+                    }
                 }
             }
             return $out;
@@ -162,6 +173,70 @@ class SyncWindowManager
             return $out;
         } finally {
             @unlink($tmp);
+        }
+    }
+
+    /**
+     * Window move trace tam thoi (§2): MOI lenh move/resize log de tim thu pham.
+     * Format: [WINDOW MOVE] t= profile= hwnd= caller= reason= OLDmon -> NEWmon rects.
+     * $trace: ['profileId'=>int, 'reason'=>string, 'batch_id'=>?string]
+     */
+    public static function traceMove(int $hwnd, string $action, int $x, int $y, int $w, int $h,
+        array $res, array $trace = []): void
+    {
+        try {
+            if (!in_array($action, ['move', 'resize', 'moveresize', 'maximize', 'batch'], true)) return;
+            if (empty($res['ok'])) return;
+            $bt = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 6);
+            $caller = 'unknown';
+            foreach ($bt as $f) {
+                $fn = ($f['class'] ?? '') . ($f['type'] ?? '') . ($f['function'] ?? '');
+                if ($fn !== '' && stripos($fn, 'traceMove') === false && stripos($fn, 'control') === false) {
+                    $caller = $fn;
+                    break;
+                }
+            }
+            $pid = (int)($trace['profileId'] ?? 0);
+            $oldMon = '?';
+            $oldRect = '?';
+            try {
+                $win = self::findWindow($hwnd);
+                if ($win !== null) {
+                    if ($pid <= 0 && $win->profileId !== null) $pid = (int)$win->profileId;
+                    $r = $win->rect;
+                    // findWindow doc cache truoc khi move -> day la rect CU (gan dung)
+                    if (is_array($r)) $oldRect = $r['x'] . ',' . $r['y'] . ',' . $r['w'] . 'x' . $r['h'];
+                    require_once __DIR__ . '/WindowPlacementManager.php';
+                    $m = WindowPlacementManager::monitorForHwnd($hwnd);
+                    if ($m !== null) $oldMon = (string)($m['device_name'] ?? '?');
+                }
+            } catch (Throwable $e) {
+            }
+            $newRect = is_array($res['rect'] ?? null)
+                ? $res['rect']['x'] . ',' . $res['rect']['y'] . ',' . $res['rect']['w'] . 'x' . $res['rect']['h']
+                : "$x,$y,{$w}x{$h}";
+            $newMon = '?';
+            try {
+                require_once __DIR__ . '/WindowPlacementManager.php';
+                $nr = is_array($res['rect'] ?? null) ? $res['rect'] : ['x' => $x, 'y' => $y, 'w' => $w, 'h' => $h];
+                $nm = WindowPlacementManager::monitorForRect((int)$nr['x'], (int)$nr['y'], max(1, (int)$nr['w']), max(1, (int)$nr['h']));
+                if ($nm !== null) $newMon = (string)($nm['device_name'] ?? '?');
+            } catch (Throwable $e) {
+            }
+            $life = '';
+            try {
+                require_once __DIR__ . '/ChromeBatchManager.php';
+                $l = $pid > 0 ? ChromeBatchManager::lifeGet($pid) : null;
+                if ($l !== null) $life = ' life=' . ($l['state'] ?? '?');
+            } catch (Throwable $e) {
+            }
+            SyncLogger::info('window_move', '[WINDOW MOVE] t=' . date('H:i:s.v')
+                . ' profile=' . $pid . ' hwnd=' . $hwnd . ' caller=' . $caller
+                . ' reason=' . (string)($trace['reason'] ?? $action)
+                . ' ' . $oldMon . ' -> ' . $newMon
+                . ' old=(' . $oldRect . ') new=(' . $newRect . ')' . $life
+                . (!empty($trace['batch_id']) ? ' batch=' . $trace['batch_id'] : ''), $pid > 0 ? $pid : null);
+        } catch (Throwable $e) {
         }
     }
 }

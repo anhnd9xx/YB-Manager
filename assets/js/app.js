@@ -229,12 +229,13 @@ function trackReflow() {
     if (syncing) return;
     reflowBaseline = target;
     if (settings.layout_reflow === 'auto') {
-      arrangeCall({});
+      // Affinity theo target monitor tung profile (khong keo ve primary)
+      arrangeCall({ monitor: 'profile' });
     } else { // ask (default)
       const okBtn = $('confirm-ok-btn');
       if (okBtn) okBtn.textContent = 'Xếp ngay';
       confirmDelete(`Đang chạy ${target} cửa sổ Chrome.<br><small>Xếp lại cửa sổ ngay?</small>`, async () => {
-        await arrangeCall({});
+        await arrangeCall({ monitor: 'profile' });
       });
     }
   } catch (e) {

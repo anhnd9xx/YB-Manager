@@ -767,6 +767,7 @@ function build_chrome_command(array $p, ?string $url = null, ?int $port = null, 
         '--user-data-dir=' . $p['user_data_dir'],
         '--no-first-run',
         '--no-default-browser-check',
+        '--disable-session-crashed-bubble',
         '--new-window',
     ];
 
@@ -867,6 +868,14 @@ function ensure_chrome_profile_name(array $p): void
     $data['profile']['name'] = $name;
     // Luon hien thanh dau trang (bookmarks bar) tren moi tab cua kenh.
     $data['bookmark_bar']['show_on_all_tabs'] = true;
+    // Chinh exit crash truoc do -> Chrome hien bubble "khoi phuc trang" (cua so phu
+    // Chrome_WidgetWin_1 gay nhieu placement/verify). Reset de mo sach.
+    if (isset($data['profile']['exit_type']) && $data['profile']['exit_type'] === 'Crashed') {
+        $data['profile']['exit_type'] = 'Normal';
+    }
+    if (array_key_exists('exited_cleanly', $data['profile']) && $data['profile']['exited_cleanly'] === false) {
+        $data['profile']['exited_cleanly'] = true;
+    }
     @file_put_contents($prefPath, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 
     // 2) Local State -> profile.info_cache.<dir profile>.name (Chrome dung cai nay de tao AUMI)
@@ -960,6 +969,13 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
         }
         $fbSize = $snap0 ? ['w' => (int)$snap0['width'], 'h' => (int)$snap0['height']] : ['w' => 1280, 'h' => 720];
         $placeRect = WindowPlacementManager::resolve_startup_rect($p, $placeMonitor, $fbSize);
+        // StartPlan bat bien (§11, §26): batch da resolve monitor+rect -> dung lai,
+        // KHONG resolve lai (khong cursor/primary/monitors[0]/app monitor).
+        if (!empty($opts['placeOverride']) && is_array($opts['placeOverride'])
+            && !empty($opts['placeOverride']['monitor']) && !empty($opts['placeOverride']['rect'])) {
+            $placeMonitor = $opts['placeOverride']['monitor'];
+            $placeRect = $opts['placeOverride']['rect'];
+        }
         if ($placeMonitor !== null && $placeRect !== null) {
             try {
                 require_once __DIR__ . '/sync/SyncLogger.php';
@@ -992,10 +1008,13 @@ function launch_chrome(array $p, string $url, ?int $port, array $opts = []): voi
     }
     // Placement lock TRUOC Popen (§12): STARTING/VERIFYING -> locked,
     // AutoArrange khong duoc move. apply_window clear khi STABLE/xong.
+    // Generation token (§28): worker cu thay gen doi phai discard.
     try {
         if ($placeRect !== null && $placeMonitor !== null) {
             require_once __DIR__ . '/sync/WindowPlacementManager.php';
-            WindowPlacementManager::startGuard((int)($p['id'] ?? 0), 0, $placeRect, $placeMonitor);
+            $gen = isset($opts['generation']) ? (int)$opts['generation'] : null;
+            $bb = isset($opts['batchId']) ? (string)$opts['batchId'] : null;
+            WindowPlacementManager::startGuard((int)($p['id'] ?? 0), 0, $placeRect, $placeMonitor, $bb, $gen);
         }
     } catch (Throwable $e) {
     }

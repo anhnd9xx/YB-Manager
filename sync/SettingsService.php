@@ -430,6 +430,9 @@ class SyncSettingsService
         return [
             'fixed' => $fixed, 'preset' => $preset, 'width' => $width, 'height' => $height,
             'position' => $pos, 'gap' => $gap, 'x' => $x, 'y' => $y, 'monitor' => $mon,
+            // StartPlan bat bien (§26): giu placement dich qua normalize (khong fallback primary)
+            'placement_rect' => $in['placement_rect'] ?? null,
+            'placement_monitor' => $in['placement_monitor'] ?? null,
         ];
     }
 

@@ -211,7 +211,8 @@ try {
 } catch (Throwable $e) {
     $profRow = ['id' => $profileId];
 }
-$r = SyncWindowManager::moveResize((int)$win['hwnd'], $x, $y, $W, $H);
+$r = SyncWindowManager::moveResize((int)$win['hwnd'], $x, $y, $W, $H,
+    ['profileId' => $profileId, 'reason' => 'startup_placement']);
 if ($r['ok']) {
     $rc = $r['rect'] ?? null;
     $got = is_array($rc) ? " -> thuc te {$rc['w']}x{$rc['h']} @ ({$rc['x']},{$rc['y']})" : '';
@@ -223,7 +224,7 @@ if ($r['ok']) {
     } catch (Throwable $e) {
     }
     if ($wantMax) {
-        $mr = SyncWindowManager::maximizeWindow((int)$win['hwnd']);
+        $mr = SyncWindowManager::maximizeWindow((int)$win['hwnd'], ['profileId' => $profileId, 'reason' => 'startup_maximize']);
         aw_log('[Window] Restored maximized state: ' . (!empty($mr['ok']) ? 'ok' : 'fail'), $profileId);
     }
     // Placement guard chung: verify 100/350/800/1500ms trong ~1600ms (Chrome hay tu restore ve primary)
@@ -235,16 +236,45 @@ if ($r['ok']) {
                   'w' => (int)$tMon['work_width'], 'h' => (int)$tMon['work_height']];
     }
     SyncLogger::info('placement', '[HWND] profile=#' . $profileId . ' hwnd=' . (int)$win['hwnd'], $profileId);
-    $checks = [100, 350, 800, 1500];
+    // Startup placement protection 10s, sparse (§5): 100..10000ms.
+    // Khong poll lien tuc; chi correct khi lech (khong SetWindowPos spam).
+    // Stale worker discard (§27-§29): guard doi batch/generation -> exit ngay.
+    $myGuard = null;
+    try {
+        $gf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_guard_' . $profileId . '.json';
+        if (is_file($gf)) $myGuard = json_decode((string)@file_get_contents($gf), true);
+    } catch (Throwable $e) {
+    }
+    $myBatch = is_array($myGuard) ? (string)($myGuard['batch_id'] ?? '') : '';
+    $myGen = is_array($myGuard) && isset($myGuard['generation']) ? (int)$myGuard['generation'] : null;
+    $checks = WindowPlacementManager::PROTECTION_CHECKS_MS;
     $t0 = microtime(true);
     $prev = 0;
     foreach ($checks as $ms) {
         usleep(max(0, ($ms - $prev) * 1000));
         $prev = $ms;
+        // Stale check: guard bi start moi hon overwrite -> worker cu exit
+        try {
+            $gf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_guard_' . $profileId . '.json';
+            if (is_file($gf)) {
+                $cur = json_decode((string)@file_get_contents($gf), true);
+                $curBatch = is_array($cur) ? (string)($cur['batch_id'] ?? '') : '';
+                $curGen = is_array($cur) && isset($cur['generation']) ? (int)$cur['generation'] : null;
+                if ($curBatch !== $myBatch || $curGen !== $myGen) {
+                    aw_log('[Window] Guard doi (batch/gen moi) -> worker cu exit', $profileId);
+                    exit(0);
+                }
+            } else {
+                // Guard bi xoa (cancel/stop) -> exit
+                aw_log('[Window] Guard cleared -> exit', $profileId);
+                exit(0);
+            }
+        } catch (Throwable $e) {
+        }
         $v = WindowPlacementManager::verify_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
         if (!$v['ok']) {
             if ($wantMax) {
-                SyncWindowManager::maximizeWindow((int)$win['hwnd']);
+                SyncWindowManager::maximizeWindow((int)$win['hwnd'], ['profileId' => $profileId, 'reason' => 'startup_guard_correct']);
             } else {
                 WindowPlacementManager::correct_window_placement($profRow ?? ['id' => $profileId], (int)$win['hwnd'], $tRect, $tMon ?? []);
             }
@@ -254,7 +284,7 @@ if ($r['ok']) {
             SyncLogger::debug('placement', '[PLACEMENT VERIFY] profile=#' . $profileId
                 . ' expected=' . $v['expected'] . ' actual=' . $v['actual'] . ' result=OK', $profileId);
         }
-        if ((microtime(true) - $t0) * 1000 >= WindowPlacementManager::GUARD_DURATION_MS) break;
+        if ((microtime(true) - $t0) * 1000 >= WindowPlacementManager::PROTECTION_MS) break;
     }
     SyncLogger::info('placement', '[PLACEMENT STABLE] profile=#' . $profileId, $profileId);
     WindowPlacementManager::clearGuard($profileId); // mo khoa cho AutoArrange (§12)

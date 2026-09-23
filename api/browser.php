@@ -226,9 +226,12 @@ function open_chrome(array $p, ?string $url = null): void
     // URL chi dinh (Studio/Dashboard) -> skip session inject; mo mac dinh thi
     // launch_chrome tu inject session (prelaunch restore, khong blank).
     // LUU Y: dung $explicitUrl (chup TRUOC khi gan home_url), khong dung $url.
+    // Generation moi moi lan start (§28-§29): huy timer/callback cu.
     try {
+        require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+        $gen = ChromeBatchManager::nextGeneration((int)$p['id']);
         launch_chrome($p, $url ?? get_setting('home_url', 'https://www.google.com/'), $port,
-            $explicitUrl ? ['skipSessionInject' => true] : []);
+            ($explicitUrl ? ['skipSessionInject' => true] : []) + ['generation' => $gen]);
     } catch (RuntimeException $e) {
         json_out(['ok' => false, 'proxy_dead' => true, 'message' => $e->getMessage()], 409);
     }
