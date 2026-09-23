@@ -68,24 +68,38 @@ async function tgSetupView() {
       };
       const pol = c.polling || {};
       const polOk = pol.state === 'LISTENING';
-      el.innerHTML = `<div class="sync-label">Telegram</div>`
-        + `<div class="meta-row"><span class="meta-label">Trạng thái</span><span class="meta-value">● Đã kết nối</span></div>`
+      const conn = c.connection || {};
+      const stColor = { CONNECTED: 'ok', DISCONNECTED: 'muted', CONNECTING: 'warn', ERROR: 'err', INVALID_TOKEN: 'err', ARCHIVED: 'muted' };
+      const stLabel = { CONNECTED: 'Đã kết nối', DISCONNECTED: 'Đã ngắt', CONNECTING: 'Đang kết nối', ERROR: 'Có lỗi', INVALID_TOKEN: 'Token không hợp lệ', ARCHIVED: 'Đã lưu trữ' };
+      const cst = conn.status || 'CONNECTED';
+      el.innerHTML = `<div class="sync-label">Kết nối Telegram <span class="badge badge-${stColor[cst] || 'ok'}">${stLabel[cst] || cst}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Người nhận</span><span class="meta-value">${escapeHtml(c.display_name || c.username || '?')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Loại</span><span class="meta-value">${escapeHtml(c.chat_type || 'private')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Chat ID</span><span class="meta-value mono">${escapeHtml(c.chat_masked || '')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${polOk ? '● Online' : '● ' + escapeHtml(pol.state || 'Offline')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
-        + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">`
+        + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">`
+        + (cst === 'CONNECTED'
+          ? `<button type="button" class="btn btn-sm" onclick="tgBotDisconnect(${conn.id || 0})">Ngắt kết nối</button>`
+          : `<button type="button" class="btn btn-sm btn-primary" onclick="tgBotConnect(${conn.id || 0})">Kết nối</button>`)
         + `<button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi thử</button>`
         + (c.bot_username ? `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml(c.bot_username)}','_blank')">Mở Telegram</button>` : '')
-        + `<button type="button" class="btn btn-sm" onclick="tgChangeReceiver()">Đổi người nhận</button>`
-        + `<button type="button" class="btn btn-sm btn-danger" onclick="tgDisconnect()">Ngắt kết nối</button>`
+        + `<div class="dropdown" style="position:relative;display:inline-block">`
+        + `<button type="button" class="btn btn-sm" onclick="tgBotMenuToggle(event)">⋮</button>`
+        + `<div class="dropdown-menu hidden" id="tg-bot-menu" style="position:absolute;right:0;z-index:50;min-width:190px">`
+        + `<button onclick="tgBotRename(${(conn.id || 0)})">Chỉnh sửa tên</button>`
+        + `<button onclick="tgBotReplace(${(conn.id || 0)})">Thay Token</button>`
+        + `<button onclick="tgBotCheck(${(conn.id || 0)})">Kiểm tra Token</button>`
+        + `<button onclick="tgBotPrimary(${(conn.id || 0)})">Đặt Primary</button>`
+        + `<button onclick="tgBotRemove(${(conn.id || 0)})">Xóa Bot</button>`
+        + `<button onclick="tgBotAdd()">+ Thêm Bot</button>`
+        + `</div></div>`
         + `</div><div class="hint" id="tg-setup-note"></div>`
         + `<div style="margin-top:8px"><button type="button" class="link-btn" onclick="tgDiagToggle()">Telegram Diagnostics ▾</button>`
-        + `<div id="tg-diag" class="hidden" style="margin-top:4px"></div></div>`;
+        + `<div id="tg-diag" class="hidden" style="margin-top:4px"></div></div>`
+        + `<div id="tg-bot-form"></div>`;
+      window.__tgConn = conn;
       tgDiagLoad();
       return;
     }
@@ -207,6 +221,9 @@ async function tgDiagLoad() {
       + row('Inbound', tdata.last_in_at ? escapeHtml(tdata.last_in_at) : '—')
       + row('Outbound', tdata.last_out_at ? escapeHtml(tdata.last_out_at) : '—')
       + row('Pair session', escapeHtml((d.session && d.session.status) || '—'))
+      + (d.counters ? row('Inbound nhận', d.counters.in_recv) + row('Inbound dedup', d.counters.in_dedup)
+        + row('Outbound gửi', d.counters.out_sent + '/' + d.counters.out_req)
+        + row('UI dedup', d.counters.ui_dedup) : '')
       + (st.last_error ? row('Lỗi', escapeHtml(friendlyPollErr(st.last_error))) : '');
   } catch (e) {}
 }
@@ -258,12 +275,133 @@ async function tgDisconnect() {
     else toast(r.message || 'Lỗi', 'error');
   });
 }
-async function tgDisconnect() {
-  confirmDelete('Ngắt kết nối Telegram?<br><small>Tool sẽ ngừng gửi báo cáo và nhận lệnh.</small>', async () => {
-    const r = await sendJson(api + 'notify.php?action=disconnect', {});
-    if (r.ok) { toast('Đã ngắt kết nối', 'success'); tgSetupView(); notifyLoadConfig(); }
-    else toast(r.message || 'Lỗi', 'error');
+// ============ BOT MANAGEMENT (§20-§31, §37-§39, §56-§57) ============
+function tgBotMenuToggle(e) {
+  if (e) e.stopPropagation();
+  const m = $('tg-bot-menu');
+  if (m) m.classList.toggle('hidden');
+}
+document.addEventListener('click', () => {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+});
+async function tgBotConnect(id) {
+  toast('Đang kết nối...', '');
+  const r = await sendJson(api + 'notify.php?action=bot_connect', { id });
+  toast(r.ok ? 'Đã kết nối.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  tgSetupView();
+}
+async function tgBotDisconnect(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  confirmDelete('Ngắt kết nối Bot?<br><small>Ngừng YT Manager sử dụng Bot. Token vẫn được lưu.</small>',
+    async () => {
+      const r = await sendJson(api + 'notify.php?action=bot_disconnect', { id });
+      toast(r.ok ? 'Đã ngắt kết nối.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+      tgSetupView();
+    });
+}
+function tgBotAdd() {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  $('tg-bot-title').textContent = 'Thêm Bot Telegram';
+  $('tg-bot-name').value = 'Telegram Bot';
+  $('tg-bot-token').value = '';
+  $('tg-bot-id').value = '';
+  $('tg-bot-note').textContent = '';
+  showModal('tg-bot-modal');
+}
+function tgBotReplace(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  $('tg-bot-title').textContent = 'Thay Token';
+  $('tg-bot-name').value = (window.__tgConn && window.__tgConn.name) || '';
+  $('tg-bot-token').value = '';
+  $('tg-bot-id').value = id;
+  $('tg-bot-note').textContent = 'Token cũ được giữ cho tới khi token mới hợp lệ.';
+  showModal('tg-bot-modal');
+}
+async function tgBotSave() {
+  const id = Number($('tg-bot-id').value || 0);
+  const name = ($('tg-bot-name').value || '').trim();
+  const token = ($('tg-bot-token').value || '').trim();
+  const note = $('tg-bot-note');
+  if (!token) { toast('Nhập Bot Token', 'error'); return; }
+  if (note) note.textContent = 'Đang kiểm tra token...';
+  if (!id) {
+    const r = await sendJson(api + 'notify.php?action=bot_add', { name, token });
+    if (r.ok) {
+      closeModal('tg-bot-modal');
+      toast('Đã thêm Bot.', 'success');
+      tgSetupView();
+    } else {
+      if (note) note.textContent = r.message || 'Lỗi';
+      toast(r.message || 'Lỗi', 'error');
+    }
+    return;
+  }
+  const r = await sendJson(api + 'notify.php?action=bot_replace', { id, token });
+  if (r.ok) {
+    closeModal('tg-bot-modal');
+    toast('Đã thay Token.', 'success');
+    tgSetupView();
+  } else if (r.data && r.data.need_confirm) {
+    const oldU = (r.data.old && r.data.old.username) || '?';
+    const newU = (r.data.new && r.data.new.username) || '?';
+    confirmDelete(`Token mới thuộc Bot khác.<br>Cũ: @${escapeHtml(oldU)} → Mới: @${escapeHtml(newU)}<br><small>Pairing có thể cần xác minh lại.</small>`,
+      async () => {
+        const r2 = await sendJson(api + 'notify.php?action=bot_replace', { id, token, confirmed: 1 });
+        if (r2.ok) {
+          closeModal('tg-bot-modal');
+          toast('Đã chuyển sang Bot mới.', 'success');
+          tgSetupView();
+        } else toast(r2.message || 'Lỗi', 'error');
+      });
+  } else {
+    if (note) note.textContent = r.message || 'Lỗi';
+    toast(r.message || 'Lỗi', 'error');
+  }
+}
+async function tgBotCheck(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  toast('Đang kiểm tra token...', '');
+  const r = await sendJson(api + 'notify.php?action=bot_check', { id });
+  toast(r.ok ? 'Token hợp lệ.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  tgSetupView();
+}
+function tgBotRename(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  const cur = (window.__tgConn && window.__tgConn.name) || '';
+  const name = prompt('Tên kết nối:', cur);
+  if (name === null) return;
+  sendJson(api + 'notify.php?action=bot_rename', { id, name: name.trim() }).then(r => {
+    toast(r.ok ? 'Đã đổi tên.' : 'Lỗi', r.ok ? 'success' : 'error');
+    tgSetupView();
   });
+}
+async function tgBotPrimary(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  const r = await sendJson(api + 'notify.php?action=bot_primary', { id });
+  toast(r.ok ? 'Đã đặt Primary.' : 'Lỗi', r.ok ? 'success' : 'error');
+  tgSetupView();
+}
+function tgBotRemove(id) {
+  const m = $('tg-bot-menu');
+  if (m) m.classList.add('hidden');
+  const bot = (window.__tgConn && window.__tgConn.bot_username) || '?';
+  confirmDelete(`XÓA BOT TELEGRAM @${escapeHtml(bot)}?<br><small>Tool ngừng kết nối, token bị xóa khỏi database. `
+    + `Bot bên Telegram KHÔNG bị xóa (revoke qua BotFather). Lịch sử chat được giữ.</small>`
+    + `<br><label style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="tg-wipe-hist" style="width:auto"> Xóa cả lịch sử chat</label>`,
+    async () => {
+      const w = $('tg-wipe-hist');
+      const r = await sendJson(api + 'notify.php?action=bot_remove',
+        { id, wipe_history: w && w.checked ? 1 : 0 });
+      toast(r.ok ? 'Đã xóa Bot.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+      tgSetupView();
+    });
 }
 // ============ CHAT TEST trong tab Telegram (§2-§20) ============
 // Reuse poller + store hien co (khong worker rieng §12). Test mode: hien text.
@@ -319,35 +457,47 @@ function ntTestRender() {
   if (!el) return;
   const rows = ntTest.msgs.filter(m => !ntTest.clearedAt || m.id > ntTest.clearedAt);
   if (!rows.length) {
+    el.classList.remove('chat-fill');
     el.innerHTML = `<div class="empty-state">💬<br>Chưa có tin nhắn<br><small>Hãy nhắn cho Bot trên Telegram hoặc gửi một tin từ Tool để kiểm tra.</small></div>`;
     return;
   }
+  // It tin: messages bat dau tu duoi (§47)
+  el.classList.toggle('chat-fill', rows.length < 5);
   let html = '';
   let lastDay = '';
+  let lastKey = '';
   for (const m of rows) {
     const day = ntChatDayLabel(ntParseTs(m.created_at));
     if (day !== lastDay) {
       html += `<div class="chat-date-sep">${day}</div>`;
       lastDay = day;
+      lastKey = '';
     }
-    html += ntTestMsgHtml(m);
+    // Group nhe: cung sender lien tiep -> gon sender label (§15)
+    const key = (m.direction || '') + '|' + (m.msg_type || 'TEXT');
+    const compact = key === lastKey;
+    lastKey = key;
+    html += ntTestMsgHtml(m, compact);
   }
   el.innerHTML = html;
 }
-function ntTestMsgHtml(m) {
+function ntTestMsgHtml(m, compact) {
   const inbound = m.direction === 'INBOUND';
   const who = inbound ? 'Telegram' : 'YT Manager';
   const ts = ntParseTs(m.created_at);
   let status = '';
   if (!inbound) {
+    const retryArg = typeof m.id === 'number' ? m.id : `'${String(m.id).replace(/'/g, '')}'`;
     if (m.status === 'SENT') status = `<div class="chat-status st-ok">✓</div>`;
-    else if (m.status === 'FAILED') status = `<div class="chat-status st-err">! <button type="button" class="btn btn-xs" onclick="ntTestRetry(${m.id})">Thử lại</button></div>`;
+    else if (m.status === 'FAILED') status = `<div class="chat-status st-err">! <button type="button" class="btn btn-xs" onclick="ntTestRetry(${retryArg})">Thử lại</button></div>`;
     else status = `<div class="chat-status">◌</div>`;
   }
   return `<div class="chat-msg ${inbound ? 'chat-in' : 'chat-out'}" data-mid="${m.id}">`
-    + `<div class="chat-meta"><span>${who}</span>`
-    + `<span title="${ntChatFull(ts)}">${ntChatTime(ts)}</span>${status}</div>`
-    + `<div>${escapeHtml(m.text || '')}</div></div>`;
+    + (compact ? '' : `<div class="chat-meta"><span>${who}</span>`)
+    + (compact
+      ? `<div>${escapeHtml(m.text || '')}${status}</div></div>`
+      : `<span title="${ntChatFull(ts)}">${ntChatTime(ts)}</span>${status}</div>`
+        + `<div>${escapeHtml(m.text || '')}</div></div>`);
 }
 function ntTestNearBottom() {
   const el = $('nt-test-list');
@@ -364,6 +514,16 @@ async function ntTestPoll() {
     const stick = ntTestNearBottom();
     let added = 0;
     for (const m of rows) {
+      // Reconcile local temp theo client_message_id (§7)
+      if (m.client_message_id) {
+        const local = ntTestFindLocal(m.client_message_id);
+        if (local && local.id !== m.id) {
+          local.id = m.id;
+          local.status = m.status || local.status;
+          if (typeof m.id === 'number') ntTest.newest = Math.max(ntTest.newest, m.id);
+          continue;
+        }
+      }
       if (m.id > ntTest.newest && !ntTest.msgs.some(x => x.id === m.id)) {
         ntTest.msgs.push(m);
         ntTest.newest = m.id;
@@ -420,49 +580,90 @@ function ntTestBindInput() {
   });
   if (btn) btn.disabled = true;
 }
+let ntSendBusy = false; // guard double submit (§9) — root fix van la 1 path + idempotency
+function ntTestUuid() {
+  try {
+    if (window.crypto && crypto.randomUUID) return 'MSG-' + crypto.randomUUID();
+  } catch (e) {}
+  return 'MSG-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+function ntTestFindLocal(cid) {
+  return ntTest.msgs.find(x => x.direction === 'OUTBOUND' && (x.client_id === cid || x.id === ('c:' + cid)));
+}
 async function sendTestMessage(text) {
-  // (§9) hien SENDING ngay -> gui -> SENT/FAILED. Khong reload.
-  const tempId = -Date.now();
-  ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'SENDING', created_at: new Date().toISOString() });
+  // ONE submit path (§8) + ONE local record (§3): patch, khong append them
+  if (ntSendBusy) return;
+  const inp = $('nt-test-input');
+  const UiText = (inp.value || '').trim();
+  if (UiText !== text) return; // stale double call
+  ntSendBusy = true;
+  const btn = $('nt-test-send');
+  if (btn) btn.disabled = true;
+  const cid = ntTestUuid();
+  const rec = { id: 'c:' + cid, client_id: cid, direction: 'OUTBOUND', text, status: 'SENDING', created_at: new Date().toISOString() };
+  ntTest.msgs.push(rec);
+  inp.value = '';
   ntTestRender();
   const el = $('nt-test-list');
   if (el) el.scrollTop = el.scrollHeight;
   try {
-    const r = await sendJson(api + 'telegram.php?action=send_text', { text });
-    ntTest.msgs = ntTest.msgs.filter(x => x.id !== tempId);
-    if (r.ok && r.data && r.data.id) {
-      ntTest.msgs.push({ id: r.data.id, direction: 'OUTBOUND', text, status: 'SENT', created_at: new Date().toISOString() });
-      ntTest.newest = Math.max(ntTest.newest, r.data.id);
+    const r = await sendJson(api + 'telegram.php?action=send_text', { text, client_id: cid });
+    if (r.ok && r.data) {
+      // Reconcile SAME record (§5): server id thay temp, khong bubble moi
+      if (r.data.id) {
+        rec.id = r.data.id;
+        ntTest.newest = Math.max(ntTest.newest, r.data.id);
+      }
+      rec.status = 'SENT';
+      inp.value = ''; // chi xoa khi gui thanh cong (giu draft khi loi)
     } else {
-      ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'FAILED', created_at: new Date().toISOString(), _retry: true });
+      rec.status = 'FAILED';
       toast(r.message || 'Không gửi được', 'error');
     }
   } catch (e) {
-    ntTest.msgs = ntTest.msgs.filter(x => x.id !== tempId);
-    ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'FAILED', created_at: new Date().toISOString(), _retry: true });
+    rec.status = 'FAILED';
     toast('Telegram đang mất kết nối.', 'error');
   }
+  ntSendBusy = false;
   ntTestRender();
   if (el) el.scrollTop = el.scrollHeight;
   ntTestPoll();
+  if (btn) btn.disabled = (inp.value || '').trim() === '';
 }
 async function ntTestSend() {
   const inp = $('nt-test-input');
   const text = (inp.value || '').trim();
-  if (!text) return;
-  inp.value = '';
-  const btn = $('nt-test-send');
-  if (btn) btn.disabled = true;
+  if (!text || ntSendBusy) return;
   await sendTestMessage(text);
-  if (btn) btn.disabled = (inp.value || '').trim() === '';
 }
 async function ntTestRetry(mid) {
+  // Retry SAME record (§16, §54): FAILED -> SENDING -> SENT, khong bubble moi
   const m = ntTest.msgs.find(x => x.id === mid);
-  const text = m ? m.text : '';
-  if (!text) return;
-  ntTest.msgs = ntTest.msgs.filter(x => x.id !== mid);
+  if (!m || ntSendBusy) return;
+  const cid = m.client_id || ntTestUuid();
+  m.client_id = cid;
+  m.status = 'SENDING';
   ntTestRender();
-  await sendTestMessage(text);
+  ntSendBusy = true;
+  try {
+    const r = await sendJson(api + 'telegram.php?action=send_text', { text: m.text, client_id: cid });
+    if (r.ok && r.data) {
+      if (r.data.id && typeof r.data.id === 'number') {
+        m.id = r.data.id;
+        ntTest.newest = Math.max(ntTest.newest, r.data.id);
+      }
+      m.status = 'SENT';
+    } else {
+      m.status = 'FAILED';
+      toast(r.message || 'Không gửi được', 'error');
+    }
+  } catch (e) {
+    m.status = 'FAILED';
+    toast('Telegram đang mất kết nối.', 'error');
+  }
+  ntSendBusy = false;
+  ntTestRender();
+  ntTestPoll();
 }
 async function notifyLoadConfig() {
   // Telegram tab moi: preset + autosave controls (nap tu preset_get)

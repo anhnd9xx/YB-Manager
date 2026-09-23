@@ -137,7 +137,8 @@ function handle_update(array $u): void
     }
     ConversationService::log(ConversationService::IN, $chatId, $text,
         ['user_id' => $userId, 'message_id' => (string)($msg['message_id'] ?? ''),
-            'type' => $msgType]);
+            'telegram_message_id' => (string)($msg['message_id'] ?? ''),
+            'telegram_update_id' => $uid, 'type' => $msgType]);
     // Setup session uu tien cho sender chua authorized (one-field pairing §5-§9).
     // Sender da authorized van di router binh thuong.
     require_once __DIR__ . '/../sync/PermissionService.php';
@@ -206,6 +207,10 @@ function send_reply(string $chatId, array $reply, string $inboundText): void
         $r = TelegramGateway::sendButtons($chatId, $text, $reply['buttons']);
     } else {
         $r = TelegramGateway::sendMessage($chatId, $text);
+    }
+    if (!empty($r['ok'])) {
+        require_once __DIR__ . '/../sync/TelegramCounters.php';
+        TelegramCounters::bump('out_sent');
     }
     ConversationService::log(ConversationService::OUT, $chatId, $text,
         ['command_id' => $reply['command_id'] ?? null, 'job_id' => $reply['job_id'] ?? null,

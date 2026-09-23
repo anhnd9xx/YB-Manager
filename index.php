@@ -499,7 +499,7 @@
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                   <span id="nt-test-status" class="badge badge-muted">…</span>
-                  <button type="button" class="btn btn-xs" onclick="ntTestClear()" title="Chỉ xóa màn hình">Xóa màn hình</button>
+                  <button type="button" class="btn btn-xs" onclick="ntTestClear()" title="Chỉ dọn màn hình, không xóa dữ liệu">Dọn màn hình</button>
                 </div>
               </div>
               <div id="nt-test-new" class="hidden" style="text-align:center;margin:6px 0">
@@ -507,8 +507,8 @@
               </div>
               <div id="nt-test-list" class="chat-list chat-test-list"></div>
               <div style="display:flex;gap:8px;margin-top:8px">
-                <textarea id="nt-test-input" rows="1" style="flex:1;resize:vertical" placeholder="Nhập tin nhắn để test..."></textarea>
-                <button type="button" class="btn btn-sm btn-primary" id="nt-test-send" onclick="ntTestSend()">Gửi</button>
+                <textarea id="nt-test-input" rows="1" style="flex:1;resize:vertical;min-height:42px;max-height:120px" placeholder="Nhập tin nhắn để test..."></textarea>
+                <button type="button" class="btn btn-sm btn-primary" id="nt-test-send" onclick="ntTestSend()" title="Gửi">➤</button>
               </div>
             </div>
           </div>
@@ -1391,6 +1391,28 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('bulk-act-modal')">Hủy</button>
       <button class="btn btn-primary" onclick="actBulkSave()">Gán cho đã chọn</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: Telegram Bot ===== -->
+<div id="tg-bot-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="tg-bot-title">Thêm Bot Telegram</h2>
+      <button class="modal-close" onclick="closeModal('tg-bot-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="tg-bot-id" value="">
+      <label>Tên kết nối</label>
+      <input type="text" id="tg-bot-name" placeholder="Telegram Bot">
+      <label>Bot Token</label>
+      <input type="password" id="tg-bot-token" placeholder="123456:ABC-DEF..." autocomplete="off">
+      <div class="hint" id="tg-bot-note"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('tg-bot-modal')">Hủy</button>
+      <button class="btn btn-primary" onclick="tgBotSave()">Kiểm tra & Lưu</button>
     </div>
   </div>
 </div>

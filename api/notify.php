@@ -253,6 +253,7 @@ try {
             require_once __DIR__ . '/../sync/ConversationService.php';
             require_once __DIR__ . '/../sync/TelegramGateway.php';
             require_once __DIR__ . '/../sync/TelegramConfigService.php';
+            require_once __DIR__ . '/../sync/TgBotStore.php';
             $v['last_in_at'] = ConversationService::lastAt(ConversationService::IN);
             $v['last_out_at'] = ConversationService::lastAt(ConversationService::OUT);
             $v['polling'] = TelegramGateway::connectionState();
@@ -270,6 +271,22 @@ try {
                 'candidate_username' => $sess['candidate_username'] ?? null,
                 'candidate_count' => (int)($sess['candidate_count'] ?? 0),
                 'expires_at' => $sess['expires_at'] ?? null] : null;
+            // Primary connection (bot management UI)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            try {
+                TgBotStore::migrateLegacy();
+            } catch (Throwable $e) {
+            }
+            $conn = TgBotStore::primary();
+            if ($conn) {
+                unset($conn['token_encrypted']);
+                $v['connection'] = $conn;
+                $v['connection']['destinations'] = TgBotStore::destinations((int)$conn['id']);
+            } else {
+                $v['connection'] = null;
+            }
+            require_once __DIR__ . '/../sync/TelegramCounters.php';
+            $v['counters'] = TelegramCounters::all();
             json_out(['ok' => true, 'data' => $v]);
             break;
         }
@@ -330,6 +347,107 @@ try {
             $r = TelegramSetup::confirmFromTool($sid);
             json_out($r['ok'] ? ['ok' => true, 'data' => ['paired' => true]]
                 : ['ok' => false, 'message' => $r['text'] ?? 'Lỗi']);
+            break;
+        }
+
+        // ---- Bot connections (§20-§31, §37-§39) ----
+        case 'bots_list': {
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            try {
+                TgBotStore::migrateLegacy();
+            } catch (Throwable $e) {
+            }
+            json_out(['ok' => true, 'data' => TgBotStore::list()]);
+            break;
+        }
+
+        case 'bot_add': {
+            // [+ Thêm Bot]: validate getMe truoc, chi luu khi valid (§24-§25)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TgBotStore::add((string)($b['name'] ?? ''), (string)($b['token'] ?? ''));
+            if (!$r['ok']) json_out(['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            $c = $r['connection'];
+            unset($c['token_encrypted']);
+            json_out(['ok' => true, 'data' => $c]);
+            break;
+        }
+
+        case 'bot_replace': {
+            // [Thay Token]: validate truoc; invalid -> giu cu (§26). Bot khac -> confirm.
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TgBotStore::replaceToken((int)($b['id'] ?? 0), (string)($b['token'] ?? ''),
+                !empty($b['confirmed']));
+            if (!$r['ok']) {
+                json_out(['ok' => false, 'message' => $r['error'] ?? 'Lỗi',
+                    'data' => ['need_confirm' => !empty($r['need_confirm']),
+                        'old' => $r['old'] ?? null, 'new' => $r['new'] ?? null]], 400);
+            }
+            $c = $r['connection'];
+            unset($c['token_encrypted']);
+            json_out(['ok' => true, 'data' => $c]);
+            break;
+        }
+
+        case 'bot_rename': {
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => TgBotStore::rename((int)($b['id'] ?? 0), (string)($b['name'] ?? ''))]);
+            break;
+        }
+
+        case 'bot_primary': {
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => TgBotStore::setPrimary((int)($b['id'] ?? 0))]);
+            break;
+        }
+
+        case 'bot_check': {
+            // [Kiểm tra Token]: getMe bang token da luu (decrypt), khong doi gi
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $id = (int)(($method === 'GET' ? $_GET : json_body())['id'] ?? 0);
+            $conn = TgBotStore::get($id);
+            if (!$conn) json_out(['ok' => false, 'message' => 'Không thấy Bot'], 404);
+            $token = TgBotStore::runtimeToken($conn);
+            if ($token === '') json_out(['ok' => false, 'message' => 'Không đọc được token đã lưu'], 500);
+            $me = TelegramProvider::getMeVia($token);
+            if (empty($me['ok'])) {
+                TgBotStore::setStatus($id, TgBotStore::ST_INVALID_TOKEN, 'Token không hợp lệ.');
+                json_out(['ok' => false, 'message' => 'Token không hợp lệ hoặc không kết nối được Telegram.']);
+            }
+            json_out(['ok' => true, 'data' => ['bot' => $me['bot']]]);
+            break;
+        }
+
+        case 'bot_connect': {
+            // [Kết nối]: decrypt -> getMe -> polling -> CONNECTED (§28, §60)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TgBotStore::connect((int)($b['id'] ?? 0));
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['connected' => true]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            break;
+        }
+
+        case 'bot_disconnect': {
+            // [Ngắt kết nối]: stop polling, GIU token/pairing/history (§29)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TgBotStore::disconnect((int)($b['id'] ?? 0));
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['disconnected' => true]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            break;
+        }
+
+        case 'bot_remove': {
+            // [Xóa Bot]: confirm o client; giu history mac dinh (§31-§33)
+            require_once __DIR__ . '/../sync/TgBotStore.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TgBotStore::remove((int)($b['id'] ?? 0), !empty($b['wipe_history']));
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['removed' => true]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
             break;
         }
 

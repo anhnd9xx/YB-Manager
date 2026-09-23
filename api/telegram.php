@@ -154,15 +154,27 @@ try {
                         'message' => "Chưa tìm thấy Telegram nhận tin.\nHãy nhắn một tin cho Bot trước."], 400);
                 }
                 $dest = (string)$eff['chat_id'];
+                $clientId = trim((string)($b['client_id'] ?? ''));
+                if ($clientId === '' || strlen($clientId) > 64) {
+                    $clientId = 'MSG-' . substr(md5(microtime(true) . mt_rand()), 0, 12);
+                }
                 require_once __DIR__ . '/../sync/ConversationService.php';
-                $rowId = ConversationService::logOutbound($dest, $text, ['source' => 'UI', 'status' => 'SENDING']);
+                // Upsert: client da gui (double submit) -> tra ve row cu (§7)
+                $rowId = ConversationService::logOutbound($dest, $text,
+                    ['source' => 'UI', 'status' => 'SENDING', 'client_message_id' => $clientId]);
                 $r = TelegramProvider::sendTo($dest, $text);
                 ConversationService::setStatus($rowId, !empty($r['ok']) ? 'SENT' : 'FAILED',
-                    $r['ok'] ? null : TelegramProvider::friendly($r));
+                    $r['ok'] ? null : TelegramProvider::friendly($r),
+                    !empty($r['message_id']) ? (string)$r['message_id'] : null);
+                if (!empty($r['ok'])) {
+                    require_once __DIR__ . '/../sync/TelegramCounters.php';
+                    TelegramCounters::bump('out_sent');
+                }
+                // telegram_message_id that su
                 json_out(!empty($r['ok'])
-                    ? ['ok' => true, 'data' => ['id' => $rowId, 'status' => 'SENT']]
+                    ? ['ok' => true, 'data' => ['id' => $rowId, 'client_id' => $clientId, 'status' => 'SENT']]
                     : ['ok' => false, 'message' => 'Không gửi được tin nhắn Telegram.',
-                        'data' => ['id' => $rowId]]);
+                        'data' => ['id' => $rowId, 'client_id' => $clientId]]);
             } catch (Throwable $e) {
                 try {
                     SyncLogger::error('telegram', 'send_text loi: ' . get_class($e), null, $e);

@@ -50,6 +50,11 @@ class ConversationService
                 'telegram_message_id' => 'VARCHAR(64) NULL',
                 'sent_at' => 'DATETIME NULL',
                 'error' => 'VARCHAR(500) NULL',
+                // Idempotency (§4-§6): client id duy nhat + update id + composite inbound
+                'client_message_id' => 'VARCHAR(64) NULL',
+                'telegram_update_id' => 'BIGINT NULL',
+                'connection_id' => 'INT NULL',
+                'destination_id' => 'INT NULL',
             ];
             foreach ($add as $col => $def) {
                 if (empty($cols[$col])) {
@@ -57,6 +62,22 @@ class ConversationService
                         db()->exec("ALTER TABLE tg_messages ADD COLUMN $col $def");
                     } catch (Throwable $e) {
                     }
+                }
+            }
+            // Unique constraints (idempotent)
+            foreach ([
+                'uq_client_msg' => 'UNIQUE KEY uq_client_msg (client_message_id)',
+                'uq_inbound_tg' => 'UNIQUE KEY uq_inbound_tg (chat_id, telegram_message_id, direction)',
+            ] as $name => $ddl) {
+                try {
+                    $exists = db()->query("SHOW INDEX FROM tg_messages WHERE Key_name='$name'")->fetch();
+                    if (!$exists) {
+                        try {
+                            db()->exec("ALTER TABLE tg_messages ADD $ddl");
+                        } catch (Throwable $e) {
+                        }
+                    }
+                } catch (Throwable $e) {
                 }
             }
         } catch (Throwable $e) {
@@ -72,15 +93,46 @@ class ConversationService
         if ($token !== '' && str_contains($text, $token)) {
             $text = str_replace($token, '[REDACTED]', $text);
         }
+        // Upsert idempotency (§7): client_id hoac inbound (chat + tg_msg_id) da co -> khong insert
+        try {
+            $cid = isset($opts['client_message_id']) ? trim((string)$opts['client_message_id']) : '';
+            if ($cid !== '') {
+                $st = db()->prepare('SELECT id FROM tg_messages WHERE client_message_id=? LIMIT 1');
+                $st->execute([$cid]);
+                if ($st->fetch()) {
+                    require_once __DIR__ . '/TelegramCounters.php';
+                    TelegramCounters::bump('ui_dedup');
+                    return;
+                }
+            }
+            $tgmid = isset($opts['telegram_message_id']) ? trim((string)$opts['telegram_message_id']) : '';
+            if ($direction === 'INBOUND' && $tgmid !== '') {
+                $st = db()->prepare("SELECT id FROM tg_messages WHERE chat_id=? AND telegram_message_id=? AND direction='INBOUND' LIMIT 1");
+                $st->execute([$chatId, $tgmid]);
+                if ($st->fetch()) {
+                    require_once __DIR__ . '/TelegramCounters.php';
+                    TelegramCounters::bump('in_dedup');
+                    return;
+                }
+            }
+        } catch (Throwable $e) {
+        }
         try {
             db()->prepare('INSERT INTO tg_messages (message_id, direction, source, chat_id, user_id,
-                    text, command_id, job_id, status, msg_type, telegram_message_id, sent_at, error, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())')
+                    text, command_id, job_id, status, msg_type, telegram_message_id, sent_at, error,
+                    client_message_id, telegram_update_id, connection_id, destination_id, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())')
                 ->execute([$opts['message_id'] ?? null, $direction, $opts['source'] ?? 'TELEGRAM',
                     $chatId, $opts['user_id'] ?? null, mb_substr($text, 0, 4000),
                     $opts['command_id'] ?? null, $opts['job_id'] ?? null, $opts['status'] ?? null,
                     $opts['type'] ?? self::T_TEXT, $opts['telegram_message_id'] ?? null,
-                    $opts['sent_at'] ?? null, isset($opts['error']) ? mb_substr((string)$opts['error'], 0, 500) : null]);
+                    $opts['sent_at'] ?? null, isset($opts['error']) ? mb_substr((string)$opts['error'], 0, 500) : null,
+                    $opts['client_message_id'] ?? null,
+                    isset($opts['telegram_update_id']) ? (int)$opts['telegram_update_id'] : null,
+                    isset($opts['connection_id']) ? (int)$opts['connection_id'] : null,
+                    isset($opts['destination_id']) ? (int)$opts['destination_id'] : null]);
+            require_once __DIR__ . '/TelegramCounters.php';
+            TelegramCounters::bump($direction === 'INBOUND' ? 'in_recv' : 'out_req');
             db()->prepare('DELETE FROM tg_messages WHERE id NOT IN
                 (SELECT id FROM (SELECT id FROM tg_messages ORDER BY id DESC LIMIT 2000) t)')->execute();
             // Retention (§AP, default 30d)
@@ -98,14 +150,37 @@ class ConversationService
         if ($token !== '' && str_contains($text, $token)) {
             $text = str_replace($token, '[REDACTED]', $text);
         }
+        // Upsert theo client_message_id: da co -> tra ve id cu (khong insert moi) (§7)
+        try {
+            $cid = isset($opts['client_message_id']) ? trim((string)$opts['client_message_id']) : '';
+            if ($cid !== '') {
+                $st = db()->prepare('SELECT id FROM tg_messages WHERE client_message_id=? LIMIT 1');
+                $st->execute([$cid]);
+                $ex = $st->fetchColumn();
+                if ($ex) {
+                    require_once __DIR__ . '/TelegramCounters.php';
+                    TelegramCounters::bump('ui_dedup');
+                    return (int)$ex;
+                }
+            }
+        } catch (Throwable $e) {
+        }
         try {
             db()->prepare('INSERT INTO tg_messages (direction, source, chat_id, user_id, text,
-                    command_id, job_id, status, msg_type, created_at)
-                VALUES (\'OUTBOUND\',?,?,?,?,?,?,?,\'TEXT\',NOW())')
+                    command_id, job_id, status, msg_type, client_message_id, connection_id, destination_id, created_at)
+                VALUES (\'OUTBOUND\',?,?,?,?,?,?,?,\'TEXT\',?,?,?,NOW())')
                 ->execute([$opts['source'] ?? 'UI', $chatId, $opts['user_id'] ?? null,
                     mb_substr($text, 0, 4000), $opts['command_id'] ?? null, $opts['job_id'] ?? null,
-                    $opts['status'] ?? 'QUEUED']);
-            return (int)db()->lastInsertId();
+                    $opts['status'] ?? 'QUEUED', $opts['client_message_id'] ?? null,
+                    isset($opts['connection_id']) ? (int)$opts['connection_id'] : null,
+                    isset($opts['destination_id']) ? (int)$opts['destination_id'] : null]);
+            $id = (int)db()->lastInsertId();
+            try {
+                require_once __DIR__ . '/TelegramCounters.php';
+                TelegramCounters::bump('out_req');
+            } catch (Throwable $e) {
+            }
+            return $id;
         } catch (Throwable $e) {
             return 0;
         }

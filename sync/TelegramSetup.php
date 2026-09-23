@@ -190,7 +190,7 @@ class TelegramSetup
     {
         $d = ['token' => false, 'bot' => null, 'webhook' => ['active' => false],
             'polling' => ['state' => 'STOPPED'], 'offset' => 0,
-            'session' => null, 'probe' => null];
+            'session' => null, 'probe' => null, 'counters' => null];
         try {
             $token = TelegramConfig::token();
             $d['token'] = $token !== '';
@@ -205,6 +205,8 @@ class TelegramSetup
             require_once __DIR__ . '/TelegramOffset.php';
             $d['offset'] = TelegramOffset::get();
             $d['session'] = self::active();
+            require_once __DIR__ . '/TelegramCounters.php';
+            $d['counters'] = TelegramCounters::all();
         } catch (Throwable $e) {
         }
         return $d;

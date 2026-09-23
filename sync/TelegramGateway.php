@@ -92,11 +92,28 @@ class TelegramGateway
 
     /**
      * Worker co nen poll? inbound ON hoac setup session active (pairing).
-     * FIX root cause: setup doi message nhung inbound chua bat (chi bat sau confirm).
+     * Voi bot model: chi poll khi primary CONNECTED (disconnect = dung).
+     * Legacy (chua migrate): fallback hanh vi cu.
      */
     public static function shouldPoll(): bool
     {
         try {
+            require_once __DIR__ . '/TgBotStore.php';
+            $conns = TgBotStore::list();
+            if ($conns) {
+                $prim = null;
+                foreach ($conns as $c) {
+                    if (!empty($c['is_primary'])) {
+                        $prim = $c;
+                        break;
+                    }
+                }
+                $prim = $prim ?? $conns[0];
+                if (($prim['status'] ?? '') !== TgBotStore::ST_CONNECTED) return false;
+                if (self::inboundEnabled()) return true;
+                require_once __DIR__ . '/TelegramSetup.php';
+                return TelegramSetup::active() !== null;
+            }
             if (trim((string)get_setting('notify_bot_token', '')) === '') return false;
             if (self::inboundEnabled()) return true;
             require_once __DIR__ . '/TelegramSetup.php';

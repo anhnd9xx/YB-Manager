@@ -81,6 +81,18 @@ class TelegramConfigService
         }
         $kept[] = ['chat_id' => $chatId, 'user_id' => $userId, 'role' => 'ADMIN'];
         PermissionService::saveAllowed($kept);
+        // Link pairing -> destination cua primary connection (§45)
+        try {
+            require_once __DIR__ . '/TgBotStore.php';
+            $conn = TgBotStore::primary();
+            if ($conn) {
+                TgBotStore::upsertDestination((int)$conn['id'], $chatId, [
+                    'user_id' => $userId, 'username' => $username,
+                    'display_name' => $displayName, 'chat_type' => 'private', 'role' => 'ADMIN']);
+                TgBotStore::setStatus((int)$conn['id'], TgBotStore::ST_CONNECTED);
+            }
+        } catch (Throwable $e) {
+        }
         try {
             SyncLogger::info('telegram', '[Pairing] paired chat=' . $chatId
                 . ' user=' . $userId . ' via=' . $confirmedBy);

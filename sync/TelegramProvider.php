@@ -13,10 +13,26 @@ class TelegramProvider
     public const API = 'https://api.telegram.org/bot';
     public const MAX_LEN = 4000;
 
+    /** Token runtime: connection primary (decrypt) -> fallback legacy settings. */
+    public static function runtimeToken(): string
+    {
+        try {
+            require_once __DIR__ . '/TgBotStore.php';
+            $conn = TgBotStore::primary();
+            if ($conn) {
+                $t = TgBotStore::runtimeToken($conn);
+                if ($t !== '') return $t;
+            }
+        } catch (Throwable $e) {
+        }
+        require_once __DIR__ . '/TelegramConfig.php';
+        return TelegramConfig::token();
+    }
+
     public static function configured(): array
     {
         require_once __DIR__ . '/TelegramConfig.php';
-        $token = TelegramConfig::token();
+        $token = self::runtimeToken();
         if ($token === '') $token = trim((string)get_setting('notify_bot_token', ''));
         $chat = TelegramConfig::primaryChatId();
         if ($chat === '') $chat = trim((string)get_setting('notify_chat_id', ''));
@@ -37,15 +53,15 @@ class TelegramProvider
      * Send voi destination explicit (§16): (chat_id, text).
      * Token runtime duy nhat tu ConfigService (§17). Khong log token.
      * Loi tra RAW (error code); friendly() chi goi 1 lan o edge (§12).
-     * @return array{ok, error?, description?}
+     * @return array{ok, error?, description?, message_id?}
      */
     public static function sendTo(string $chatId, string $text): array
     {
-        require_once __DIR__ . '/TelegramConfigService.php';
-        $token = TelegramConfigService::get_bot_token();
+        $token = self::runtimeToken();
         if ($token === '' || trim($chatId) === '') {
             return ['ok' => false, 'error' => 'not_configured'];
         }
+        $lastId = null;
         foreach (self::split($text) as $i => $part) {
             $r = self::post($token, 'sendMessage', [
                 'chat_id' => trim($chatId),
@@ -57,16 +73,17 @@ class TelegramProvider
                 return ['ok' => false, 'error' => $r['error'] ?? 'send_failed',
                     'description' => $r['description'] ?? ''];
             }
+            $lastId = (string)(($r['result'] ?? [])['message_id'] ?? '');
             if ($i > 0) usleep(400000); // throttle giua cac part
         }
-        return ['ok' => true];
+        return ['ok' => true, 'message_id' => $lastId];
     }
 
     /** @return array{ok, error?, bot?} */
     public static function testConnection(?string $token = null): array
     {
-        $token = $token ?? trim((string)get_setting('notify_bot_token', ''));
-        if ($token === '') return ['ok' => false, 'error' => 'empty_token'];
+        $token = $token ?? self::runtimeToken();
+        if (trim((string)$token) === '') return ['ok' => false, 'error' => 'empty_token'];
         $r = self::post($token, 'getMe', []);
         if (!empty($r['ok'])) {
             $u = $r['result'] ?? [];
