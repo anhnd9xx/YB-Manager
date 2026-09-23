@@ -470,6 +470,7 @@
           <button class="mon-tab" data-ntab="rules" onclick="notifyTab('rules')">Quy tắc</button>
           <button class="mon-tab" data-ntab="reports" onclick="notifyTab('reports')">Báo cáo định kỳ</button>
           <button class="mon-tab" data-ntab="history" onclick="notifyTab('history')">Lịch sử gửi</button>
+          <button class="mon-tab" data-ntab="chat" onclick="notifyTab('chat')">Chat & Điều khiển</button>
         </div>
         <div class="mon-pane" id="nt-pane-overview">
           <div class="panel"><div id="nt-kpi" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
@@ -543,6 +544,57 @@
         </div>
         <div class="mon-pane hidden" id="nt-pane-history">
           <div class="panel"><div id="nt-history"><div class="skeleton"></div></div></div>
+        </div>
+        <div class="mon-pane hidden" id="nt-pane-chat">
+          <div class="panel"><div id="nt-chat-metrics" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
+          <div class="panel">
+            <div class="sync-label">Điều khiển từ xa (inbound)</div>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="tg-inbound" style="width:auto"> Cho phép điều khiển Tool từ Telegram</label>
+            <div class="hint">Mặc định TẮT. Bật rồi cấu hình chat được phép + ghép nối.</div>
+            <label>Danh sách chat được phép (chat_id, user_id tùy chọn, role)</label>
+            <div id="tg-allowed-list"></div>
+            <div class="win-row">
+              <div class="win-field"><label>Chat ID</label><input type="text" id="tg-new-chat" placeholder="123456789"></div>
+              <div class="win-field"><label>User ID (tùy chọn)</label><input type="text" id="tg-new-user" placeholder=""></div>
+              <div class="win-field"><label>Role</label>
+                <select id="tg-new-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="ADMIN">ADMIN</option></select>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+              <button type="button" class="btn btn-sm" onclick="tgAddAllowed()">+ Thêm chat</button>
+              <button type="button" class="btn btn-sm" onclick="tgPairCreate()">Tạo mã ghép nối</button>
+              <span class="summary-text" id="tg-pair-out"></span>
+            </div>
+            <div class="win-row" style="margin-top:6px">
+              <div class="win-field"><label>Role mặc định cho chat mới ghép nối</label>
+                <select id="tg-default-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="ADMIN">ADMIN</option></select>
+              </div>
+              <div class="win-field"><label>Polling</label><div id="tg-poll-status" class="muted">—</div></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <button type="button" class="btn btn-sm" onclick="tgSaveInbound()">Lưu inbound</button>
+              <button type="button" class="btn btn-sm" onclick="tgPoll(1)">Chạy polling</button>
+              <button type="button" class="btn btn-sm" onclick="tgPoll(0)">Dừng polling</button>
+              <button type="button" class="btn btn-sm" onclick="tgJob(1)">Chạy job worker</button>
+              <button type="button" class="btn btn-sm" onclick="tgJob(0)">Dừng job worker</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Hội thoại</div>
+            <div id="nt-chat-list" style="max-height:420px;overflow-y:auto"></div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <input type="text" id="nt-chat-input" style="flex:1" placeholder="/status  |  /channel 32  |  /evaluate 32" onkeydown="if(event.key==='Enter')ntChatSend()">
+              <button type="button" class="btn btn-sm btn-primary" onclick="ntChatSend()">Send</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Nhật ký lệnh (audit)</div>
+            <div id="nt-audit"><div class="skeleton"></div></div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Quy tắc lệnh (role/xác nhận)</div>
+            <div id="nt-cmdrules"><div class="skeleton"></div></div>
+          </div>
         </div>
       </section>
       <!-- ===== VIEW: PROXIES ===== -->

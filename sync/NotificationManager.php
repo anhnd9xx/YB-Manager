@@ -134,6 +134,16 @@ class NotificationManager
             }
             // Aggregation: BATCH_PROGRESS khong bao gio gui le (§17)
             if (($ev['event_type'] ?? '') === AppEvent::BATCH_PROGRESS) return;
+            // Correlation §39: batch chay tu Telegram job -> job completion da bao,
+            // khong gui them generic batch notification
+            if (($ev['event_type'] ?? '') === AppEvent::BATCH_COMPLETED && !empty($ev['batch_id'])) {
+                $cf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR
+                    . 'ytm_jobctx_' . preg_replace('/[^A-Za-z0-9_-]/', '', (string)$ev['batch_id']) . '.json';
+                if (is_file($cf)) {
+                    $cj = json_decode((string)@file_get_contents($cf), true);
+                    if (is_array($cj) && ($cj['source'] ?? '') === 'TELEGRAM') return;
+                }
+            }
             NotificationQueue::enqueue($ev, 'telegram');
         } catch (Throwable $e) {
         }

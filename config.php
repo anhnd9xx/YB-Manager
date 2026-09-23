@@ -35,6 +35,11 @@ function db(): PDO
 
 function get_setting(string $key, string $default = ''): string
 {
+    // Override trong-process (set_setting vua ghi) uu tien truoc cache/DB
+    if (isset($GLOBALS['__setting_override'][$key])) {
+        $v = (string)$GLOBALS['__setting_override'][$key];
+        return $v !== '' ? $v : $default;
+    }
     static $cache = null;
     if ($cache === null) {
         $cache = [];
@@ -47,6 +52,20 @@ function get_setting(string $key, string $default = ''): string
         }
     }
     return array_key_exists($key, $cache) && $cache[$key] !== '' ? $cache[$key] : $default;
+}
+
+/** Ghi setting DB + override trong-process (tranh stale cache sau save). */
+function set_setting(string $key, string $value): void
+{
+    try {
+        db()->prepare('INSERT INTO settings (skey, svalue) VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE svalue=VALUES(svalue)')->execute([$key, $value]);
+    } catch (Throwable $e) {
+    }
+    if (!isset($GLOBALS['__setting_override']) || !is_array($GLOBALS['__setting_override'])) {
+        $GLOBALS['__setting_override'] = [];
+    }
+    $GLOBALS['__setting_override'][$key] = $value;
 }
 
 function chrome_path(): string

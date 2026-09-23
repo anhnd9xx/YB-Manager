@@ -1,7 +1,7 @@
 // ============ NOTIFY VIEW (Thông báo & Báo cáo) ============
 function notifyTab(name) {
   document.querySelectorAll('[data-ntab]').forEach(b => b.classList.toggle('active', b.dataset.ntab === name));
-  ['overview', 'telegram', 'rules', 'reports', 'history'].forEach(t => {
+  ['overview', 'telegram', 'rules', 'reports', 'history', 'chat'].forEach(t => {
     const el = $('nt-pane-' + t);
     if (el) el.classList.toggle('hidden', t !== name);
   });
@@ -9,6 +9,7 @@ function notifyTab(name) {
   if (name === 'history') notifyLoadHistory();
   if (name === 'reports') notifyLoadReports();
   if (name === 'overview') notifyLoadOverview();
+  if (name === 'chat') ntChatRefresh();
 }
 async function notifyRefresh() {
   notifyTab('overview');
@@ -223,4 +224,150 @@ async function notifyResend(reportId) {
   const r = await sendJson(api + 'notify.php?action=report_send', { report_id: reportId });
   toast(r.ok ? 'Đã xếp hàng gửi' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   notifyLoadReports();
+}
+// ============ CHAT & CONTROL (§25-§27, §48) ============
+let ntChatTimer = null;
+async function ntChatRefresh() {
+  ntChatMetrics();
+  ntChatLoad();
+  ntAuditLoad();
+  ntCmdRulesLoad();
+  ntInboundLoad();
+  if (ntChatTimer) clearInterval(ntChatTimer);
+  ntChatTimer = setInterval(async () => {
+    const pane = $('nt-pane-chat');
+    if (!pane || pane.classList.contains('hidden') || document.hidden) return;
+    ntChatLoad(true);
+    ntChatMetrics();
+  }, 5000);
+}
+async function ntChatMetrics() {
+  try {
+    const r = await getJson(api + 'telegram.php?action=metrics');
+    if (!r.ok) return;
+    const m = r.data;
+    const kv = (k, v) => `<div class="mon-kv"><span>${k}</span><strong>${v}</strong></div>`;
+    const el = $('nt-chat-metrics');
+    if (el) el.innerHTML = kv('Bot', escapeHtml(m.bot || '?')) + kv('Inbound', m.inbound || 'Tắt')
+      + kv('Authorized', m.authorized ?? 0) + kv('Commands today', m.commands_today ?? 0)
+      + kv('Running jobs', m.running_jobs ?? 0);
+  } catch (e) {}
+}
+function ntMsgHtml(m) {
+  const inbound = m.direction === 'INBOUND';
+  const who = inbound ? ('Telegram' + (m.user_id ? ' · ' + escapeHtml(m.user_id) : '')) : (m.source === 'UI' ? 'UI' : 'YT Manager');
+  const ts = (m.created_at || '').slice(5, 16);
+  let body = escapeHtml(m.text || '');
+  if (m.job_id) body += `<div class="eval-prev">Job: ${escapeHtml(m.job_id)}</div>`;
+  return `<div class="chat-msg ${inbound ? 'chat-in' : 'chat-out'}"><div class="chat-meta">${who} · ${ts}</div><div>${body}</div></div>`;
+}
+async function ntChatLoad(quiet) {
+  const el = $('nt-chat-list');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'telegram.php?action=conversation&limit=60');
+    const rows = ((r.ok && r.data) || []).slice().reverse();
+    const html = rows.map(ntMsgHtml).join('') || '<p class="muted">Chưa có hội thoại.</p>';
+    if (el.dataset.hash !== String(rows.length) + ':' + String((rows[rows.length - 1] || {}).id || 0)) {
+      el.innerHTML = html;
+      el.dataset.hash = String(rows.length) + ':' + String((rows[rows.length - 1] || {}).id || 0);
+      el.scrollTop = el.scrollHeight;
+    }
+  } catch (e) {
+    if (!quiet) el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+}
+async function ntChatSend() {
+  const inp = $('nt-chat-input');
+  const text = (inp.value || '').trim();
+  if (!text) return;
+  inp.value = '';
+  const r = await sendJson(api + 'telegram.php?action=send', { text });
+  if (!r.ok) toast(r.message || 'Lỗi', 'error');
+  ntChatLoad();
+}
+async function ntInboundLoad() {
+  try {
+    const r = await getJson(api + 'telegram.php?action=config');
+    if (!r.ok) return;
+    const c = r.data;
+    $('tg-inbound').checked = !!c.inbound_enabled;
+    $('tg-default-role').value = c.default_role || 'VIEWER';
+    const box = $('tg-allowed-list');
+    box.innerHTML = (c.allowed || []).map((a, i) =>
+      `<div class="meta-row"><span class="meta-label">${escapeHtml(a.chat_id)}${a.user_id ? ' / ' + escapeHtml(a.user_id) : ''}</span>`
+      + `<span class="meta-value">${escapeHtml(a.role)} <button type="button" class="btn btn-xs" onclick="tgDelAllowed(${i})">✕</button></span></div>`).join('')
+      || '<p class="muted">Chưa có chat nào. Dùng ghép nối hoặc thêm tay.</p>';
+    window.__tgAllowed = c.allowed || [];
+    const ps = $('tg-poll-status');
+    if (ps) ps.textContent = 'Polling: ' + (c.poll_running ? '● Listening' : '● Dừng')
+      + ' · Job worker: ' + (c.job_running ? '● Chạy' : '● Dừng')
+      + (c.polling && c.polling.last_update_at ? ' · Update cuối: ' + c.polling.last_update_at : '');
+  } catch (e) {}
+}
+async function tgSaveInbound() {
+  const r = await sendJson(api + 'telegram.php?action=config_save', {
+    inbound_enabled: $('tg-inbound').checked ? 1 : 0,
+    allowed: window.__tgAllowed || [],
+    default_role: $('tg-default-role').value,
+  });
+  toast(r.ok ? 'Đã lưu inbound' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  ntInboundLoad();
+}
+function tgAddAllowed() {
+  const chat = ($('tg-new-chat').value || '').trim();
+  if (!chat) { toast('Nhập Chat ID', 'error'); return; }
+  window.__tgAllowed = window.__tgAllowed || [];
+  window.__tgAllowed.push({ chat_id: chat, user_id: ($('tg-new-user').value || '').trim(), role: $('tg-new-role').value });
+  $('tg-new-chat').value = '';
+  $('tg-new-user').value = '';
+  tgSaveInbound();
+}
+function tgDelAllowed(i) {
+  (window.__tgAllowed || []).splice(i, 1);
+  tgSaveInbound();
+}
+async function tgPairCreate() {
+  const r = await sendJson(api + 'telegram.php?action=pair_create', {});
+  if (r.ok) {
+    $('tg-pair-out').textContent = 'Mã: ' + r.data.code + ' (hết hạn ' + r.data.expires_at + ') — gửi bot: /pair ' + r.data.code;
+  } else toast(r.message || 'Lỗi', 'error');
+}
+async function tgPoll(on) {
+  const r = await sendJson(api + `telegram.php?action=poll_${on ? 'start' : 'stop'}`, {});
+  toast(r.ok ? (on ? 'Polling đang chạy' : 'Đã dừng polling') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  ntInboundLoad();
+}
+async function tgJob(on) {
+  const r = await sendJson(api + `telegram.php?action=job_${on ? 'start' : 'stop'}`, {});
+  toast(r.ok ? (on ? 'Job worker đang chạy' : 'Đã dừng job worker') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  ntInboundLoad();
+}
+async function ntAuditLoad() {
+  const el = $('nt-audit');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'telegram.php?action=commands&limit=30');
+    const rows = (r.ok && r.data) || [];
+    el.innerHTML = rows.length
+      ? `<table class="data-table"><thead><tr><th>Giờ</th><th>Nguồn</th><th>Lệnh</th><th>Kết quả</th></tr></thead><tbody>`
+        + rows.map(c => `<tr><td class="mono">${escapeHtml((c.requested_at || '').slice(5, 16))}</td>`
+          + `<td>${escapeHtml(c.source)}${c.chat_id && c.chat_id !== 'local-ui' ? '<br><small>' + escapeHtml(c.chat_id) + '</small>' : ''}</td>`
+          + `<td><small>${escapeHtml(c.command_name)} ${escapeHtml(c.arguments || '')}</small></td>`
+          + `<td>${escapeHtml(c.status)}${c.job_id ? '<br><small>' + escapeHtml(c.job_id) + '</small>' : ''}</td></tr>`).join('')
+        + `</tbody></table>`
+      : '<p class="muted">Chưa có lệnh nào.</p>';
+  } catch (e) {}
+}
+async function ntCmdRulesLoad() {
+  const el = $('nt-cmdrules');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'telegram.php?action=cmdrules');
+    const rows = (r.ok && r.data) || [];
+    el.innerHTML = `<table class="data-table"><thead><tr><th>Module</th><th>Command</th><th>Role</th><th>Xác nhận</th><th>Bật</th></tr></thead><tbody>`
+      + rows.map(c => `<tr><td>${escapeHtml(c.module)}</td><td>${escapeHtml(c.command)}<br><small class="muted">${escapeHtml(c.description || '')}</small></td>`
+        + `<td>${escapeHtml(c.role)}</td><td>${c.confirmation ? 'Có' : 'Không'}${c.destructive ? ' (nguy hiểm)' : ''}</td>`
+        + `<td>${c.enabled ? 'ON' : 'OFF'}</td></tr>`).join('') + `</tbody></table>`;
+  } catch (e) {}
 }
