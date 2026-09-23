@@ -214,56 +214,129 @@ async function tgDisconnect() {
   });
 }
 async function notifyLoadConfig() {
+  // Telegram tab moi: preset + autosave controls (nap tu preset_get)
   try {
-    const r = await getJson(api + 'notify.php?action=config');
-    if (!r.ok) return;
-    const c = r.data;
-    $('nt-enabled').checked = !!c.enabled;
-    $('nt-chat').value = c.chat_id || '';
-    $('nt-token-masked').textContent = c.has_token ? ('Đang dùng: ' + c.bot_token_masked) : 'Chưa có token.';
-    $('nt-s-success').checked = !!c.send_success;
-    $('nt-s-warning').checked = !!c.send_warning;
-    $('nt-s-error').checked = !!c.send_error;
-    $('nt-s-critical').checked = !!c.send_critical;
-    $('nt-s-batch').checked = !!c.send_batch_summary;
-    $('nt-recovery').checked = !!c.notify_recovery;
-    $('nt-quiet-start').value = c.quiet_start || '';
-    $('nt-quiet-end').value = c.quiet_end || '';
-    $('nt-daily').checked = !!c.daily_enabled;
-    $('nt-daily-time').value = c.daily_time || '22:00';
-    $('nt-weekly').checked = !!c.weekly_enabled;
-    $('nt-weekly-day').value = String(c.weekly_day || '1');
-    $('nt-weekly-time').value = c.weekly_time || '08:00';
-    const st = $('nt-conn-status');
-    if (st) st.textContent = c.enabled ? (c.has_token ? '● Đã cấu hình' : '● Thiếu token') : '● Chưa bật';
+    const r = await getJson(api + 'telegram.php?action=notify_preset_get');
+    if (r.ok && r.data) {
+      const sel = $('nt-preset');
+      if (sel) sel.value = r.data.preset || 'custom';
+      applyNtValues(r.data.values || {});
+      const cm = $('nt-cmd-mode');
+      if (cm) cm.checked = !!r.data.command_mode;
+    }
+  } catch (e) {}
+  const st = $('nt-conn-status');
+  try {
+    const c = await getJson(api + 'notify.php?action=config');
+    if (st && c.ok) st.textContent = c.data.enabled ? (c.data.has_token ? '● Đã cấu hình' : '● Thiếu token') : '● Chưa bật';
   } catch (e) {}
 }
-async function notifySaveConfig() {
-  const body = {
-    enabled: $('nt-enabled').checked ? 1 : 0,
-    chat_id: $('nt-chat').value.trim(),
-    send_success: $('nt-s-success').checked ? 1 : 0,
-    send_warning: $('nt-s-warning').checked ? 1 : 0,
-    send_error: $('nt-s-error').checked ? 1 : 0,
-    send_critical: $('nt-s-critical').checked ? 1 : 0,
-    send_batch_summary: $('nt-s-batch').checked ? 1 : 0,
-    notify_recovery: $('nt-recovery').checked ? 1 : 0,
-    quiet_start: $('nt-quiet-start').value,
-    quiet_end: $('nt-quiet-end').value,
-    daily_enabled: $('nt-daily').checked ? 1 : 0,
-    daily_time: $('nt-daily-time').value,
-    weekly_enabled: $('nt-weekly').checked ? 1 : 0,
-    weekly_day: $('nt-weekly-day').value,
-    weekly_time: $('nt-weekly-time').value,
+function applyNtValues(v) {
+  const vals = {
+    'nt-s-warning': v.send_warning, 'nt-s-error': v.send_error, 'nt-s-critical': v.send_critical,
+    'nt-recovery': v.notify_recovery, 'nt-s-batch': v.send_batch_summary, 'nt-daily': v.daily_enabled,
+    'nt-s-info': v.send_info, 'nt-s-success': v.send_success,
+    'nt-r-daily': v.daily_enabled, 'nt-r-weekly': v.weekly_enabled,
   };
-  const tok = $('nt-token').value.trim();
-  if (tok) body.bot_token = tok;
-  const r = await sendJson(api + 'notify.php?action=config_save', body);
+  for (const [id, val] of Object.entries(vals)) {
+    const el = $(id);
+    if (el) el.checked = !!val;
+  }
+  const dt = $('nt-daily-time');
+  if (dt && v.daily_time) dt.value = v.daily_time;
+  const rdt = $('nt-r-daily-time');
+  if (rdt && v.daily_time) rdt.value = v.daily_time;
+  const en = $('nt-enabled');
+  if (en) en.value = '1';
+  ntQuietUI();
+}
+async function notifyPresetApply(preset) {
+  if (preset === 'custom') return;
+  const r = await sendJson(api + 'telegram.php?action=notify_preset', { preset });
   if (r.ok) {
-    $('nt-token').value = '';
-    toast('Đã lưu cấu hình Telegram', 'success');
+    toast('Đã áp preset', 'success');
     notifyLoadConfig();
-  } else toast(r.message || 'Lỗi lưu', 'error');
+  } else toast(r.message || 'Lỗi', 'error');
+}
+// Auto-save debounce 400ms (§AB): tick -> save -> "✓ Đã lưu"
+let ntSaveTimer = null;
+let ntSaveState = null;
+function ntQueueSave(key, value) {
+  const el = $('nt-preset-saved');
+  if (el) el.textContent = 'Đang lưu...';
+  clearTimeout(ntSaveTimer);
+  ntSaveTimer = setTimeout(async () => {
+    try {
+      const r = await sendJson(api + 'telegram.php?action=notify_autosave', { key, value });
+      if (el) el.textContent = r.ok ? '✓ Đã lưu' : 'Lỗi lưu';
+      // User tu sua -> preset custom (§AA)
+      const sel = $('nt-preset');
+      if (sel && r.ok) {
+        try {
+          const g = await getJson(api + 'telegram.php?action=notify_preset_get');
+          if (g.ok) sel.value = g.data.preset || 'custom';
+        } catch (e) {}
+      }
+    } catch (e) {
+      if (el) el.textContent = 'Lỗi lưu';
+    }
+  }, 400);
+}
+function ntBindAutosave() {
+  document.querySelectorAll('[data-ntkey]').forEach(el => {
+    if (el.dataset.ntbound) return;
+    el.dataset.ntbound = '1';
+    const key = el.dataset.ntkey;
+    const kind = el.dataset.ntval || (el.type === 'checkbox' ? 'check' : 'val');
+    const get = () => {
+      if (kind === 'check') return el.checked ? '1' : '0';
+      if (kind === 'bool01') return el.value === '1' ? '1' : '0';
+      if (kind === 'int17') return String(Math.max(1, Math.min(7, parseInt(el.value || '1', 10) || 1)));
+      return el.value;
+    };
+    el.addEventListener('change', () => {
+      ntQueueSave(key, get());
+      if (key === 'notify_quiet_start' || key === 'notify_quiet_end') return;
+      ntQuietUI();
+    });
+  });
+  const qo = $('nt-quiet-on');
+  if (qo && !qo.dataset.ntbound) {
+    qo.dataset.ntbound = '1';
+    qo.addEventListener('change', () => {
+      if (qo.checked) {
+        ntQueueSave('notify_quiet_start', $('nt-quiet-start').value || '23:00');
+        setTimeout(() => ntQueueSave('notify_quiet_end', $('nt-quiet-end').value || '07:00'), 450);
+      } else {
+        ntQueueSave('notify_quiet_start', '');
+        setTimeout(() => ntQueueSave('notify_quiet_end', ''), 450);
+      }
+      ntQuietUI();
+    });
+  }
+  const qs = $('nt-quiet-start'), qe = $('nt-quiet-end');
+  [qs, qe].forEach(x => {
+    if (x && !x.dataset.ntbound) {
+      x.dataset.ntbound = '1';
+      x.addEventListener('change', () => {
+        ntQueueSave('notify_quiet_start', qs.value);
+        setTimeout(() => ntQueueSave('notify_quiet_end', qe.value), 450);
+      });
+    }
+  });
+  const cm = $('nt-cmd-mode');
+  if (cm && !cm.dataset.ntbound) {
+    cm.dataset.ntbound = '1';
+    cm.addEventListener('change', () => ntQueueSave('tg_chat_command_mode', cm.checked ? '1' : '0'));
+  }
+}
+function ntQuietUI() {
+  const qs = $('nt-quiet-start');
+  const on = qs && qs.value !== '';
+  const row = $('nt-quiet-row');
+  const qo = $('nt-quiet-on');
+  if (qo) qo.checked = !!on;
+  if (row) row.classList.toggle('hidden', !on);
 }
 async function notifyTestConn() {
   const st = $('nt-conn-status');
@@ -395,62 +468,286 @@ async function notifyResend(reportId) {
 let ntChatTimer = null;
 async function ntChatRefresh() {
   ntChatMetrics();
-  ntChatLoad();
+  ntChatInit();
   ntAuditLoad();
   ntCmdRulesLoad();
   ntInboundLoad();
+  const cm = $('nt-cmd-mode');
+  if (cm) {
+    try {
+      const g = await getJson(api + 'telegram.php?action=notify_preset_get');
+      if (g.ok) cm.checked = !!g.data.command_mode;
+    } catch (e) {}
+  }
+  ntChatBindInput();
+  const cm = $('nt-cmd-mode');
+  if (cm && !cm.dataset.ntbound) {
+    cm.dataset.ntbound = '1';
+    cm.addEventListener('change', () => {
+      sendJson(api + 'telegram.php?action=notify_autosave',
+        { key: 'tg_chat_command_mode', value: cm.checked ? '1' : '0' })
+        .then(r => toast(r.ok ? '✓ Đã lưu' : 'Lỗi lưu', r.ok ? 'success' : 'error'));
+    });
+  }
+  const list = $('nt-chat-list');
+  if (list) list.addEventListener('scroll', () => {
+    if (list.scrollTop <= 40) ntChatOlder();
+  });
   if (ntChatTimer) clearInterval(ntChatTimer);
   ntChatTimer = setInterval(async () => {
     const pane = $('nt-pane-chat');
     if (!pane || pane.classList.contains('hidden') || document.hidden) return;
-    ntChatLoad(true);
+    ntChatPoll();
     ntChatMetrics();
-  }, 5000);
+  }, 3000);
 }
+// ============ CHAT CONSOLE state + render (E-P, R-BB) ============
+const ntChat = { msgs: [], oldest: 0, newest: 0, filter: 'all', clearedAt: 0, unseen: 0, loading: false };
 async function ntChatMetrics() {
   try {
-    const r = await getJson(api + 'telegram.php?action=metrics');
-    if (!r.ok) return;
-    const m = r.data;
-    const kv = (k, v) => `<div class="mon-kv"><span>${k}</span><strong>${v}</strong></div>`;
-    const el = $('nt-chat-metrics');
-    if (el) el.innerHTML = kv('Bot', escapeHtml(m.bot || '?')) + kv('Inbound', m.inbound || 'Tắt')
-      + kv('Authorized', m.authorized ?? 0) + kv('Commands today', m.commands_today ?? 0)
-      + kv('Running jobs', m.running_jobs ?? 0);
+    const [m, t] = await Promise.all([
+      getJson(api + 'telegram.php?action=metrics').catch(() => null),
+      getJson(api + 'notify.php?action=tg_status').catch(() => null),
+    ]);
+    if (m && m.ok) {
+      const d = m.data;
+      const kv = (k, v) => `<div class="mon-kv"><span>${k}</span><strong>${v}</strong></div>`;
+      const el = $('nt-chat-metrics');
+      if (el) el.innerHTML = kv('Bot', escapeHtml(d.bot || '?')) + kv('Inbound', d.inbound || 'Tắt')
+        + kv('Authorized', d.authorized ?? 0) + kv('Commands today', d.commands_today ?? 0)
+        + kv('Running jobs', d.running_jobs ?? 0);
+    }
+    const st = $('nt-chat-status');
+    if (st && t && t.ok) {
+      const ok = !!t.data.connected;
+      st.textContent = ok ? '● Telegram OK' : '● Chưa kết nối';
+      st.className = 'badge ' + (ok ? 'badge-ok' : 'badge-muted');
+      const peer = $('nt-chat-peer');
+      if (peer) peer.textContent = ok ? ((t.data.display_name || t.data.username || '') + ' • ' + (t.data.role || '')) : '';
+    }
   } catch (e) {}
+}
+function ntChatDayLabel(ts) {
+  const d = new Date(ts);
+  const t = new Date();
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const today = new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  if (day === today) return 'Hôm nay';
+  if (day === today - 86400000) return 'Hôm qua';
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+}
+function ntChatTime(ts) {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function ntChatFull(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function ntParseTs(s) {
+  if (!s) return Date.now();
+  const t = new Date(String(s).replace(' ', 'T') + '+07:00').getTime();
+  return isNaN(t) ? Date.now() : t;
+}
+function ntTypeLabel(m) {
+  const t = m.msg_type || 'TEXT';
+  if (t === 'TEXT') return '';
+  const vn = { COMMAND: 'COMMAND', JOB: 'JOB', ALERT: 'ALERT', REPORT: 'REPORT', SYSTEM: 'HỆ THỐNG' };
+  return `<span class="chat-type chat-type-${t}">${vn[t] || t}</span>`;
+}
+function ntMsgStatus(m) {
+  if (m.direction !== 'OUTBOUND') return '';
+  if (m.status === 'SENT') return `<div class="chat-status st-ok">✓ Đã gửi</div>`;
+  if (m.status === 'FAILED') return `<div class="chat-status st-err">! Gửi thất bại <button type="button" class="btn btn-xs" onclick="ntChatRetry(${m.id})">Thử lại</button></div>`;
+  return `<div class="chat-status">◌ Đang gửi</div>`;
 }
 function ntMsgHtml(m) {
   const inbound = m.direction === 'INBOUND';
-  const who = inbound ? ('Telegram' + (m.user_id ? ' · ' + escapeHtml(m.user_id) : '')) : (m.source === 'UI' ? 'UI' : 'YT Manager');
-  const ts = (m.created_at || '').slice(5, 16);
-  let body = escapeHtml(m.text || '');
-  if (m.job_id) body += `<div class="eval-prev">Job: ${escapeHtml(m.job_id)}</div>`;
-  return `<div class="chat-msg ${inbound ? 'chat-in' : 'chat-out'}"><div class="chat-meta">${who} · ${ts}</div><div>${body}</div></div>`;
+  const who = inbound ? 'Telegram' : 'YT Manager';
+  const ts = ntParseTs(m.created_at);
+  let body = `<div>${escapeHtml(m.text || '')}</div>`;
+  if (m.job_id) {
+    body += `<div class="eval-prev">Job: ${escapeHtml(m.job_id)}</div>`;
+  }
+  return `<div class="chat-msg ${inbound ? 'chat-in' : 'chat-out'}" data-mid="${m.id}">`
+    + `<div class="chat-meta"><span>${who}</span>${ntTypeLabel(m)}`
+    + `<span title="${ntChatFull(ts)}">${ntChatTime(ts)}</span></div>`
+    + body + ntMsgStatus(m) + `</div>`;
 }
-async function ntChatLoad(quiet) {
+function ntChatVisible(m) {
+  if (ntChat.filter !== 'all' && (m.msg_type || 'TEXT') !== ntChat.filter) return false;
+  if (ntChat.clearedAt && m.id <= ntChat.clearedAt) return false;
+  return true;
+}
+function ntChatRender() {
   const el = $('nt-chat-list');
   if (!el) return;
+  const rows = ntChat.msgs.filter(ntChatVisible);
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty-state">💬<br>Chưa có tin nhắn<br><small>Hãy gửi một tin trên Telegram hoặc nhập tin nhắn bên dưới để kiểm tra.</small></div>`;
+    return;
+  }
+  let html = '';
+  let lastDay = '';
+  for (const m of rows) {
+    const day = ntChatDayLabel(ntParseTs(m.created_at));
+    if (day !== lastDay) {
+      html += `<div class="chat-date-sep">${day}</div>`;
+      lastDay = day;
+    }
+    html += ntMsgHtml(m);
+  }
+  el.innerHTML = html;
+}
+function ntChatNearBottom() {
+  const el = $('nt-chat-list');
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+function ntChatToBottom() {
+  const el = $('nt-chat-list');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+async function ntChatInit() {
   try {
-    const r = await getJson(api + 'telegram.php?action=conversation&limit=60');
+    const r = await getJson(api + `telegram.php?action=chat_page&limit=50&type=${ntChat.filter}`);
     const rows = ((r.ok && r.data) || []).slice().reverse();
-    const html = rows.map(ntMsgHtml).join('') || '<p class="muted">Chưa có hội thoại.</p>';
-    if (el.dataset.hash !== String(rows.length) + ':' + String((rows[rows.length - 1] || {}).id || 0)) {
-      el.innerHTML = html;
-      el.dataset.hash = String(rows.length) + ':' + String((rows[rows.length - 1] || {}).id || 0);
-      el.scrollTop = el.scrollHeight;
+    ntChat.msgs = rows;
+    ntChat.oldest = rows.length ? rows[0].id : 0;
+    ntChat.newest = rows.length ? rows[rows.length - 1].id : 0;
+    ntChat.unseen = 0;
+    const b = $('nt-chat-new');
+    if (b) b.parentElement.classList.add('hidden');
+    ntChatRender();
+    ntChatToBottom();
+  } catch (e) {}
+}
+async function ntChatPoll() {
+  if (ntChat.loading) return;
+  ntChat.loading = true;
+  try {
+    const r = await getJson(api + `telegram.php?action=chat_page&limit=20&type=${ntChat.filter}`);
+    const rows = ((r.ok && r.data) || []).slice().reverse();
+    const stick = ntChatNearBottom();
+    let added = 0;
+    for (const m of rows) {
+      if (m.id > ntChat.newest && !ntChat.msgs.some(x => x.id === m.id)) {
+        ntChat.msgs.push(m);
+        ntChat.newest = m.id;
+        added++;
+      }
+      const ex = ntChat.msgs.find(x => x.id === m.id);
+      if (ex && (ex.status !== m.status)) ex.status = m.status;
+    }
+    if (ntChat.msgs.length > 300) ntChat.msgs = ntChat.msgs.slice(-300);
+    if (added > 0) {
+      ntChatRender();
+      if (stick) {
+        ntChatToBottom();
+      } else {
+        ntChat.unseen += added;
+        const n = $('nt-chat-new-n');
+        if (n) n.textContent = ntChat.unseen;
+        const b = $('nt-chat-new');
+        if (b) b.parentElement.classList.remove('hidden');
+      }
+    } else if (rows.length) {
+      ntChatRender();
+      if (stick) ntChatToBottom();
     }
   } catch (e) {
-    if (!quiet) el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+  ntChat.loading = false;
+}
+async function ntChatOlder() {
+  if (!ntChat.oldest || ntChat.loading) return;
+  ntChat.loading = true;
+  try {
+    const r = await getJson(api + `telegram.php?action=chat_page&limit=50&before_id=${ntChat.oldest}&type=${ntChat.filter}`);
+    const rows = ((r.ok && r.data) || []).slice().reverse();
+    if (rows.length) {
+      const el = $('nt-chat-list');
+      const h0 = el ? el.scrollHeight : 0;
+      ntChat.msgs = rows.concat(ntChat.msgs);
+      ntChat.oldest = rows[0].id;
+      ntChatRender();
+      if (el) el.scrollTop = el.scrollHeight - h0;
+    }
+  } catch (e) {
+  }
+  ntChat.loading = false;
+}
+function ntChatJumpNew() {
+  ntChat.unseen = 0;
+  const b = $('nt-chat-new');
+  if (b) b.parentElement.classList.add('hidden');
+  ntChatToBottom();
+}
+function ntChatFilter(t) {
+  ntChat.filter = t;
+  ntChat.clearedAt = 0;
+  ntChat.oldest = 0;
+  ntChat.newest = 0;
+  ntChat.msgs = [];
+  ntChatInit();
+}
+function ntChatClearView() {
+  ntChat.clearedAt = ntChat.newest;
+  ntChat.unseen = 0;
+  const b = $('nt-chat-new');
+  if (b) b.parentElement.classList.add('hidden');
+  ntChatRender();
+}
+function ntChatMode(m) {
+  // Test Chat la mode mac dinh hien tai: text gui nhu tin nhan thuong (§P)
+}
+function ntChatBindInput() {
+  const inp = $('nt-chat-input');
+  const btn = $('nt-chat-send');
+  if (!inp || inp.dataset.ntbound) return;
+  inp.dataset.ntbound = '1';
+  const syncBtn = () => { if (btn) btn.disabled = (inp.value || '').trim() === ''; };
+  inp.addEventListener('input', syncBtn);
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      ntChatSend();
+    }
+  });
+  syncBtn();
+  const list = $('nt-chat-list');
+  if (list && !list.dataset.ntbound) {
+    list.dataset.ntbound = '1';
+    list.addEventListener('scroll', () => {
+      if (list.scrollTop <= 40) ntChatOlder();
+    });
   }
 }
 async function ntChatSend() {
   const inp = $('nt-chat-input');
+  const btn = $('nt-chat-send');
   const text = (inp.value || '').trim();
   if (!text) return;
-  inp.value = '';
-  const r = await sendJson(api + 'telegram.php?action=send', { text });
+  btn.disabled = true;
+  try {
+    const r = await sendJson(api + 'telegram.php?action=send_text', { text });
+    if (r.ok) {
+      inp.value = '';
+      ntChatPoll();
+    } else {
+      toast(r.message || 'Không gửi được', 'error');
+    }
+  } catch (e) {
+    toast('Telegram đang mất kết nối.', 'error');
+  }
+  btn.disabled = false;
+  if (btn) btn.disabled = (inp.value || '').trim() === '';
+}
+async function ntChatRetry(id) {
+  const r = await sendJson(api + 'telegram.php?action=resend', { id });
   if (!r.ok) toast(r.message || 'Lỗi', 'error');
-  ntChatLoad();
+  ntChatPoll();
 }
 async function ntInboundLoad() {
   try {

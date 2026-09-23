@@ -182,6 +182,14 @@ class JobManager
                 ['status' => $status,
                     'data' => ['job_id' => $jobId, 'command_id' => $job['command_id'] ?? null,
                         'job_source' => $job['source'] ?? '', 'chat_id' => $job['chat_id'] ?? null]]);
+            // Chat timeline: job card (§S)
+            if (!empty($job['chat_id'])) {
+                require_once __DIR__ . '/ConversationService.php';
+                ConversationService::log(ConversationService::OUT, (string)$job['chat_id'],
+                    'JOB ' . $jobId . ' · ' . ($job['name'] ?? '') . ' · ' . $status,
+                    ['job_id' => $jobId, 'status' => $ok ? 'SENT' : 'FAILED',
+                        'type' => ConversationService::T_JOB]);
+            }
         } catch (Throwable $e) {
         }
     }

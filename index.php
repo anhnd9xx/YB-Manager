@@ -484,24 +484,54 @@
           </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-telegram">
-          <div class="panel" id="tg-setup-panel">
-            <div class="sync-label">Kết nối Telegram</div>
-            <div id="tg-setup-view"><div class="skeleton"></div></div>
-          </div>
-          <div class="panel">
-            <div class="sync-label">Gửi theo mức</div>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-enabled" style="width:auto"> Bật Telegram</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-success" style="width:auto"> Thành công</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-warning" style="width:auto"> Cảnh báo</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-error" style="width:auto"> Lỗi</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-critical" style="width:auto"> Nghiêm trọng</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-batch" style="width:auto"> Tóm tắt batch</label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-recovery" style="width:auto"> Báo hồi phục (ERROR → bình thường)</label>
-            <div class="win-row" style="margin-top:6px">
-              <div class="win-field"><label>Giờ yên tĩnh từ (không gửi INFO, CRITICAL vẫn gửi)</label><input type="time" id="nt-quiet-start"></div>
-              <div class="win-field"><label>đến</label><input type="time" id="nt-quiet-end"></div>
+          <div class="nt-grid">
+            <div class="panel" id="tg-setup-panel">
+              <div class="sync-label">Kết nối Telegram</div>
+              <div id="tg-setup-view"><div class="skeleton"></div></div>
             </div>
-            <button type="button" class="btn btn-sm btn-primary" onclick="notifySaveConfig()" style="margin-top:8px">Lưu cấu hình</button>
+            <div class="panel">
+              <div class="sync-label">Cấu hình thông báo <span class="summary-text" id="nt-preset-saved"></span></div>
+              <label>Preset</label>
+              <select id="nt-preset" onchange="notifyPresetApply(this.value)">
+                <option value="balanced">Cân bằng</option>
+                <option value="minimal">Ít thông báo</option>
+                <option value="all">Tất cả</option>
+                <option value="custom">Tùy chỉnh</option>
+              </select>
+              <div class="sync-label" style="margin-top:8px">Thông báo tức thì</div>
+              <div class="nt-switch-grid">
+                <label><span>Cảnh báo</span><input type="checkbox" id="nt-s-warning" data-ntkey="notify_send_warning"></label>
+                <label><span>Lỗi</span><input type="checkbox" id="nt-s-error" data-ntkey="notify_send_error"></label>
+                <label><span>Nghiêm trọng</span><input type="checkbox" id="nt-s-critical" data-ntkey="notify_send_critical"></label>
+                <label><span>Hồi phục</span><input type="checkbox" id="nt-recovery" data-ntkey="notify_recovery"></label>
+              </div>
+              <div class="sync-label" style="margin-top:8px">Báo cáo</div>
+              <div class="nt-switch-grid">
+                <label><span>Batch summary</span><input type="checkbox" id="nt-s-batch" data-ntkey="notify_send_batch"></label>
+                <label><span>Cuối ngày</span><input type="checkbox" id="nt-daily" data-ntkey="notify_daily_enabled"></label>
+              </div>
+              <div class="sync-label" style="margin-top:8px">Khác</div>
+              <div class="nt-switch-grid">
+                <label><span>INFO</span><input type="checkbox" id="nt-s-info" data-ntkey="notify_send_info"></label>
+                <label><span>Success đơn</span><input type="checkbox" id="nt-s-success" data-ntkey="notify_send_success"></label>
+              </div>
+              <div class="win-row" style="margin-top:8px">
+                <div class="win-field"><label>Cuối ngày lúc</label><input type="time" id="nt-daily-time" value="23:00" data-ntkey="notify_daily_time" data-ntval="time"></div>
+                <div class="win-field"><label>Bật Telegram</label>
+                  <select id="nt-enabled" data-ntkey="notify_telegram_enabled" data-ntval="bool01">
+                    <option value="1">ON</option>
+                    <option value="0">OFF</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-top:8px">
+                <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-quiet-on" style="width:auto"> Giờ yên tĩnh (CRITICAL vẫn gửi)</label>
+                <div class="win-row" id="nt-quiet-row" style="margin-top:6px">
+                  <div class="win-field"><label>Từ</label><input type="time" id="nt-quiet-start" value="23:00"></div>
+                  <div class="win-field"><label>Đến</label><input type="time" id="nt-quiet-end" value="07:00"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-rules">
@@ -510,11 +540,11 @@
         <div class="mon-pane hidden" id="nt-pane-reports">
           <div class="panel">
             <div class="sync-label">Báo cáo định kỳ</div>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-daily" style="width:auto"> Báo cáo ngày lúc <input type="time" id="nt-daily-time" value="22:00" style="width:auto"></label>
-            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-weekly" style="width:auto"> Báo cáo tuần
-              <select id="nt-weekly-day" style="width:auto"><option value="1">Thứ 2</option><option value="2">Thứ 3</option><option value="3">Thứ 4</option><option value="4">Thứ 5</option><option value="5">Thứ 6</option><option value="6">Thứ 7</option><option value="7">Chủ nhật</option></select>
-              lúc <input type="time" id="nt-weekly-time" value="08:00" style="width:auto"></label>
-            <button type="button" class="btn btn-sm btn-primary" onclick="notifySaveConfig()">Lưu lịch</button>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-r-daily" style="width:auto" data-ntkey="notify_daily_enabled"> Báo cáo ngày lúc <input type="time" id="nt-r-daily-time" value="23:00" style="width:auto" data-ntkey="notify_daily_time" data-ntval="time"></label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-r-weekly" style="width:auto" data-ntkey="notify_weekly_enabled"> Báo cáo tuần
+              <select id="nt-r-weekly-day" style="width:auto" data-ntkey="notify_weekly_day" data-ntval="int17"><option value="1">Thứ 2</option><option value="2">Thứ 3</option><option value="3">Thứ 4</option><option value="4">Thứ 5</option><option value="5">Thứ 6</option><option value="6">Thứ 7</option><option value="7">Chủ nhật</option></select>
+              lúc <input type="time" id="nt-r-weekly-time" value="08:00" style="width:auto" data-ntkey="notify_weekly_time" data-ntval="time"></label>
+            <div class="hint">Tự lưu khi thay đổi. Không gửi báo cáo trống trừ khi bật "luôn gửi" ở cấu hình nâng cao.</div>
           </div>
           <div class="panel">
             <div class="sync-label">Tạo báo cáo tùy chọn</div>
@@ -537,6 +567,37 @@
           <div class="panel"><div id="nt-history"><div class="skeleton"></div></div></div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-chat">
+          <div class="panel chat-head">
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+              <strong>Chat & Điều khiển</strong>
+              <span id="nt-chat-status" class="badge badge-muted">…</span>
+              <span class="muted" id="nt-chat-peer"></span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+              <button type="button" class="btn btn-xs" id="nt-testchat-btn" onclick="ntChatMode('test')">Test Chat</button>
+              <label style="display:flex;gap:6px;align-items:center">Điều khiển Tool qua Telegram
+                <input type="checkbox" id="nt-cmd-mode" style="width:auto">
+              </label>
+              <select id="nt-chat-filter" class="filter-select" style="width:auto" onchange="ntChatFilter(this.value)">
+                <option value="all">Tất cả</option>
+                <option value="TEXT">Chat</option>
+                <option value="COMMAND">Command</option>
+                <option value="JOB">Job</option>
+                <option value="ALERT">Alert</option>
+              </select>
+              <button type="button" class="btn btn-xs" onclick="ntChatClearView()" title="Chỉ xóa màn hình, không xóa dữ liệu">Xóa màn hình</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div id="nt-chat-new" class="hidden" style="text-align:center;margin-bottom:6px">
+              <button type="button" class="btn btn-xs" onclick="ntChatJumpNew()">↓ <span id="nt-chat-new-n">0</span> tin nhắn mới</button>
+            </div>
+            <div id="nt-chat-list" class="chat-list"></div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <textarea id="nt-chat-input" rows="1" style="flex:1;resize:vertical" placeholder="Nhập tin nhắn... (Enter gửi, Shift+Enter xuống dòng)"></textarea>
+              <button type="button" class="btn btn-sm btn-primary" id="nt-chat-send" onclick="ntChatSend()">Gửi</button>
+            </div>
+          </div>
           <div class="panel"><div id="nt-chat-metrics" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
           <div class="panel">
             <div class="sync-label">Điều khiển từ xa (inbound)</div>
@@ -568,14 +629,6 @@
               <button type="button" class="btn btn-sm" onclick="tgPoll(0)">Dừng polling</button>
               <button type="button" class="btn btn-sm" onclick="tgJob(1)">Chạy job worker</button>
               <button type="button" class="btn btn-sm" onclick="tgJob(0)">Dừng job worker</button>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="sync-label">Hội thoại</div>
-            <div id="nt-chat-list" style="max-height:420px;overflow-y:auto"></div>
-            <div style="display:flex;gap:8px;margin-top:8px">
-              <input type="text" id="nt-chat-input" style="flex:1" placeholder="/status  |  /channel 32  |  /evaluate 32" onkeydown="if(event.key==='Enter')ntChatSend()">
-              <button type="button" class="btn btn-sm btn-primary" onclick="ntChatSend()">Send</button>
             </div>
           </div>
           <div class="panel">

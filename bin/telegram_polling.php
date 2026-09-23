@@ -125,8 +125,16 @@ function handle_update(array $u): void
     $userId = (string)($msg['from']['id'] ?? '');
     $text = trim((string)($msg['text'] ?? ''));
     if ($chatId === '' || $text === '') return;
+    $isCmd = str_starts_with($text, '/');
+    // Command Mode (§Q): OFF -> hien nhu tin nhan thuong, khong parse (tru /pair).
+    $cmdMode = get_setting('tg_chat_command_mode', '1') === '1';
+    $msgType = $isCmd ? ConversationService::T_COMMAND : ConversationService::T_TEXT;
+    if ($isCmd && !$cmdMode && stripos($text, '/pair') !== 0) {
+        $msgType = ConversationService::T_TEXT;
+    }
     ConversationService::log(ConversationService::IN, $chatId, $text,
-        ['user_id' => $userId, 'message_id' => (string)($msg['message_id'] ?? '')]);
+        ['user_id' => $userId, 'message_id' => (string)($msg['message_id'] ?? ''),
+            'type' => $msgType]);
     // Setup session uu tien cho sender chua authorized (one-field pairing §5-§9).
     // Sender da authorized van di router binh thuong.
     require_once __DIR__ . '/../sync/PermissionService.php';
@@ -136,6 +144,9 @@ function handle_update(array $u): void
         if (!empty($setup['asked_confirm']) || TelegramSetup::active() !== null) {
             return; // dang trong setup flow, khong route command
         }
+    }
+    if ($msgType === ConversationService::T_TEXT && $isCmd) {
+        return; // command mode OFF: chi luu/hien, khong execute
     }
     $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
     send_reply($chatId, $reply, $text);
@@ -195,5 +206,6 @@ function send_reply(string $chatId, array $reply, string $inboundText): void
     }
     ConversationService::log(ConversationService::OUT, $chatId, $text,
         ['command_id' => $reply['command_id'] ?? null, 'job_id' => $reply['job_id'] ?? null,
-            'status' => !empty($r['ok']) ? 'SENT' : 'FAILED']);
+            'status' => !empty($r['ok']) ? 'SENT' : 'FAILED',
+            'type' => ConversationService::T_COMMAND]);
 }

@@ -129,6 +129,197 @@ try {
             break;
         }
 
+        case 'conversation': {
+            json_out(['ok' => true, 'data' => ConversationService::recent((int)($_GET['limit'] ?? 100))]);
+            break;
+        }
+
+        case 'chat_page': {
+            // Pagination (§AO): limit + before_id cursor + type filter
+            $type = (string)($_GET['type'] ?? 'all');
+            json_out(['ok' => true, 'data' => ConversationService::page(
+                (int)($_GET['limit'] ?? 50), (int)($_GET['before_id'] ?? 0), $type)]);
+            break;
+        }
+
+        case 'send_text': {
+            // Chat test 2 chieu tu UI (§F): gui text thuong (khong parse command).
+            // Status QUEUED -> SENDING -> SENT/FAILED (§I). Offline: FAILED + giu draft o client.
+            $b = $method === 'GET' ? $_GET : json_body();
+            $text = trim((string)($b['text'] ?? ''));
+            if ($text === '') json_out(['ok' => false, 'message' => 'Trống'], 400);
+            if (mb_strlen($text) > 4000) json_out(['ok' => false, 'message' => 'Tin nhắn quá dài (tối đa 4000 ký tự)'], 400);
+            $dest = TelegramConfig::primaryChatId();
+            if ($dest === '') json_out(['ok' => false, 'message' => 'Chưa ghép nối Telegram'], 400);
+            require_once __DIR__ . '/../sync/ConversationService.php';
+            $rowId = ConversationService::logOutbound($dest, $text, ['source' => 'UI', 'status' => 'SENDING']);
+            // Split an toan o provider (§O)
+            $r = TelegramProvider::sendMessage($text, $dest);
+            ConversationService::setStatus($rowId, !empty($r['ok']) ? 'SENT' : 'FAILED',
+                $r['ok'] ? null : TelegramProvider::friendly($r));
+            json_out(!empty($r['ok'])
+                ? ['ok' => true, 'data' => ['id' => $rowId, 'status' => 'SENT']]
+                : ['ok' => false, 'message' => TelegramProvider::friendly($r), 'data' => ['id' => $rowId]]);
+            break;
+        }
+
+        case 'resend': {
+            // [Thử lại] tin FAILED (§I, §AN)
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            try {
+                ConversationService::ensureTable();
+                $st = db()->prepare("SELECT * FROM tg_messages WHERE id=? AND direction='OUTBOUND'");
+                $st->execute([$id]);
+                $row = $st->fetch();
+                if (!$row) json_out(['ok' => false, 'message' => 'Không thấy tin nhắn'], 404);
+                ConversationService::setStatus($id, 'SENDING');
+                $r = TelegramProvider::sendMessage((string)($row['text'] ?? ''), (string)($row['chat_id'] ?? ''));
+                ConversationService::setStatus($id, !empty($r['ok']) ? 'SENT' : 'FAILED',
+                    $r['ok'] ? null : TelegramProvider::friendly($r));
+                json_out(!empty($r['ok']) ? ['ok' => true, 'data' => ['status' => 'SENT']]
+                    : ['ok' => false, 'message' => TelegramProvider::friendly($r)]);
+            } catch (Throwable $e) {
+                json_out(['ok' => false, 'message' => 'Lỗi'], 500);
+            }
+            break;
+        }
+
+        case 'notify_preset': {
+            // Preset thong bao (§V-§AA): balanced/minimal/all/custom(detect)
+            $b = $method === 'GET' ? $_GET : json_body();
+            $preset = (string)($b['preset'] ?? '');
+            $map = [
+                'balanced' => ['send_success' => 0, 'send_warning' => 1, 'send_error' => 1,
+                    'send_critical' => 1, 'send_batch_summary' => 1, 'notify_recovery' => 1,
+                    'send_info' => 0,
+                    'daily_enabled' => 1, 'daily_time' => '23:00', 'weekly_enabled' => 0],
+                'minimal' => ['send_success' => 0, 'send_warning' => 0, 'send_error' => 1,
+                    'send_critical' => 1, 'send_batch_summary' => 0, 'notify_recovery' => 0,
+                    'send_info' => 0,
+                    'daily_enabled' => 1, 'daily_time' => '23:00', 'weekly_enabled' => 0],
+                'all' => ['send_success' => 1, 'send_warning' => 1, 'send_error' => 1,
+                    'send_critical' => 1, 'send_batch_summary' => 1, 'notify_recovery' => 1,
+                    'send_info' => 1,
+                    'daily_enabled' => 1, 'daily_time' => '23:00', 'weekly_enabled' => 1],
+            ];
+            if (!isset($map[$preset])) json_out(['ok' => false, 'message' => 'Preset không hợp lệ'], 400);
+            $st = db()->prepare('INSERT INTO settings (skey, svalue) VALUES (?,?)
+                ON DUPLICATE KEY UPDATE svalue=VALUES(svalue)');
+            $keyMap = ['send_success' => 'notify_send_success', 'send_warning' => 'notify_send_warning',
+                'send_error' => 'notify_send_error', 'send_critical' => 'notify_send_critical',
+                'send_batch_summary' => 'notify_send_batch', 'notify_recovery' => 'notify_recovery',
+                'send_info' => 'notify_send_info',
+                'daily_enabled' => 'notify_daily_enabled', 'daily_time' => 'notify_daily_time',
+                'weekly_enabled' => 'notify_weekly_enabled'];
+            foreach ($map[$preset] as $k => $v) {
+                $sv = in_array($k, ['daily_time'], true) ? (string)$v : ((int)$v ? '1' : '0');
+                $st->execute([$keyMap[$k], $sv]);
+                $GLOBALS['__setting_override'][$keyMap[$k]] = $sv;
+            }
+            json_out(['ok' => true, 'data' => ['preset' => $preset]]);
+            break;
+        }
+
+        case 'notify_preset_get': {
+            // Detect preset hien tai (custom neu khac) + first-run fill (§AC-§AD)
+            $cur = [
+                'send_success' => get_setting('notify_send_success', ''),
+                'send_info' => get_setting('notify_send_info', ''),
+                'send_warning' => get_setting('notify_send_warning', ''),
+                'send_error' => get_setting('notify_send_error', ''),
+                'send_critical' => get_setting('notify_send_critical', ''),
+                'send_batch_summary' => get_setting('notify_send_batch', ''),
+                'notify_recovery' => get_setting('notify_recovery', ''),
+                'daily_enabled' => get_setting('notify_daily_enabled', ''),
+                'daily_time' => get_setting('notify_daily_time', ''),
+                'weekly_enabled' => get_setting('notify_weekly_enabled', ''),
+            ];
+            $missing = false;
+            foreach ($cur as $v) {
+                if ($v === '') {
+                    $missing = true;
+                    break;
+                }
+            }
+            if ($missing) {
+                // First run: fill BALANCED, khong overwrite cu (§AC-§AD)
+                $fill = ['notify_send_success' => '0', 'notify_send_info' => '0',
+                    'notify_send_warning' => '1',
+                    'notify_send_error' => '1', 'notify_send_critical' => '1',
+                    'notify_send_batch' => '1', 'notify_recovery' => '1',
+                    'notify_daily_enabled' => '1', 'notify_daily_time' => '23:00',
+                    'notify_weekly_enabled' => '0'];
+                $st = db()->prepare('INSERT IGNORE INTO settings (skey, svalue) VALUES (?,?)');
+                foreach ($fill as $k => $v) {
+                    $st->execute([$k, $v]);
+                }
+                // Doc lai sau fill
+                $map = ['send_success' => 'notify_send_success', 'send_info' => 'notify_send_info',
+                    'send_warning' => 'notify_send_warning',
+                    'send_error' => 'notify_send_error', 'send_critical' => 'notify_send_critical',
+                    'send_batch_summary' => 'notify_send_batch', 'notify_recovery' => 'notify_recovery',
+                    'daily_enabled' => 'notify_daily_enabled', 'daily_time' => 'notify_daily_time',
+                    'weekly_enabled' => 'notify_weekly_enabled'];
+                foreach ($map as $short => $full) {
+                    $cur[$short] = get_setting($full, $cur[$short] ?? '');
+                }
+            }
+            $norm = [];
+            foreach ($cur as $k => $v) {
+                $norm[$k] = ($k === 'daily_time') ? $v : ($v === '1' ? 1 : 0);
+            }
+            $which = 'custom';
+            $bal = ['send_success' => 0, 'send_info' => 0, 'send_warning' => 1, 'send_error' => 1, 'send_critical' => 1,
+                'send_batch_summary' => 1, 'notify_recovery' => 1, 'daily_enabled' => 1, 'weekly_enabled' => 0];
+            $min = ['send_success' => 0, 'send_info' => 0, 'send_warning' => 0, 'send_error' => 1, 'send_critical' => 1,
+                'send_batch_summary' => 0, 'notify_recovery' => 0, 'daily_enabled' => 1, 'weekly_enabled' => 0];
+            $all = ['send_success' => 1, 'send_info' => 1, 'send_warning' => 1, 'send_error' => 1, 'send_critical' => 1,
+                'send_batch_summary' => 1, 'notify_recovery' => 1, 'daily_enabled' => 1, 'weekly_enabled' => 1];
+            foreach (['balanced' => $bal, 'minimal' => $min, 'all' => $all] as $name => $ref) {
+                $match = true;
+                foreach ($ref as $k => $v) {
+                    if ((int)($norm[$k] ?? -1) !== $v) {
+                        $match = false;
+                        break;
+                    }
+                }
+                if ($match && ($norm['daily_time'] ?? '') === '23:00') {
+                    $which = $name;
+                    break;
+                }
+            }
+            json_out(['ok' => true, 'data' => ['preset' => $which, 'values' => $norm,
+                'command_mode' => get_setting('tg_chat_command_mode', '1') === '1',
+                'retention_days' => (int)get_setting('tg_retention_days', '30')]]);
+            break;
+        }
+
+        case 'notify_autosave': {
+            // Auto-save 1 key (debounce o client) (§AB)
+            $b = $method === 'GET' ? $_GET : json_body();
+            $allow = ['notify_send_success', 'notify_send_warning', 'notify_send_error',
+                'notify_send_critical', 'notify_send_batch', 'notify_recovery',
+                'notify_daily_enabled', 'notify_daily_time', 'notify_weekly_enabled',
+                'notify_weekly_day', 'notify_weekly_time', 'notify_quiet_start', 'notify_quiet_end',
+                'tg_chat_command_mode', 'tg_retention_days', 'notify_telegram_enabled'];
+            $k = (string)($b['key'] ?? '');
+            if (!in_array($k, $allow, true)) json_out(['ok' => false, 'message' => 'Key không hợp lệ'], 400);
+            $v = (string)($b['value'] ?? '');
+            if (in_array($k, ['notify_daily_time'], true) && !preg_match('/^\d{2}:\d{2}$/', $v)) {
+                json_out(['ok' => false, 'message' => 'Giờ không hợp lệ'], 400);
+            }
+            if ($k === 'tg_retention_days') {
+                $v = (string)max(7, min(3650, (int)$v));
+            }
+            if ($k === 'notify_weekly_day') {
+                $v = (string)max(1, min(7, (int)$v));
+            }
+            set_setting($k, $v);
+            json_out(['ok' => true, 'data' => ['saved' => true]]);
+            break;
+        }
+
         case 'metrics': {
             json_out(['ok' => true, 'data' => ConversationService::metrics()]);
             break;

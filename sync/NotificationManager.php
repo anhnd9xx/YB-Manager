@@ -59,6 +59,7 @@ class NotificationManager
             ['*', 'CRITICAL_ALERT', '*', self::MODE_IMMEDIATE, 1],
             ['*', 'TASK_COMPLETED', 'SUCCESS', self::MODE_OFF, 1],
             ['*', 'BATCH_PROGRESS', '*', self::MODE_OFF, 1],
+            ['*', '*', 'INFO', self::MODE_DIGEST, 1],
         ];
         try {
             foreach ($defs as $d) {
@@ -120,6 +121,23 @@ class NotificationManager
     {
         try {
             if (!self::telegramEnabled()) return; // tat la tat het (van luu event)
+            // Severity gates tu preset (§V): CRITICAL luon qua
+            $sev = (string)($ev['severity'] ?? '');
+            $type = (string)($ev['event_type'] ?? '');
+            if ($sev !== AppEvent::SEV_CRITICAL) {
+                if (in_array($type, [AppEvent::BATCH_COMPLETED, AppEvent::DAILY_SUMMARY,
+                    AppEvent::WEEKLY_SUMMARY], true)) {
+                    if (get_setting('notify_send_batch', '1') !== '1') return;
+                } else {
+                    $gate = [AppEvent::SEV_INFO => 'notify_send_info',
+                        AppEvent::SEV_SUCCESS => 'notify_send_success',
+                        AppEvent::SEV_WARNING => 'notify_send_warning',
+                        AppEvent::SEV_ERROR => 'notify_send_error'];
+                    if (isset($gate[$sev]) && get_setting($gate[$sev], $sev === 'INFO' ? '0' : '1') !== '1') {
+                        return;
+                    }
+                }
+            }
             $rule = self::matchRule($ev);
             if ($rule === null || ($rule['mode'] ?? self::MODE_OFF) === self::MODE_OFF) return;
             $mode = (string)$rule['mode'];
