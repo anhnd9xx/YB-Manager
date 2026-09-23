@@ -80,13 +80,14 @@ class NotificationManager
         }
     }
 
-    public static function saveRule(int $id, string $mode, int $enabled): bool
+    public static function saveRule(int $id, string $mode, int|bool $enabled): bool
     {
         self::ensureTable();
         if (!in_array($mode, [self::MODE_OFF, self::MODE_IMMEDIATE, self::MODE_DIGEST], true)) return false;
+        $en = (int)$enabled;
         try {
             db()->prepare('UPDATE notification_rules SET mode=?, enabled=? WHERE id=?')
-                ->execute([$mode, $enabled ? 1 : 0, $id]);
+                ->execute([$mode, $en, $id]);
             return true;
         } catch (Throwable $e) {
             return false;

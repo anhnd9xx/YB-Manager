@@ -243,16 +243,22 @@ try {
                 }
             }
             if ($missing) {
-                // First run: fill BALANCED, khong overwrite cu (§AC-§AD)
+                // First run: fill BALANCED cho key THIEU, khong overwrite cu (§AC-§AD)
                 $fill = ['notify_send_success' => '0', 'notify_send_info' => '0',
                     'notify_send_warning' => '1',
                     'notify_send_error' => '1', 'notify_send_critical' => '1',
                     'notify_send_batch' => '1', 'notify_recovery' => '1',
                     'notify_daily_enabled' => '1', 'notify_daily_time' => '23:00',
                     'notify_weekly_enabled' => '0'];
-                $st = db()->prepare('INSERT IGNORE INTO settings (skey, svalue) VALUES (?,?)');
-                foreach ($fill as $k => $v) {
-                    $st->execute([$k, $v]);
+                try {
+                    $have = [];
+                    foreach (db()->query('SELECT skey FROM settings WHERE skey LIKE \'notify_%\'')->fetchAll() as $r) {
+                        $have[(string)$r['skey']] = true;
+                    }
+                    foreach ($fill as $k => $v) {
+                        if (empty($have[$k])) set_setting($k, $v);
+                    }
+                } catch (Throwable $e) {
                 }
                 // Doc lai sau fill
                 $map = ['send_success' => 'notify_send_success', 'send_info' => 'notify_send_info',

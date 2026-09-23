@@ -10,6 +10,10 @@ function notifyTab(name) {
   if (name === 'reports') notifyLoadReports();
   if (name === 'overview') notifyLoadOverview();
   if (name === 'chat') ntChatRefresh();
+  if (name === 'telegram' || name === 'reports') {
+    if (typeof ntBindAutosave === 'function') ntBindAutosave();
+    ntQuietUI();
+  }
 }
 async function notifyRefresh() {
   notifyTab('overview');
@@ -341,7 +345,8 @@ function ntQuietUI() {
 async function notifyTestConn() {
   const st = $('nt-conn-status');
   if (st) st.textContent = 'Đang kiểm tra...';
-  const tok = $('nt-token').value.trim();
+  const tokEl = $('nt-token');
+  const tok = tokEl ? tokEl.value.trim() : '';
   const r = await sendJson(api + 'notify.php?action=test', tok ? { bot_token: tok } : {});
   if (st) st.textContent = r.ok ? ('● Đã kết nối (' + (r.data.bot || '') + ')') : ('● ' + (r.message || 'Lỗi'));
   toast(r.ok ? 'Kết nối OK' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
@@ -480,19 +485,15 @@ async function ntChatRefresh() {
     } catch (e) {}
   }
   ntChatBindInput();
-  const cm = $('nt-cmd-mode');
-  if (cm && !cm.dataset.ntbound) {
-    cm.dataset.ntbound = '1';
-    cm.addEventListener('change', () => {
+  const cmdMode = $('nt-cmd-mode');
+  if (cmdMode && !cmdMode.dataset.ntbound) {
+    cmdMode.dataset.ntbound = '1';
+    cmdMode.addEventListener('change', () => {
       sendJson(api + 'telegram.php?action=notify_autosave',
-        { key: 'tg_chat_command_mode', value: cm.checked ? '1' : '0' })
+        { key: 'tg_chat_command_mode', value: cmdMode.checked ? '1' : '0' })
         .then(r => toast(r.ok ? '✓ Đã lưu' : 'Lỗi lưu', r.ok ? 'success' : 'error'));
     });
   }
-  const list = $('nt-chat-list');
-  if (list) list.addEventListener('scroll', () => {
-    if (list.scrollTop <= 40) ntChatOlder();
-  });
   if (ntChatTimer) clearInterval(ntChatTimer);
   ntChatTimer = setInterval(async () => {
     const pane = $('nt-pane-chat');
