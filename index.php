@@ -120,6 +120,7 @@
             </div>
           </div>
           <button class="btn btn-sm tb-sec hidden" id="btn-eval-cancel" onclick="evalCancelBatch()" title="Hủy batch đang chạy">✕ Hủy</button>
+          <button class="btn btn-sm tb-sec" onclick="actBulkOpen()" title="Gán Auto Activity cho các kênh đã chọn">◷ Auto</button>
           <button class="btn btn-sm btn-danger tb-sec" onclick="deleteSelected()">🗑 Xóa đã chọn</button>
           <div class="arr-wrap">
             <div class="dropdown">
@@ -910,6 +911,71 @@
           <option value="default">Mặc định (không can thiệp)</option>
           <option value="disable_nonproxied_udp">Chỉ cho UDP qua proxy (đề xuất)</option>
         </select>
+        <div class="form-group-title">Tự động hoạt động</div>
+        <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="act-enabled" style="width:auto"> Bật Auto Activity</label>
+        <div id="act-fields">
+          <div class="win-row">
+            <div class="win-field"><label>Hoạt động trong: từ</label><input type="time" id="act-start" value="08:00"></div>
+            <div class="win-field"><label>đến</label><input type="time" id="act-end" value="22:00"></div>
+          </div>
+          <div class="win-row">
+            <div class="win-field"><label>Chu kỳ</label>
+              <select id="act-interval">
+                <option value="15">15 phút</option>
+                <option value="30" selected>30 phút</option>
+                <option value="60">60 phút</option>
+                <option value="120">2 giờ</option>
+              </select>
+            </div>
+            <div class="win-field"><label>Tối đa tab tự động</label>
+              <select id="act-maxtabs">
+                <option value="3">3</option>
+                <option value="5" selected>5</option>
+                <option value="10">10</option>
+              </select>
+            </div>
+          </div>
+          <label>Tab cần duy trì</label>
+          <div id="act-presets" style="display:flex;gap:12px;flex-wrap:wrap">
+            <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="gmail" style="width:auto"> Gmail</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="google" style="width:auto"> Google</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="youtube" style="width:auto"> YouTube</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="drive" style="width:auto"> Drive</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="calendar" style="width:auto"> Calendar</label>
+          </div>
+          <div id="act-custom-list" style="margin-top:6px"></div>
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Tên trang</label><input type="text" id="act-custom-label" placeholder="Google News"></div>
+            <div class="win-field" style="flex:2"><label>URL</label><input type="text" id="act-custom-url" placeholder="https://news.google.com/"></div>
+          </div>
+          <button type="button" class="btn btn-sm" onclick="actAddCustom()" style="margin-top:4px">+ Thêm URL</button>
+          <label style="margin-top:8px">Search list (mỗi dòng một query)</label>
+          <textarea id="act-queries" rows="3" style="width:100%" placeholder="tin công nghệ&#10;hướng dẫn Excel"></textarea>
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Chế độ</label>
+              <select id="act-mode">
+                <option value="maintain">Chỉ duy trì tab</option>
+                <option value="search">Tab + tìm kiếm</option>
+                <option value="full">Đầy đủ</option>
+              </select>
+            </div>
+            <div class="win-field"><label>Tạm dừng</label>
+              <select id="act-pause">
+                <option value="off">Không</option>
+                <option value="1h">Pause 1 giờ</option>
+                <option value="today">Pause hôm nay</option>
+              </select>
+            </div>
+          </div>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="act-maintain" style="width:auto"> Luôn duy trì tab (tạo lại sau debounce)</label>
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="act-autostart" style="width:auto"> Cho phép tự mở profile tới lịch</label>
+          <div class="hint">Tab automation chạy nền, không activate, không giành focus. Không click quảng cáo/CAPTCHA.</div>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="btn btn-sm" onclick="actSave()">Lưu Auto Activity</button>
+            <button type="button" class="btn btn-sm" onclick="actRunNow()">Chạy ngay</button>
+          </div>
+          <div class="hint" id="act-save-note"></div>
+        </div>
       </div>
 
       <div id="pf-bulk-fields" class="hidden">
@@ -1072,6 +1138,53 @@
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('bulk-edit-modal')">Hủy</button>
       <button class="btn btn-primary" id="bulk-edit-save-btn" onclick="saveBulkEditProxies()">Lưu thay đổi</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: Bulk Auto Activity ===== -->
+<div id="bulk-act-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Gán Auto Activity hàng loạt</h2>
+      <button class="modal-close" onclick="closeModal('bulk-act-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint" id="bulk-act-count" style="margin-top:0"></div>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bact-enabled" style="width:auto" checked> Bật Auto Activity</label>
+      <div class="win-row">
+        <div class="win-field"><label>Hoạt động trong: từ</label><input type="time" id="bact-start" value="08:00"></div>
+        <div class="win-field"><label>đến</label><input type="time" id="bact-end" value="22:00"></div>
+      </div>
+      <div class="win-row">
+        <div class="win-field"><label>Chu kỳ</label>
+          <select id="bact-interval">
+            <option value="15">15 phút</option>
+            <option value="30" selected>30 phút</option>
+            <option value="60">60 phút</option>
+            <option value="120">2 giờ</option>
+          </select>
+        </div>
+        <div class="win-field"><label>Chế độ</label>
+          <select id="bact-mode">
+            <option value="maintain">Chỉ duy trì tab</option>
+            <option value="search">Tab + tìm kiếm</option>
+            <option value="full">Đầy đủ</option>
+          </select>
+        </div>
+      </div>
+      <label>Tab cần duy trì</label>
+      <div id="bact-presets" style="display:flex;gap:12px;flex-wrap:wrap">
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="gmail" style="width:auto" checked> Gmail</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="google" style="width:auto" checked> Google</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="youtube" style="width:auto"> YouTube</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="drive" style="width:auto"> Drive</label>
+        <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="calendar" style="width:auto"> Calendar</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('bulk-act-modal')">Hủy</button>
+      <button class="btn btn-primary" onclick="actBulkSave()">Gán cho đã chọn</button>
     </div>
   </div>
 </div>

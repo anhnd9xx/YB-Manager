@@ -123,6 +123,31 @@ try {
                 $row['auth_verified_at'] = $em && !empty($em['auth_verified_at']) ? iso_ts($em['auth_verified_at']) : null;
                 $row['last_auth_verified_at'] = $em && !empty($em['last_auth_verified_at']) ? iso_ts($em['last_auth_verified_at']) : null;
                 $row['last_channel_verified_at'] = $em && !empty($em['last_channel_verified_at']) ? iso_ts($em['last_channel_verified_at']) : null;
+                // Auto Activity badge (§18): enabled + running task (state tuoi)
+                $row['act_enabled'] = 0;
+                $row['act_running'] = null;
+                $af = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_activity_' . (int)$row['id'] . '.json';
+                if (is_file($af)) {
+                    $aj = json_decode((string)@file_get_contents($af), true);
+                    if (is_array($aj) && !empty($aj['running_task'])
+                        && (microtime(true) - (float)($aj['running_ts'] ?? 0)) < 300) {
+                        $row['act_running'] = (string)$aj['running_task'];
+                    }
+                }
+            }
+            // Merge activity enabled (1 query cho ca list)
+            try {
+                require_once __DIR__ . '/../sync/ActivityManager.php';
+                ActivityManager::ensureTables();
+                $enMap = [];
+                foreach (db()->query('SELECT profile_id FROM activity_configs WHERE enabled=1')->fetchAll() as $er) {
+                    $enMap[(int)$er['profile_id']] = true;
+                }
+                foreach ($profiles as &$row2) {
+                    if (!empty($enMap[(int)$row2['id']])) $row2['act_enabled'] = 1;
+                }
+                unset($row2);
+            } catch (Throwable $e) {
             }
             unset($row);
             json_out(['ok' => true, 'data' => $profiles]);

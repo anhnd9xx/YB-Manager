@@ -179,6 +179,22 @@ async function monLoadOverview(quiet) {
       `<div class="mon-kpi" ${f ? `onclick="monKpiFilter('${f}')"` : ''}>`
       + `<div class="mon-kpi-label">${l}</div><div class="mon-kpi-value ${c}">${v}</div>`
       + `<div class="mon-kpi-sub2">${sub}</div></div>`).join('');
+    // Auto Activity KPI (§31): Enabled/Running/Waiting/Errors
+    try {
+      const ar = await getJson(api + 'activity.php?action=status');
+      if (ar.ok && ar.data) {
+        const a = ar.data;
+        const akpi = [
+          ['Auto: Bật', a.enabled, '', '', ''],
+          ['Auto: Đang chạy', a.running, '', a.running ? 'st-info' : '', ''],
+          ['Auto: Đang chờ', a.waiting, '', '', ''],
+          ['Auto: Lỗi', a.errors, '', a.errors ? 'st-critical' : '', ''],
+        ];
+        $('mon-kpi').innerHTML += akpi.map(([l, v, sub, c]) =>
+          `<div class="mon-kpi"><div class="mon-kpi-label">${l}</div>`
+          + `<div class="mon-kpi-value ${c}">${v}</div><div class="mon-kpi-sub2">${sub}</div></div>`).join('');
+      }
+    } catch (e) {}
     // Status strip nho
     $('mon-strip').innerHTML = `<span><span class="st-healthy">●</span> Monitoring hoạt động</span>`
       + `<span>Last sync: ${new Date().toTimeString().slice(0, 5)}</span>`

@@ -315,6 +315,7 @@ function renderProfiles() {
       : '';
     const sessInfo = `<div class="meta-row"><span class="meta-label">Tabs</span><span class="meta-value"><button class="btn btn-xs" onclick="openTabsPanel(${p.id})" title="${tabCountTip(p)}">${tabCountLabel(p)} · Xem</button></span></div>`;
     const accInfo = buildAccountRow(p);
+    const autoInfo = autoBadge(p);
     const checked = selectedProfileIds.has(Number(p.id));
     return `
       <div class="profile-card ${checked ? 'card-selected' : ''}">
@@ -334,6 +335,7 @@ function renderProfiles() {
           ${proxyInfo}
           ${tabInfo}
           ${sessInfo}
+          ${autoInfo}
           ${accInfo}
         </div>
         <div class="card-actions">
@@ -1490,7 +1492,11 @@ async function openAccountDrawer(id, keepOpen) {
       + `<div class="sync-label" style="margin-top:8px">Lịch sử (${hist.length}):</div>`
       + `<div class="acc-hist" style="display:none"><table class="data-table"><thead><tr><th>Thời gian</th><th>Trạng thái</th><th>Lý do</th></tr></thead><tbody>`
       + (hist.map(h => `<tr><td class="mono">${escapeHtml(h.checked_at || '')}</td><td>${evalBadge(h.eval_status || 'UNCHECKED')}</td><td><small>${escapeHtml(h.reason || vn(h.reasons).join('; '))}</small></td></tr>`).join('') || '<tr><td colspan="3">Chưa có lịch sử</td></tr>')
-      + `</tbody></table></div>`;
+      + `</tbody></table></div>`
+      + `<div class="sync-label" style="margin-top:8px">Hoạt động <button type="button" class="btn btn-xs" onclick="actDrawerRun(${id})">Chạy ngay</button> `
+      + `<select id="act-hist-filter" class="filter-select" style="width:auto" onchange="actDrawerHistory(${id})">`
+      + `<option value="all">Tất cả</option><option value="site">Website</option><option value="search">Search</option><option value="error">Lỗi</option></select></div>`
+      + `<div id="act-hist-list"><p class="muted">Đang tải...</p></div>`;
     setDrawerFoot('Kiểm tra lại', 'Mở Profile', 'Lịch sử',
       async () => { await evaluateOneProfile(id); },
       () => { closeAccountDrawer(); openProfile(id); },
@@ -1499,8 +1505,68 @@ async function openAccountDrawer(id, keepOpen) {
         if (h) h.style.display = h.style.display === 'none' ? '' : 'none';
       });
     $('acc-drawer-wrap').classList.remove('hidden');
+    actDrawerHistory(id);
   } catch (e) {
     toast('Lỗi tải chi tiết', 'error');
+  }
+}
+// Lich su activity trong drawer (§17): timeline + filter
+const ACT_TASK_VN = { ENSURE_TAB: 'Duy trì tab', OPEN_PAGE: 'Mở trang', OPEN_SEARCH: 'Tìm kiếm', CHECK_TAB: 'Kiểm tra tab', CLOSE_AUTOMATION_TAB: 'Dọn tab' };
+const ACT_RES_VN = { OPENED: 'Đã mở', REUSED: 'Đã có', SUCCESS: 'Thành công', CHECKED: 'Đã kiểm tra', MISSING: 'Thiếu', CLOSED: 'Đã đóng', SKIPPED: 'Bỏ qua', WAIT: 'Chờ', BLOCKED: 'Bị chặn' };
+async function actDrawerHistory(id) {
+  const el = $('act-hist-list');
+  if (!el || accDrawerId !== Number(id)) return;
+  const f = ($('act-hist-filter') || {}).value || 'all';
+  try {
+    const r = await getJson(api + `activity.php?action=history&id=${id}&filter=${f}&limit=50`);
+    if (accDrawerId !== Number(id)) return;
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? `<table class="data-table"><tbody>` + rows.map(h =>
+        `<tr><td class="mono">${escapeHtml((h.created_at || '').slice(5, 16))}</td>`
+        + `<td>${escapeHtml(h.domain || '')}</td>`
+        + `<td>${escapeHtml(ACT_TASK_VN[h.task_type] || h.task_type || '')} · ${escapeHtml(ACT_RES_VN[h.result] || h.result || '')}`
+        + (h.error_code ? ` <small class="muted">(${escapeHtml(h.error_code)})</small>` : '') + `</td></tr>`).join('')
+        + `</tbody></table>`
+      : '<p class="muted">Chưa có hoạt động.</p>';
+  } catch (e) {
+    el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+}
+async function actDrawerRun(id) {
+  toast('Đang chạy activity...', '');
+  const r = await sendJson(api + 'activity.php?action=run', { id });
+  const tasks = (r.data && r.data.tasks ? r.data.tasks : []).map(t => t.result || '?').join(', ');
+  toast(r.ok ? `Xong: ${tasks}` : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actDrawerHistory(id);
+}
+// Bulk gan Auto Activity (§30)
+function actBulkOpen() {
+  const ids = getSelectedIds();
+  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
+  $('bulk-act-count').textContent = `Áp dụng cho ${ids.length} kênh đã chọn`;
+  showModal('bulk-act-modal');
+}
+async function actBulkSave() {
+  const ids = getSelectedIds();
+  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
+  const pages = [];
+  document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
+  const r = await sendJson(api + 'activity.php?action=bulk', { ids, patch: {
+    enabled: $('bact-enabled').checked ? 1 : 0,
+    schedule_start: $('bact-start').value,
+    schedule_end: $('bact-end').value,
+    interval_minutes: Number($('bact-interval').value),
+    required_pages: pages,
+    activity_mode: $('bact-mode').value,
+  }});
+  if (r.ok) {
+    closeModal('bulk-act-modal');
+    toast(`Đã gán Auto Activity cho ${r.data.updated}/${r.data.total} kênh`, 'success');
+    markProfileChanged();
+    refreshAll();
+  } else {
+    toast(r.message || 'Lỗi', 'error');
   }
 }
 // Poll stage khi panel dang CHECKING (1s/lan, dung khi DONE/dong panel)
@@ -1794,6 +1860,122 @@ function tabCountTip(p) {
     return `Thiếu ${miss} tab khi khôi phục — Xem/lưu/khôi phục tabs`;
   }
   return 'Xem/lưu/khôi phục tabs';
+}
+// ============ AUTO ACTIVITY (badge + config + history) ============
+// Card badge (§18): Auto on/off/running — gon, khong roi card.
+function autoBadge(p) {
+  if (p.act_running) {
+    return `<div class="meta-row"><span class="meta-label">Auto</span><span class="meta-value">◌ ${escapeHtml(String(p.act_running).replace(/_/g, ' '))}</span></div>`;
+  }
+  if (p.act_enabled) {
+    return `<div class="meta-row"><span class="meta-label">Auto</span><span class="meta-value"><span class="st-healthy">●</span> Đang hoạt động</span></div>`;
+  }
+  return '';
+}
+let actCustomUrls = []; // [{label,url}] custom pages trong modal
+async function actLoad(id) {
+  actCustomUrls = [];
+  if (!id) {
+    $('act-enabled').checked = false;
+    document.querySelectorAll('#act-presets input[data-preset]').forEach(cb => { cb.checked = false; });
+    $('act-queries').value = '';
+    actRenderCustom();
+    return;
+  }
+  try {
+    const r = await getJson(api + `activity.php?action=config&id=${id}`);
+    if (!r.ok) return;
+    const c = r.data || {};
+    $('act-enabled').checked = !!c.enabled;
+    $('act-start').value = c.schedule_start || '08:00';
+    $('act-end').value = c.schedule_end || '22:00';
+    $('act-interval').value = String(c.interval_minutes || 30);
+    $('act-maxtabs').value = String(c.max_tabs || 5);
+    $('act-mode').value = c.activity_mode || 'maintain';
+    $('act-maintain').checked = !!c.maintain_always;
+    $('act-autostart').checked = !!c.auto_start_profile;
+    document.querySelectorAll('#act-presets input[data-preset]').forEach(cb => {
+      cb.checked = (c.required_pages || []).includes(cb.dataset.preset);
+    });
+    for (const item of (c.required_pages || [])) {
+      if (item && typeof item === 'object' && item.url) actCustomUrls.push(item);
+    }
+    $('act-queries').value = (c.search_queries || []).join('\n');
+    actRenderCustom();
+    const note = $('act-save-note');
+    if (note) note.textContent = c.last_run_at ? `Chạy lần cuối: ${c.last_run_at}` : '';
+  } catch (e) {}
+}
+function actRenderCustom() {
+  const el = $('act-custom-list');
+  if (!el) return;
+  el.innerHTML = actCustomUrls.map((u, i) =>
+    `<div class="meta-row"><span class="meta-label">${escapeHtml(u.label || '')}</span>`
+    + `<span class="meta-value mono" style="overflow:hidden;text-overflow:ellipsis">${escapeHtml(u.url)}</span>`
+    + ` <button type="button" class="btn btn-xs" onclick="actDelCustom(${i})">✕</button></div>`).join('');
+}
+function actAddCustom() {
+  const label = ($('act-custom-label').value || '').trim();
+  const url = ($('act-custom-url').value || '').trim();
+  if (!/^https?:\/\/.+\..+/.test(url)) { toast('URL không hợp lệ', 'error'); return; }
+  const host = (() => { try { return new URL(url).hostname; } catch (e) { return url; } })();
+  actCustomUrls.push({ label: label || host, url });
+  $('act-custom-label').value = '';
+  $('act-custom-url').value = '';
+  actRenderCustom();
+}
+function actDelCustom(i) {
+  actCustomUrls.splice(i, 1);
+  actRenderCustom();
+}
+function actCollect() {
+  const pages = [];
+  document.querySelectorAll('#act-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
+  for (const u of actCustomUrls) pages.push(u);
+  return {
+    id: Number($('pf-id').value),
+    enabled: $('act-enabled').checked ? 1 : 0,
+    schedule_start: $('act-start').value,
+    schedule_end: $('act-end').value,
+    interval_minutes: Number($('act-interval').value),
+    max_tabs: Number($('act-maxtabs').value),
+    keep_required_tabs: 1,
+    required_pages: pages,
+    search_queries: $('act-queries').value.split('\n').map(s => s.trim()).filter(Boolean),
+    activity_mode: $('act-mode').value,
+    maintain_always: $('act-maintain').checked ? 1 : 0,
+    auto_start_profile: $('act-autostart').checked ? 1 : 0,
+    pause_mode: $('act-pause').value,
+  };
+}
+async function actSave() {
+  const body = actCollect();
+  if (!body.id) { toast('Mở sửa kênh trước', 'error'); return; }
+  const r = await sendJson(api + 'activity.php?action=save', body);
+  if (r.ok) {
+    // Pause ap dung rieng (khong tron dirty)
+    const pm = $('act-pause').value;
+    if (pm && pm !== 'off') {
+      await sendJson(api + 'activity.php?action=pause', { id: body.id, mode: pm });
+      $('act-pause').value = 'off';
+    }
+    const note = $('act-save-note');
+    if (note) note.textContent = 'Đã lưu Auto Activity';
+    toast('Đã lưu Auto Activity', 'success');
+    markProfileChanged();
+    refreshAll();
+  } else {
+    toast(r.message || 'Lỗi lưu', 'error');
+  }
+}
+async function actRunNow() {
+  const id = Number($('pf-id').value);
+  if (!id) { toast('Mở sửa kênh trước', 'error'); return; }
+  toast('Đang chạy activity...', '');
+  const r = await sendJson(api + 'activity.php?action=run', { id });
+  const tasks = (r.data && r.data.tasks ? r.data.tasks : [r.data]).map(t => (t && t.result) || '?').join(', ');
+  toast(r.ok ? `Xong: ${tasks}` : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actLoad(id);
 }
 
 // ============ ACCOUNT EVALUATION (hien thi) ============
@@ -2294,6 +2476,7 @@ function openEditChannel(id) {
   // Snapshot draft goc de so dirty; form khong bind truc tiep object goc
   profileDraftOriginal = JSON.stringify(collectProfileDraft());
   refreshProfileSaveBtn();
+  actLoad(p.id); // Auto Activity config rieng (luu bang nut rieng)
   showModal('profile-modal');
 }
 function openProfileModalEdit(id) { openEditChannel(id); }
