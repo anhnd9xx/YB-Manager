@@ -82,6 +82,12 @@ class TelegramSetup
         TelegramConfig::set('bot_username', (string)($me['bot']['username'] ?? ''));
         TelegramConfig::set('bot_first_name', (string)($me['bot']['first_name'] ?? ''));
         TelegramConfig::setStatus('CONNECTING');
+        try {
+            // Dev log §1 (khong token)
+            SyncLogger::info('telegram', '[TELEGRAM] getMe OK bot_id=' . ($me['bot']['id'] ?? '?')
+                . ' username=@' . ($me['bot']['username'] ?? '?'));
+        } catch (Throwable $e) {
+        }
         // Session moi: huy session cu dang mo
         try {
             db()->exec("UPDATE tg_setup_sessions SET status='CANCELLED' WHERE status IN ('WAITING_MESSAGE','WAITING_CONFIRM')");
@@ -111,7 +117,8 @@ class TelegramSetup
         return ['ok' => true, 'session_id' => $sid, 'expires_at' => $exp, 'bot' => $me['bot']];
     }
 
-    /** Offset lon nhat hien tai (bo qua history cu §8). */
+    /** Probe server de lay max update hien tai (khong skip unprocessed §11).
+     *  Offset share giu nguyen — worker van nhan binh thuong; loc bang DATE. */
     private static function currentOffset(string $token): int
     {
         try {
@@ -128,12 +135,18 @@ class TelegramSetup
                     $max = max($max, (int)($u['update_id'] ?? 0));
                 }
             }
-            // Luu offset vao store chung de polling worker tiep tuc (khong replay cu §19)
+            // Sanity: file offset lech server qua xa (>100k) la nhiem/corrupt -> reset
             require_once __DIR__ . '/TelegramOffset.php';
             $cur = TelegramOffset::get();
-            $next = max($cur, $max + 1);
-            TelegramOffset::set($next);
-            return $next;
+            if ($cur > $max + 100000) {
+                TelegramOffset::set($max + 1);
+                try {
+                    SyncLogger::warn('telegram', '[Setup] offset reset (corrupt?) cur=' . $cur . ' server_max=' . $max);
+                } catch (Throwable $e) {
+                }
+                return $max + 1;
+            }
+            return $cur > 0 ? $cur : $max + 1;
         } catch (Throwable $e) {
             return 0;
         }
@@ -170,16 +183,144 @@ class TelegramSetup
     }
 
     /**
+     * Diagnostic tong hop (§2, §43): token/bot/webhook/polling/update/pairing.
+     * Khong bao gio kem token.
+     */
+    public static function diagnostics(): array
+    {
+        $d = ['token' => false, 'bot' => null, 'webhook' => ['active' => false],
+            'polling' => ['state' => 'STOPPED'], 'offset' => 0,
+            'session' => null, 'probe' => null];
+        try {
+            $token = TelegramConfig::token();
+            $d['token'] = $token !== '';
+            if ($token !== '') {
+                $d['bot'] = ['username' => TelegramConfig::get('bot_username', ''),
+                    'id' => TelegramConfig::get('bot_id', '')];
+                $wh = TelegramProvider::webhookInfoVia($token);
+                $d['webhook'] = $wh;
+            }
+            require_once __DIR__ . '/TelegramGateway.php';
+            $d['polling'] = TelegramGateway::connectionState();
+            require_once __DIR__ . '/TelegramOffset.php';
+            $d['offset'] = TelegramOffset::get();
+            $d['session'] = self::active();
+        } catch (Throwable $e) {
+        }
+        return $d;
+    }
+
+    /**
+     * Dev probe: 1 getUpdates truc tiep (HTTP status/ok/count/latest) — khong token ra ngoai.
+     * Chi dung khi worker KHONG listening (tranh 409 second poller §25, §38).
+     */
+    public static function probeOnce(int $timeout = 8): array
+    {
+        $out = ['http' => 0, 'ok' => false, 'update_count' => 0, 'latest_update_id' => 0, 'error' => null];
+        try {
+            $token = TelegramConfig::token();
+            if ($token === '') {
+                $out['error'] = 'no_token';
+                return $out;
+            }
+            require_once __DIR__ . '/TelegramGateway.php';
+            $gw = TelegramGateway::connectionState();
+            if (!empty($gw['listening'])) {
+                $out['error'] = 'worker_listening';
+                return $out;
+            }
+            require_once __DIR__ . '/TelegramOffset.php';
+            $ch = curl_init(TelegramProvider::API . $token . '/getUpdates');
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => ['offset' => TelegramOffset::get(), 'limit' => 10,
+                    'timeout' => max(1, min(15, $timeout)),
+                    'allowed_updates' => json_encode(['message', 'callback_query'])],
+                CURLOPT_TIMEOUT => $timeout + 8, CURLOPT_CONNECTTIMEOUT => 6]);
+            $body = curl_exec($ch);
+            $out['http'] = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $errno = curl_errno($ch);
+            curl_close($ch);
+            if ($errno !== 0) {
+                $out['error'] = 'NETWORK_ERROR';
+                return $out;
+            }
+            $j = is_string($body) ? json_decode($body, true) : null;
+            if (!is_array($j) || empty($j['ok'])) {
+                $d = strtolower((string)($j['description'] ?? ''));
+                $out['error'] = str_contains($d, 'unauthorized') ? 'TELEGRAM_401'
+                    : (str_contains($d, 'conflict') ? 'TELEGRAM_409' : 'JSON_PARSE_ERROR');
+                return $out;
+            }
+            $res = (array)($j['result'] ?? []);
+            $out['ok'] = true;
+            $out['update_count'] = count($res);
+            foreach ($res as $u) $out['latest_update_id'] = max($out['latest_update_id'], (int)($u['update_id'] ?? 0));
+            // Xu ly ngay cac update lay duoc (setup hoac route), ack sau
+            foreach ($res as $u) {
+                try {
+                    require_once __DIR__ . '/CommandRouter.php';
+                    $uid = (int)($u['update_id'] ?? 0);
+                    if ($uid > 0 && CommandRouter::seenUpdate($uid)) continue;
+                    // Tai su dung handler cua worker (khong duplicate code):
+                    // chi setup-branch + route text don gian
+                    self::handleProbed($u);
+                    if ($uid > 0) {
+                        require_once __DIR__ . '/TelegramOffset.php';
+                        TelegramOffset::set($uid + 1);
+                    }
+                } catch (Throwable $e) {
+                }
+            }
+        } catch (Throwable $e) {
+            $out['error'] = 'worker_error';
+        }
+        return $out;
+    }
+
+    /** Xu ly 1 update tu probe (giong worker, rut gon). */
+    private static function handleProbed(array $u): void
+    {
+        $msg = $u['message'] ?? null;
+        if (!is_array($msg)) return;
+        $chatId = (string)($msg['chat']['id'] ?? '');
+        $userId = (string)($msg['from']['id'] ?? '');
+        $text = trim((string)($msg['text'] ?? ''));
+        if ($chatId === '' || $text === '') return;
+        require_once __DIR__ . '/ConversationService.php';
+        ConversationService::log(ConversationService::IN, $chatId, $text, ['user_id' => $userId]);
+        require_once __DIR__ . '/PermissionService.php';
+        $chk = PermissionService::check($chatId, $userId);
+        if (empty($chk['ok']) && ($msg['chat']['type'] ?? '') === 'private') {
+            $s = self::onPrivateMessage($msg, (int)($u['update_id'] ?? 0));
+            if (!empty($s['asked_confirm']) || self::active() !== null) return;
+        }
+        require_once __DIR__ . '/CommandRouter.php';
+        $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
+        if (($reply['text'] ?? '') !== '') {
+            require_once __DIR__ . '/TelegramGateway.php';
+            TelegramGateway::sendMessage($chatId, (string)$reply['text']);
+        }
+    }
+
+    /**
      * Nhan private message MOI trong setup window -> candidate (§5, §9, §25).
+     * Loc bang DATE (message.date >= session.created_at - 60s), KHONG skip
+     * offset (§8 vs §11: khong bo message chua xu ly; old that su bi loai boi date).
+     * Bat ky text nao (/start, hello, ...) deu duoc (§12).
      * @return array{paired:bool, asked_confirm:bool}
      */
     public static function onPrivateMessage(array $msg, int $updateId): array
     {
         $sess = self::active();
         if (!$sess) return ['paired' => false, 'asked_confirm' => false];
-        if ((int)$updateId < (int)($sess['offset_start'] ?? 0)) return ['paired' => false, 'asked_confirm' => false];
         $chat = $msg['chat'] ?? [];
         if (($chat['type'] ?? '') !== 'private') return ['paired' => false, 'asked_confirm' => false];
+        // Date gate: chi message moi hon session (tru tolerance) — old that bi loai
+        $msgDate = (int)($msg['date'] ?? 0);
+        $started = strtotime((string)($sess['created_at'] ?? 'now'));
+        if ($msgDate > 0 && $msgDate < $started - 60) {
+            return ['paired' => false, 'asked_confirm' => false];
+        }
         $chatId = (string)($chat['id'] ?? '');
         $from = $msg['from'] ?? [];
         $userId = (string)($from['id'] ?? '');

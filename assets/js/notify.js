@@ -120,18 +120,81 @@ function tgSetupWaiting(sess, info) {
   const el = $('tg-setup-view');
   const bot = (info && info.bot_username) ? '@' + info.bot_username : 'bot';
   const step = sess.status === 'WAITING_CONFIRM' ? 'confirm' : 'wait';
+  const cand = sess.candidate_display || sess.candidate_username
+    ? `<div style="margin-top:6px">✓ Đã nhận tin nhắn Telegram${sess.candidate_display ? ' từ <strong>' + escapeHtml(sess.candidate_display) + '</strong>' : ''}</div>` : '';
   el.innerHTML = `<div class="sync-label">Kết nối Telegram</div>`
     + tgSetupSteps(step)
     + `<div style="margin-top:8px">✓ Bot Token hợp lệ<br>Bot: <strong>${escapeHtml(bot)}</strong></div>`
     + `<div style="margin-top:6px">Bây giờ hãy mở Telegram và nhắn <strong>/start</strong> cho ${escapeHtml(bot)}</div>`
+    + cand
     + `<div class="eval-prev">◌ Đang chờ tin nhắn... ${sess.candidate_count > 0 ? `(phát hiện ${sess.candidate_count} yêu cầu)` : ''}</div>`
-    + `<div style="margin-top:6px"><button type="button" class="btn btn-sm" onclick="tgSetupCancel('${sess.session_id || ''}')">Hủy</button></div>`
-    + `<div class="hint" id="tg-setup-note"></div>`;
+    + `<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">`
+    + `<button type="button" class="btn btn-sm" onclick="tgSetupPing()">Tôi đã nhắn /start</button>`
+    + `<button type="button" class="btn btn-sm" onclick="tgSetupCancel('${sess.session_id || ''}')">Hủy</button>`
+    + `</div>`
+    + `<div class="hint" id="tg-setup-note"></div>`
+    + `<div style="margin-top:8px"><button type="button" class="link-btn" onclick="tgDiagToggle()">Telegram Diagnostics ▾</button>`
+    + `<div id="tg-diag" class="hidden" style="margin-top:4px"></div></div>`;
+  tgDiagLoad();
   clearTimeout(window.__tgSetupTimer);
   window.__tgSetupTimer = setTimeout(() => {
     const pane = $('nt-pane-telegram');
     if (pane && !pane.classList.contains('hidden')) tgSetupView();
   }, 4000);
+}
+function tgDiagToggle() {
+  const el = $('tg-diag');
+  if (el) el.classList.toggle('hidden');
+}
+async function tgDiagLoad() {
+  const el = $('tg-diag');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'notify.php?action=setup_diag');
+    if (!r.ok) return;
+    const d = r.data;
+    const row = (k, v) => `<div class="meta-row"><span class="meta-label">${k}</span><span class="meta-value">${v}</span></div>`;
+    const st = d.polling || {};
+    el.innerHTML = row('Bot', escapeHtml((d.bot && d.bot.username ? '@' + d.bot.username : '?')))
+      + row('Gateway', d.token ? 'RUNNING' : 'STOPPED')
+      + row('Polling', escapeHtml(st.state || 'STOPPED'))
+      + row('Webhook', d.webhook && d.webhook.active ? 'ACTIVE ⚠' : 'NONE')
+      + row('Last poll', st.last_poll_completed_at ? 'vừa xong' : '—')
+      + row('Last update', escapeHtml(st.last_update_at || 'chưa có'))
+      + row('Pair session', escapeHtml((d.session && d.session.status) || '—'))
+      + (st.last_error ? row('Lỗi', escapeHtml(friendlyPollErr(st.last_error))) : '');
+  } catch (e) {}
+}
+function friendlyPollErr(e) {
+  e = String(e || '');
+  if (e === 'TELEGRAM_POLLING_CONFLICT') return 'Bot đang được một tiến trình khác sử dụng (409).';
+  if (e === 'poll_unauthorized') return 'Bot Token không hợp lệ (401).';
+  if (e === 'inbound_disabled') return 'Worker chờ (chưa bật inbound, không có setup session).';
+  return e;
+}
+async function tgSetupPing() {
+  const note = $('tg-setup-note');
+  if (note) note.textContent = 'Đang kiểm tra tin nhắn mới...';
+  try {
+    const r = await sendJson(api + 'notify.php?action=setup_ping', {});
+    if (!r.ok) { if (note) note.textContent = r.message || 'Lỗi'; return; }
+    const p = r.data.probe || {};
+    if (p.error === 'worker_listening') {
+      if (note) note.textContent = 'Worker đang lắng nghe — chờ vài giây rồi kiểm tra lại.';
+    } else if ((p.update_count || 0) > 0) {
+      if (note) note.textContent = `Đã nhận ${p.update_count} tin nhắn mới — đang xử lý...`;
+    } else if (p.error) {
+      if (note) note.textContent = 'Lỗi: ' + friendlyPollErr(p.error);
+    } else {
+      const d = r.data.diagnostics || {};
+      const bot = (d.bot && d.bot.username) ? '@' + d.bot.username : 'bot';
+      if (note) note.textContent = `Tool vẫn chưa nhận được tin nhắn. Kiểm tra bạn đang nhắn đúng ${bot}.`;
+    }
+    tgSetupView();
+    tgDiagLoad();
+  } catch (e) {
+    if (note) note.textContent = 'Lỗi kết nối.';
+  }
 }
 async function tgSetupCancel(sid) {
   clearTimeout(window.__tgSetupTimer);

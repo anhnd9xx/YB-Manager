@@ -39,21 +39,32 @@ try {
 } catch (Throwable $e) {
 }
 $backoff = 5;
+TelegramGateway::heartbeat(null, null, 'STARTING');
 while (true) {
     try {
-        if (!TelegramGateway::inboundEnabled()) {
-            TelegramGateway::heartbeat('inbound_disabled');
+        // Poll khi inbound ON hoac setup session active (pairing) — khong doi confirm
+        if (!TelegramGateway::shouldPoll()) {
+            TelegramGateway::heartbeat(null, null, 'STOPPED');
             sleep(10);
             continue;
         }
         $transport = TelegramGateway::transport();
         $offset = tg_offset_get();
+        TelegramGateway::pollStarted();
         try {
             $updates = $transport->receive($offset, 30);
             $backoff = 5;
+            TelegramGateway::heartbeat(null, null, 'LISTENING', true);
         } catch (Throwable $e) {
             $msg = $e->getMessage();
-            TelegramGateway::heartbeat($msg);
+            if ($msg === 'poll_conflict') {
+                // 409: bot dang bi tien trinh khac poll (§4)
+                TelegramGateway::heartbeat('TELEGRAM_POLLING_CONFLICT', null, 'ERROR');
+                echo date('H:i:s') . " 409 conflict, sleep 60s\n";
+                sleep(60);
+                continue;
+            }
+            TelegramGateway::heartbeat($msg, null, 'RECONNECTING');
             if ($msg === 'poll_unauthorized') {
                 echo date('H:i:s') . " unauthorized, sleep 60s\n";
                 sleep(60);
@@ -61,12 +72,11 @@ while (true) {
             }
             echo date('H:i:s') . " poll err ($msg), backoff {$backoff}s\n";
             sleep($backoff);
-            $backoff = min(120, $backoff * 2); // exponential backoff
+            $backoff = min(30, $backoff * 2); // 1/2/5/10/30 max (§29)
             continue;
         }
         foreach ($updates as $u) {
             $uid = (int)($u['update_id'] ?? 0);
-            if ($uid > 0) tg_offset_set($uid + 1); // ack truoc de khong replay (§43)
             try {
                 handle_update($u);
             } catch (Throwable $e) {
@@ -75,10 +85,13 @@ while (true) {
                 } catch (Throwable $e2) {
                 }
             }
+            // Ack SAU khi xu ly (crash giua chung khong mat update §10)
+            if ($uid > 0) tg_offset_set($uid + 1);
             TelegramGateway::heartbeat(null, date('Y-m-d H:i:s'));
         }
         ConfirmationService::sweep();
     } catch (Throwable $e) {
+        TelegramGateway::heartbeat('worker_error', null, 'ERROR');
         sleep(5);
     }
 }
@@ -87,6 +100,21 @@ function handle_update(array $u): void
 {
     $uid = (int)($u['update_id'] ?? 0);
     if ($uid > 0 && CommandRouter::seenUpdate($uid)) return; // idempotency (§23, §54)
+    // Dev log (§14): khong sensitive (mask chat/user, chi command text)
+    try {
+        $kind = isset($u['callback_query']) ? 'callback' : (isset($u['message']) ? 'message' : 'other');
+        $m = $u['message'] ?? $u['callback_query']['message'] ?? [];
+        $ct = (string)(($m['chat'] ?? [])['type'] ?? '?');
+        $cid = '***' . substr((string)(($m['chat'] ?? [])['id'] ?? ''), -4);
+        $fr = $u['message']['from'] ?? $u['callback_query']['from'] ?? [];
+        $fuid = '***' . substr((string)($fr['id'] ?? ''), -4);
+        $txt = trim((string)(($u['message'] ?? [])['text'] ?? ''));
+        $cmd = $txt !== '' ? (explode(' ', $txt)[0] ?? '') : (string)($u['callback_query']['data'] ?? '');
+        SyncLogger::debug('telegram', '[TELEGRAM UPDATE] update_id=' . $uid . ' type=' . $kind
+            . ' chat_type=' . $ct . ' chat_id=' . $cid . ' user_id=' . $fuid
+            . ' text_command=' . mb_substr($cmd, 0, 40));
+    } catch (Throwable $e) {
+    }
     if (isset($u['callback_query']) && is_array($u['callback_query'])) {
         handle_callback($u['callback_query']);
         return;

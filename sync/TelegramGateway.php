@@ -42,6 +42,10 @@ class LongPollingTransport implements TelegramTransport
         if (!is_array($j) || empty($j['ok'])) {
             $d = strtolower((string)($j['description'] ?? ''));
             if (str_contains($d, 'unauthorized')) throw new RuntimeException('poll_unauthorized');
+            // 409: 1 bot chi 1 getUpdates consumer (§4, §38)
+            if (str_contains($d, 'conflict') || str_contains($d, 'terminated by other')) {
+                throw new RuntimeException('poll_conflict');
+            }
             throw new RuntimeException('poll_bad_response');
         }
         return is_array($j['result'] ?? null) ? $j['result'] : [];
@@ -79,6 +83,22 @@ class TelegramGateway
         try {
             return get_setting('notify_inbound_enabled', '0') === '1'
                 && trim((string)get_setting('notify_bot_token', '')) !== '';
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Worker co nen poll? inbound ON hoac setup session active (pairing).
+     * FIX root cause: setup doi message nhung inbound chua bat (chi bat sau confirm).
+     */
+    public static function shouldPoll(): bool
+    {
+        try {
+            if (trim((string)get_setting('notify_bot_token', '')) === '') return false;
+            if (self::inboundEnabled()) return true;
+            require_once __DIR__ . '/TelegramSetup.php';
+            return TelegramSetup::active() !== null;
         } catch (Throwable $e) {
             return false;
         }
@@ -143,25 +163,57 @@ class TelegramGateway
     public static function connectionState(): array
     {
         $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_poll.json';
-        $st = ['listening' => false, 'last_update_at' => null, 'last_error' => null];
+        $st = ['listening' => false, 'last_update_at' => null, 'last_error' => null,
+            'state' => 'STOPPED', 'last_poll_started_at' => null, 'last_poll_completed_at' => null,
+            'poll_error_count' => 0];
         if (is_file($f)) {
             $j = json_decode((string)@file_get_contents($f), true);
             if (is_array($j)) {
-                $st['listening'] = (microtime(true) - (float)($j['heartbeat'] ?? 0)) < 90;
+                $st['listening'] = (microtime(true) - (float)($j['heartbeat'] ?? 0)) < 90
+                    && in_array(($j['state'] ?? ''), ['LISTENING', 'RECONNECTING'], true);
                 $st['last_update_at'] = $j['last_update_at'] ?? null;
                 $st['last_error'] = $j['last_error'] ?? null;
+                $st['state'] = $j['state'] ?? 'STOPPED';
+                $st['last_poll_started_at'] = $j['last_poll_started_at'] ?? null;
+                $st['last_poll_completed_at'] = $j['last_poll_completed_at'] ?? null;
+                $st['poll_error_count'] = (int)($j['poll_error_count'] ?? 0);
+                // Watchdog §28: LISTENING nhung khong poll cycle >60s -> UNHEALTHY
+                if ($st['state'] === 'LISTENING' && ($j['last_poll_completed_at'] ?? 0) > 0
+                    && (microtime(true) - (float)$j['last_poll_completed_at']) > 60) {
+                    $st['state'] = 'UNHEALTHY';
+                    $st['listening'] = false;
+                }
             }
         }
         return $st;
     }
 
-    public static function heartbeat(?string $error = null, ?string $lastUpdateAt = null): void
+    public static function heartbeat(?string $error = null, ?string $lastUpdateAt = null,
+        ?string $state = null, bool $pollCompleted = false): void
     {
         $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_poll.json';
         $prev = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
         if ($lastUpdateAt !== null) $prev['last_update_at'] = $lastUpdateAt;
         $prev['heartbeat'] = microtime(true);
-        if ($error !== null) $prev['last_error'] = $error;
+        if ($error !== null) {
+            $prev['last_error'] = $error;
+            $prev['poll_error_count'] = (int)($prev['poll_error_count'] ?? 0) + 1;
+        }
+        if ($state !== null) $prev['state'] = $state;
+        if ($pollCompleted) {
+            $prev['last_poll_completed_at'] = microtime(true);
+            $prev['poll_error_count'] = 0;
+        }
+        @file_put_contents($f, json_encode($prev, JSON_UNESCAPED_UNICODE));
+    }
+
+    public static function pollStarted(): void
+    {
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_poll.json';
+        $prev = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        $prev['heartbeat'] = microtime(true);
+        $prev['last_poll_started_at'] = microtime(true);
+        if (($prev['state'] ?? '') !== 'LISTENING') $prev['state'] = 'LISTENING';
         @file_put_contents($f, json_encode($prev, JSON_UNESCAPED_UNICODE));
     }
 }

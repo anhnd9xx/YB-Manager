@@ -297,6 +297,25 @@ try {
             break;
         }
 
+        case 'setup_diag': {
+            json_out(['ok' => true, 'data' => TelegramSetup::diagnostics()]);
+            break;
+        }
+
+        case 'setup_ping': {
+            // "Toi da nhan /start" / "Tim tin nhan moi" (§24-§25):
+            // 1 getUpdates truc tiep neu worker KHONG listening (tranh 409).
+            // Neu worker listening -> bao worker dang nghe, cho vai giay.
+            $probe = TelegramSetup::probeOnce(8);
+            $sess = TelegramSetup::active();
+            json_out(['ok' => true, 'data' => [
+                'probe' => $probe,
+                'session' => $sess,
+                'diagnostics' => TelegramSetup::diagnostics(),
+            ]]);
+            break;
+        }
+
         case 'disconnect': {
             // Ngat: disable inbound+outbound, remove authorized receiver. Giu token (§16).
             $b = $method === 'GET' ? $_GET : json_body();
