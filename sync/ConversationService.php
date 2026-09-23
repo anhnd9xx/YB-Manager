@@ -145,8 +145,21 @@ class ConversationService
         }
     }
 
-    /** Pagination chat (§AO): 50 moi nhat + older theo cursor. */
-    public static function page(int $limit = 50, int $beforeId = 0, string $type = 'all'): array
+    /** Last message time theo direction (connection card). */
+    public static function lastAt(string $direction): ?string
+    {
+        self::ensureTable();
+        try {
+            $st = db()->prepare("SELECT created_at FROM tg_messages WHERE direction=? ORDER BY id DESC LIMIT 1");
+            $st->execute([$direction]);
+            $r = $st->fetchColumn();
+            return $r ? (string)$r : null;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+
+    /** Pagination chat (§AO): 50 moi nhat + older theo cursor. */    public static function page(int $limit = 50, int $beforeId = 0, string $type = 'all'): array
     {
         self::ensureTable();
         $limit = max(1, min(100, $limit));

@@ -287,13 +287,22 @@ class TelegramSetup
         $text = trim((string)($msg['text'] ?? ''));
         if ($chatId === '' || $text === '') return;
         require_once __DIR__ . '/ConversationService.php';
-        ConversationService::log(ConversationService::IN, $chatId, $text, ['user_id' => $userId]);
+        $isCmd = str_starts_with($text, '/');
+        $testMode = get_setting('tg_chat_test_mode', '1') !== '0';
+        $cmdMode = get_setting('tg_chat_command_mode', '1') === '1';
+        $msgType = $isCmd ? ConversationService::T_COMMAND : ConversationService::T_TEXT;
+        if (($testMode || !$cmdMode) && $isCmd && stripos($text, '/pair') !== 0) {
+            $msgType = ConversationService::T_TEXT;
+        }
+        ConversationService::log(ConversationService::IN, $chatId, $text,
+            ['user_id' => $userId, 'type' => $msgType]);
         require_once __DIR__ . '/PermissionService.php';
         $chk = PermissionService::check($chatId, $userId);
         if (empty($chk['ok']) && ($msg['chat']['type'] ?? '') === 'private') {
             $s = self::onPrivateMessage($msg, (int)($u['update_id'] ?? 0));
             if (!empty($s['asked_confirm']) || self::active() !== null) return;
         }
+        if ($msgType === ConversationService::T_TEXT && $isCmd) return;
         require_once __DIR__ . '/CommandRouter.php';
         $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
         if (($reply['text'] ?? '') !== '') {

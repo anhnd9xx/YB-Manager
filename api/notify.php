@@ -249,7 +249,14 @@ try {
 
         // ---- One-field setup (§1-§2, §12, §15-§16) ----
         case 'tg_status': {
-            json_out(['ok' => true, 'data' => TelegramConfig::publicView()]);
+            $v = TelegramConfig::publicView();
+            require_once __DIR__ . '/../sync/ConversationService.php';
+            require_once __DIR__ . '/../sync/TelegramGateway.php';
+            $v['last_in_at'] = ConversationService::lastAt(ConversationService::IN);
+            $v['last_out_at'] = ConversationService::lastAt(ConversationService::OUT);
+            $v['polling'] = TelegramGateway::connectionState();
+            $v['test_mode'] = get_setting('tg_chat_test_mode', '1') !== '0';
+            json_out(['ok' => true, 'data' => $v]);
             break;
         }
 

@@ -126,10 +126,13 @@ function handle_update(array $u): void
     $text = trim((string)($msg['text'] ?? ''));
     if ($chatId === '' || $text === '') return;
     $isCmd = str_starts_with($text, '/');
+    // Test mode (§13): hien nhu message thuong, KHONG parse command/job/eval/chrome.
+    // Mac dinh ON khi connected. /pair luon route (pairing pre-connection).
+    $testMode = get_setting('tg_chat_test_mode', '1') !== '0';
+    $msgType = $isCmd ? ConversationService::T_COMMAND : ConversationService::T_TEXT;
     // Command Mode (§Q): OFF -> hien nhu tin nhan thuong, khong parse (tru /pair).
     $cmdMode = get_setting('tg_chat_command_mode', '1') === '1';
-    $msgType = $isCmd ? ConversationService::T_COMMAND : ConversationService::T_TEXT;
-    if ($isCmd && !$cmdMode && stripos($text, '/pair') !== 0) {
+    if (($testMode || !$cmdMode) && $isCmd && stripos($text, '/pair') !== 0) {
         $msgType = ConversationService::T_TEXT;
     }
     ConversationService::log(ConversationService::IN, $chatId, $text,
@@ -146,7 +149,7 @@ function handle_update(array $u): void
         }
     }
     if ($msgType === ConversationService::T_TEXT && $isCmd) {
-        return; // command mode OFF: chi luu/hien, khong execute
+        return; // test mode / command mode OFF: chi luu/hien, khong execute
     }
     $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
     send_reply($chatId, $reply, $text);

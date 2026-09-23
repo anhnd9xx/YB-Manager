@@ -10,6 +10,7 @@ function notifyTab(name) {
   if (name === 'reports') notifyLoadReports();
   if (name === 'overview') notifyLoadOverview();
   if (name === 'chat') ntChatRefresh();
+  if (name === 'telegram') ntTestStart();
   if (name === 'telegram' || name === 'reports') {
     if (typeof ntBindAutosave === 'function') ntBindAutosave();
     ntQuietUI();
@@ -61,6 +62,12 @@ async function tgSetupView() {
     if (!r.ok) { el.innerHTML = '<p class="muted">Lỗi tải.</p>'; return; }
     const c = r.data;
     if (c.connected) {
+      const rel = (ts) => {
+        if (!ts) return '—';
+        try { return formatRelativeTime(ts); } catch (e) { return String(ts); }
+      };
+      const pol = c.polling || {};
+      const polOk = pol.state === 'LISTENING';
       el.innerHTML = `<div class="sync-label">Telegram</div>`
         + `<div class="meta-row"><span class="meta-label">Trạng thái</span><span class="meta-value">● Đã kết nối</span></div>`
         + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
@@ -68,14 +75,18 @@ async function tgSetupView() {
         + `<div class="meta-row"><span class="meta-label">Loại</span><span class="meta-value">${escapeHtml(c.chat_type || 'private')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Chat ID</span><span class="meta-value mono">${escapeHtml(c.chat_masked || '')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Điều khiển Tool</span><span class="meta-value">${c.inbound_enabled ? '[ ON ]' : '[ OFF ]'}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Thông báo</span><span class="meta-value">${c.enabled ? '[ ON ]' : '[ OFF ]'}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${polOk ? '● Online' : '● ' + escapeHtml(pol.state || 'Offline')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
         + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">`
         + `<button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi thử</button>`
-        + (c.bot_username ? `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml(c.bot_username)}','_blank')">Mở chat</button>` : '')
+        + (c.bot_username ? `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml(c.bot_username)}','_blank')">Mở Telegram</button>` : '')
         + `<button type="button" class="btn btn-sm" onclick="tgChangeReceiver()">Đổi người nhận</button>`
         + `<button type="button" class="btn btn-sm btn-danger" onclick="tgDisconnect()">Ngắt kết nối</button>`
-        + `</div><div class="hint" id="tg-setup-note"></div>`;
+        + `</div><div class="hint" id="tg-setup-note"></div>`
+        + `<div style="margin-top:8px"><button type="button" class="link-btn" onclick="tgDiagToggle()">Telegram Diagnostics ▾</button>`
+        + `<div id="tg-diag" class="hidden" style="margin-top:4px"></div></div>`;
+      tgDiagLoad();
       return;
     }
     // Chua ket noi: kiem tra session dang mo
@@ -216,6 +227,197 @@ async function tgDisconnect() {
     if (r.ok) { toast('Đã ngắt kết nối', 'success'); tgSetupView(); notifyLoadConfig(); }
     else toast(r.message || 'Lỗi', 'error');
   });
+}
+async function tgDisconnect() {
+  confirmDelete('Ngắt kết nối Telegram?<br><small>Tool sẽ ngừng gửi báo cáo và nhận lệnh.</small>', async () => {
+    const r = await sendJson(api + 'notify.php?action=disconnect', {});
+    if (r.ok) { toast('Đã ngắt kết nối', 'success'); tgSetupView(); notifyLoadConfig(); }
+    else toast(r.message || 'Lỗi', 'error');
+  });
+}
+// ============ CHAT TEST trong tab Telegram (§2-§20) ============
+// Reuse poller + store hien co (khong worker rieng §12). Test mode: hien text.
+const ntTest = { msgs: [], newest: 0, unseen: 0, clearedAt: 0, loading: false, timer: null };
+function ntTestStart() {
+  ntTestBindInput();
+  ntTestPoll();
+  if (ntTest.timer) clearInterval(ntTest.timer);
+  ntTest.timer = setInterval(() => {
+    const pane = $('nt-pane-telegram');
+    if (!pane || pane.classList.contains('hidden') || document.hidden) return;
+    ntTestPoll();
+  }, 3000);
+}
+function ntTestStatus() {
+  const st = $('nt-test-status');
+  if (!st) return;
+  getJson(api + 'notify.php?action=tg_status').then(r => {
+    if (!r.ok) return;
+    const c = r.data;
+    const pol = (c.polling || {}).state || 'STOPPED';
+    if (!c.connected) {
+      st.textContent = '● Chưa kết nối';
+      st.className = 'badge badge-muted';
+    } else if (pol === 'LISTENING') {
+      st.textContent = '● Realtime';
+      st.className = 'badge badge-ok';
+    } else if (pol === 'RECONNECTING' || pol === 'UNHEALTHY') {
+      st.textContent = '◌ Đang kết nối lại';
+      st.className = 'badge badge-warn';
+    } else {
+      st.textContent = '● Mất kết nối';
+      st.className = 'badge badge-err';
+    }
+  }).catch(() => {});
+}
+function ntTestRender() {
+  const el = $('nt-test-list');
+  if (!el) return;
+  const rows = ntTest.msgs.filter(m => !ntTest.clearedAt || m.id > ntTest.clearedAt);
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty-state">💬<br>Chưa có tin nhắn<br><small>Hãy nhắn cho Bot trên Telegram hoặc gửi một tin từ Tool để kiểm tra.</small></div>`;
+    return;
+  }
+  let html = '';
+  let lastDay = '';
+  for (const m of rows) {
+    const day = ntChatDayLabel(ntParseTs(m.created_at));
+    if (day !== lastDay) {
+      html += `<div class="chat-date-sep">${day}</div>`;
+      lastDay = day;
+    }
+    html += ntTestMsgHtml(m);
+  }
+  el.innerHTML = html;
+}
+function ntTestMsgHtml(m) {
+  const inbound = m.direction === 'INBOUND';
+  const who = inbound ? 'Telegram' : 'YT Manager';
+  const ts = ntParseTs(m.created_at);
+  let status = '';
+  if (!inbound) {
+    if (m.status === 'SENT') status = `<div class="chat-status st-ok">✓</div>`;
+    else if (m.status === 'FAILED') status = `<div class="chat-status st-err">! <button type="button" class="btn btn-xs" onclick="ntTestRetry(${m.id})">Thử lại</button></div>`;
+    else status = `<div class="chat-status">◌</div>`;
+  }
+  return `<div class="chat-msg ${inbound ? 'chat-in' : 'chat-out'}" data-mid="${m.id}">`
+    + `<div class="chat-meta"><span>${who}</span>`
+    + `<span title="${ntChatFull(ts)}">${ntChatTime(ts)}</span>${status}</div>`
+    + `<div>${escapeHtml(m.text || '')}</div></div>`;
+}
+function ntTestNearBottom() {
+  const el = $('nt-test-list');
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+async function ntTestPoll() {
+  if (ntTest.loading) return;
+  ntTest.loading = true;
+  ntTestStatus();
+  try {
+    const r = await getJson(api + 'telegram.php?action=chat_page&limit=30&type=TEXT');
+    const rows = ((r.ok && r.data) || []).slice().reverse();
+    const stick = ntTestNearBottom();
+    let added = 0;
+    for (const m of rows) {
+      if (m.id > ntTest.newest && !ntTest.msgs.some(x => x.id === m.id)) {
+        ntTest.msgs.push(m);
+        ntTest.newest = m.id;
+        added++;
+      }
+      const ex = ntTest.msgs.find(x => x.id === m.id);
+      if (ex && ex.status !== m.status) ex.status = m.status;
+    }
+    if (ntTest.msgs.length > 200) ntTest.msgs = ntTest.msgs.slice(-200);
+    if (added > 0) {
+      ntTestRender();
+      if (stick) {
+        const el = $('nt-test-list');
+        if (el) el.scrollTop = el.scrollHeight;
+      } else {
+        ntTest.unseen += added;
+        const n = $('nt-test-new-n');
+        if (n) n.textContent = ntTest.unseen;
+        const b = $('nt-test-new');
+        if (b) b.classList.remove('hidden');
+      }
+    }
+  } catch (e) {
+  }
+  ntTest.loading = false;
+}
+function ntTestJump() {
+  ntTest.unseen = 0;
+  const b = $('nt-test-new');
+  if (b) b.classList.add('hidden');
+  const el = $('nt-test-list');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+function ntTestClear() {
+  ntTest.clearedAt = ntTest.newest;
+  ntTest.unseen = 0;
+  const b = $('nt-test-new');
+  if (b) b.classList.add('hidden');
+  ntTestRender();
+}
+function ntTestBindInput() {
+  const inp = $('nt-test-input');
+  const btn = $('nt-test-send');
+  if (!inp || inp.dataset.ntbound) return;
+  inp.dataset.ntbound = '1';
+  const sync = () => { if (btn) btn.disabled = (inp.value || '').trim() === ''; };
+  inp.addEventListener('input', sync);
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      ntTestSend();
+    }
+  });
+  sync();
+}
+async function sendTestMessage(text) {
+  // (§9) hien SENDING ngay -> gui -> SENT/FAILED. Khong reload.
+  const tempId = -Date.now();
+  ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'SENDING', created_at: new Date().toISOString() });
+  ntTestRender();
+  const el = $('nt-test-list');
+  if (el) el.scrollTop = el.scrollHeight;
+  try {
+    const r = await sendJson(api + 'telegram.php?action=send_text', { text });
+    ntTest.msgs = ntTest.msgs.filter(x => x.id !== tempId);
+    if (r.ok && r.data && r.data.id) {
+      ntTest.msgs.push({ id: r.data.id, direction: 'OUTBOUND', text, status: 'SENT', created_at: new Date().toISOString() });
+      ntTest.newest = Math.max(ntTest.newest, r.data.id);
+    } else {
+      ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'FAILED', created_at: new Date().toISOString(), _retry: true });
+      toast(r.message || 'Không gửi được', 'error');
+    }
+  } catch (e) {
+    ntTest.msgs = ntTest.msgs.filter(x => x.id !== tempId);
+    ntTest.msgs.push({ id: tempId, direction: 'OUTBOUND', text, status: 'FAILED', created_at: new Date().toISOString(), _retry: true });
+    toast('Telegram đang mất kết nối.', 'error');
+  }
+  ntTestRender();
+  if (el) el.scrollTop = el.scrollHeight;
+  ntTestPoll();
+}
+async function ntTestSend() {
+  const inp = $('nt-test-input');
+  const text = (inp.value || '').trim();
+  if (!text) return;
+  inp.value = '';
+  const btn = $('nt-test-send');
+  if (btn) btn.disabled = true;
+  await sendTestMessage(text);
+  if (btn) btn.disabled = (inp.value || '').trim() === '';
+}
+async function ntTestRetry(mid) {
+  const m = ntTest.msgs.find(x => x.id === mid);
+  const text = m ? m.text : '';
+  if (!text) return;
+  ntTest.msgs = ntTest.msgs.filter(x => x.id !== mid);
+  ntTestRender();
+  await sendTestMessage(text);
 }
 async function notifyLoadConfig() {
   // Telegram tab moi: preset + autosave controls (nap tu preset_get)

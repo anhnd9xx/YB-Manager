@@ -484,13 +484,36 @@
           </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-telegram">
-          <div class="nt-grid">
-            <div class="panel" id="tg-setup-panel">
-              <div class="sync-label">Kết nối Telegram</div>
-              <div id="tg-setup-view"><div class="skeleton"></div></div>
+          <div class="nt-tg-grid">
+            <div>
+              <div class="panel" id="tg-setup-panel">
+                <div class="sync-label">Kết nối Telegram</div>
+                <div id="tg-setup-view"><div class="skeleton"></div></div>
+              </div>
             </div>
-            <div class="panel">
-              <div class="sync-label">Cấu hình thông báo <span class="summary-text" id="nt-preset-saved"></span></div>
+            <div class="panel" id="tg-test-panel">
+              <div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
+                <div>
+                  <div class="sync-label" style="margin:0">Chat Test</div>
+                  <div class="hint" style="margin:0">Gửi và nhận tin nhắn trực tiếp để kiểm tra kết nối Telegram.</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <span id="nt-test-status" class="badge badge-muted">…</span>
+                  <button type="button" class="btn btn-xs" onclick="ntTestClear()" title="Chỉ xóa màn hình">Xóa màn hình</button>
+                </div>
+              </div>
+              <div id="nt-test-new" class="hidden" style="text-align:center;margin:6px 0">
+                <button type="button" class="btn btn-xs" onclick="ntTestJump()">↓ <span id="nt-test-new-n">0</span> tin nhắn mới</button>
+              </div>
+              <div id="nt-test-list" class="chat-list chat-test-list"></div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <textarea id="nt-test-input" rows="1" style="flex:1;resize:vertical" placeholder="Nhập tin nhắn để test..."></textarea>
+                <button type="button" class="btn btn-sm btn-primary" id="nt-test-send" onclick="ntTestSend()">Gửi</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Cấu hình thông báo <span class="summary-text" id="nt-preset-saved"></span></div>
               <label>Preset</label>
               <select id="nt-preset" onchange="notifyPresetApply(this.value)">
                 <option value="balanced">Cân bằng</option>
@@ -532,7 +555,6 @@
                 </div>
               </div>
             </div>
-          </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-rules">
           <div class="panel"><div id="nt-rules"><div class="skeleton"></div></div></div>
