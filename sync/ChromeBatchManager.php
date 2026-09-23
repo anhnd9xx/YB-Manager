@@ -517,7 +517,29 @@ class ChromeBatchManager
         }
         $done = ($counts['queued'] === 0 && ($counts['starting'] === 0)
             && ($counts['windows'] === $counts['stable']));
-        if ($done) {
+        if ($done && empty($b['notified'])) {
+            $b['status'] = 'done';
+            $b['notified'] = true;
+            $ms = (int)round((microtime(true) - (float)($b['t0'] ?? microtime(true))) * 1000);
+            try {
+                SyncLogger::info('start_batch', '[START COMPLETE] id=' . $batchId
+                    . ' running=' . $counts['running'] . '/' . $counts['total']
+                    . ' errors=' . $counts['errors'] . ' total=' . $ms . 'ms');
+            } catch (Throwable $e) {
+            }
+            // Event: MỞ PROFILE HOÀN TẤT (§21) — 1 summary
+            try {
+                require_once __DIR__ . '/EventBus.php';
+                $dur = $ms >= 60000 ? intdiv($ms, 60000) . 'm ' . intdiv(($ms % 60000), 1000) . 's' : round($ms / 1000, 1) . 's';
+                EventBus::emit(AppEvent::BATCH_COMPLETED, AppEvent::MOD_BROWSER, AppEvent::SEV_SUCCESS,
+                    'MỞ PROFILE HOÀN TẤT',
+                    "Total: {$counts['total']}\nOpened: {$counts['running']}\nFailed: {$counts['errors']}\nDuration: $dur",
+                    ['batch_id' => $batchId, 'status' => 'SUCCESS',
+                        'data' => ['total' => $counts['total'], 'opened' => $counts['running'],
+                            'failed' => $counts['errors'], 'duration_ms' => $ms]]);
+            } catch (Throwable $e) {
+            }
+        } elseif ($done) {
             $b['status'] = 'done';
             $ms = (int)round((microtime(true) - (float)($b['t0'] ?? microtime(true))) * 1000);
             try {
@@ -766,7 +788,30 @@ class ChromeBatchManager
             }
         }
         $done = $allClosed;
-        if ($done) {
+        if ($done && empty($b['notified'])) {
+            $b['status'] = 'done';
+            $b['notified'] = true;
+            self::setStopActive(false);
+            $ms = (int)round((microtime(true) - $t0) * 1000);
+            try {
+                SyncLogger::info('stop_batch', '[GRACEFUL] batch=' . $batchId . ' closed=' . $closed . '/' . $total);
+                SyncLogger::info('stop_batch', '[STOP COMPLETE] ' . $closed . '/' . $total . ' total=' . $ms . 'ms');
+            } catch (Throwable $e) {
+            }
+            // Event: ĐÓNG PROFILE HOÀN TẤT (§21) — 1 summary (graceful/forced/duration)
+            try {
+                require_once __DIR__ . '/EventBus.php';
+                // Forced fallback: stuck da force-kill trong cac poll truoc
+                $forced = max(0, $total - $closed);
+                EventBus::emit(AppEvent::BATCH_COMPLETED, AppEvent::MOD_BROWSER, AppEvent::SEV_SUCCESS,
+                    'ĐÓNG PROFILE HOÀN TẤT',
+                    "Total: $total\nGraceful: $closed\nForced fallback: $forced\nDuration: " . round($ms / 1000, 1) . 's',
+                    ['batch_id' => $batchId, 'status' => 'SUCCESS',
+                        'data' => ['total' => $total, 'graceful' => $closed,
+                            'forced' => $forced, 'duration_ms' => $ms]]);
+            } catch (Throwable $e) {
+            }
+        } elseif ($done) {
             $b['status'] = 'done';
             self::setStopActive(false);
             $ms = (int)round((microtime(true) - $t0) * 1000);

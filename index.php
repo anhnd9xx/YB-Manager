@@ -36,6 +36,11 @@
         <span>Thống kê & Theo dõi</span>
         <span id="nav-alert-count" class="nav-count hidden"></span>
       </button>
+      <button class="nav-btn" data-view="notify" data-tip="Thông báo & Báo cáo">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5S10.5 3.17 10.5 4v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+        <span>Thông báo</span>
+        <span id="nav-notify-count" class="nav-count hidden"></span>
+      </button>
       <button class="nav-btn" data-view="proxies" data-tip="Proxy">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 12c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm6-1.8C18 6.57 15.35 4 12 4s-6 2.57-6 6.2c0 2.34 1.95 5.44 6 9.14 4.05-3.7 6-6.8 6-9.14zM12 2c4.2 0 8 3.22 8 8.2 0 3.32-2.67 7.25-8 11.8-5.33-4.55-8-8.48-8-11.8C4 5.22 7.8 2 12 2z"/></svg>
         <span>Proxy</span>
@@ -455,6 +460,89 @@
           </div>
           <div class="panel"><div id="mon-history"><div class="skeleton"></div></div></div>
           <div class="pagination" id="mon-history-pg"></div>
+        </div>
+      </section>
+      <!-- ===== VIEW: NOTIFY (Thông báo & Báo cáo) ===== -->
+      <section id="view-notify" class="view">
+        <div class="mon-tabs">
+          <button class="mon-tab active" data-ntab="overview" onclick="notifyTab('overview')">Tổng quan</button>
+          <button class="mon-tab" data-ntab="telegram" onclick="notifyTab('telegram')">Telegram</button>
+          <button class="mon-tab" data-ntab="rules" onclick="notifyTab('rules')">Quy tắc</button>
+          <button class="mon-tab" data-ntab="reports" onclick="notifyTab('reports')">Báo cáo định kỳ</button>
+          <button class="mon-tab" data-ntab="history" onclick="notifyTab('history')">Lịch sử gửi</button>
+        </div>
+        <div class="mon-pane" id="nt-pane-overview">
+          <div class="panel"><div id="nt-kpi" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
+          <div class="panel">
+            <div class="sync-label">Worker</div>
+            <div id="nt-worker" class="muted">—</div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn btn-sm" onclick="notifyWorker(1)">Chạy worker</button>
+              <button class="btn btn-sm" onclick="notifyWorker(0)">Dừng worker</button>
+            </div>
+          </div>
+        </div>
+        <div class="mon-pane hidden" id="nt-pane-telegram">
+          <div class="panel">
+            <div class="sync-label">Kết nối Telegram</div>
+            <label>Bot Token</label>
+            <input type="password" id="nt-token" placeholder="123456:ABC-DEF..." autocomplete="off">
+            <div class="hint" id="nt-token-masked"></div>
+            <label>Chat ID</label>
+            <input type="text" id="nt-chat" placeholder="-100123... / 123456789">
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <button type="button" class="btn btn-sm" onclick="notifyTestConn()">Kiểm tra kết nối</button>
+              <button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi tin nhắn thử</button>
+              <span class="summary-text" id="nt-conn-status"></span>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Gửi theo mức</div>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-enabled" style="width:auto"> Bật Telegram</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-success" style="width:auto"> Thành công</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-warning" style="width:auto"> Cảnh báo</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-error" style="width:auto"> Lỗi</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-critical" style="width:auto"> Nghiêm trọng</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-s-batch" style="width:auto"> Tóm tắt batch</label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-recovery" style="width:auto"> Báo hồi phục (ERROR → bình thường)</label>
+            <div class="win-row" style="margin-top:6px">
+              <div class="win-field"><label>Giờ yên tĩnh từ (không gửi INFO, CRITICAL vẫn gửi)</label><input type="time" id="nt-quiet-start"></div>
+              <div class="win-field"><label>đến</label><input type="time" id="nt-quiet-end"></div>
+            </div>
+            <button type="button" class="btn btn-sm btn-primary" onclick="notifySaveConfig()" style="margin-top:8px">Lưu cấu hình</button>
+          </div>
+        </div>
+        <div class="mon-pane hidden" id="nt-pane-rules">
+          <div class="panel"><div id="nt-rules"><div class="skeleton"></div></div></div>
+        </div>
+        <div class="mon-pane hidden" id="nt-pane-reports">
+          <div class="panel">
+            <div class="sync-label">Báo cáo định kỳ</div>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-daily" style="width:auto"> Báo cáo ngày lúc <input type="time" id="nt-daily-time" value="22:00" style="width:auto"></label>
+            <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-weekly" style="width:auto"> Báo cáo tuần
+              <select id="nt-weekly-day" style="width:auto"><option value="1">Thứ 2</option><option value="2">Thứ 3</option><option value="3">Thứ 4</option><option value="4">Thứ 5</option><option value="5">Thứ 6</option><option value="6">Thứ 7</option><option value="7">Chủ nhật</option></select>
+              lúc <input type="time" id="nt-weekly-time" value="08:00" style="width:auto"></label>
+            <button type="button" class="btn btn-sm btn-primary" onclick="notifySaveConfig()">Lưu lịch</button>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Tạo báo cáo tùy chọn</div>
+            <div class="win-row">
+              <div class="win-field"><label>Từ</label><input type="datetime-local" id="nt-range-start"></div>
+              <div class="win-field"><label>Đến</label><input type="datetime-local" id="nt-range-end"></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button type="button" class="btn btn-sm" onclick="notifyRange()">Tạo báo cáo</button>
+              <button type="button" class="btn btn-sm" onclick="notifyRangeSend()">Tạo + Gửi Telegram</button>
+            </div>
+            <div id="nt-range-out" style="margin-top:8px"></div>
+          </div>
+          <div class="panel">
+            <div class="sync-label">Lịch sử báo cáo</div>
+            <div id="nt-reports"><div class="skeleton"></div></div>
+          </div>
+        </div>
+        <div class="mon-pane hidden" id="nt-pane-history">
+          <div class="panel"><div id="nt-history"><div class="skeleton"></div></div></div>
         </div>
       </section>
       <!-- ===== VIEW: PROXIES ===== -->
@@ -1325,5 +1413,6 @@
 
 <script src="assets/js/app.js?v=20260921i"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
+<script src="assets/js/notify.js?v=20260923a"></script>
 </body>
 </html>

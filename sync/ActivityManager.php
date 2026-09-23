@@ -588,6 +588,14 @@ class ActivityManager
         if (self::isBlocked($port, (string)$reuse)) {
             $detail = !empty($cfg['store_queries']) ? $query : ('qhash=' . substr(md5($query), 0, 8));
             self::record($profileId, self::T_SEARCH, 'google.com', self::R_BLOCKED, $ms(), self::E_BLOCKED, $detail);
+            try {
+                require_once __DIR__ . '/EventBus.php';
+                EventBus::emit(AppEvent::TASK_FAILED, AppEvent::MOD_AUTO_ACTIVITY, AppEvent::SEV_WARNING,
+                    'Auto Activity bị chặn', "Profile #$profileId: Google challenge khi tìm kiếm",
+                    ['profile_id' => $profileId, 'status' => 'FAILED',
+                        'data' => ['task' => self::T_SEARCH, 'domain' => 'google.com']]);
+            } catch (Throwable $e) {
+            }
             return ['ok' => false, 'result' => self::R_BLOCKED, 'error' => self::E_BLOCKED, 'ms' => $ms()];
         }
         $detail = !empty($cfg['store_queries']) ? $query : ('qhash=' . substr(md5($query), 0, 8));

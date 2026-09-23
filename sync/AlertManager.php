@@ -24,8 +24,13 @@ class AlertManager
             $st->execute([$profileId, $type]);
             $ex = $st->fetch();
             if ($ex) {
+                $seen = (int)$ex['seen_count'] + 1;
                 db()->prepare('UPDATE channel_alerts SET last_seen=?, seen_count=?, severity=?, message=? WHERE id=?')
-                    ->execute([$now, (int)$ex['seen_count'] + 1, $severity, mb_substr($message, 0, 255), (int)$ex['id']]);
+                    ->execute([$now, $seen, $severity, mb_substr($message, 0, 255), (int)$ex['id']]);
+                // Escalate: fail nhieu lan -> CRITICAL event (dedup: chi khi vuot nguong) (§22-§23)
+                if ($seen === 3) {
+                    self::emitAlertEvent($profileId, 'CRITICAL', $type, $message, $seen);
+                }
                 return (int)$ex['id'];
             }
             db()->prepare("INSERT INTO channel_alerts (profile_id, severity, type, message, first_seen, last_seen, status) VALUES (?,?, ?, ?, ?, ?, 'OPEN')")
@@ -35,17 +40,50 @@ class AlertManager
                 SyncLogger::warn('alert', "[ALERT] #$profileId $severity/$type: $message", $profileId);
             } catch (Throwable $e) {
             }
+            // Event cho Notification (module PROXY/EVALUATION tuy type) — dedup nho alert key
+            self::emitAlertEvent($profileId, $severity, $type, $message, 1);
             return $id;
         } catch (Throwable $e) {
             return null;
         }
     }
 
+    /** Emit event tu alert (module suy tu type; proxy_error -> PROXY). */
+    private static function emitAlertEvent(int $profileId, string $severity, string $type, string $message, int $seen): void
+    {
+        try {
+            require_once __DIR__ . '/EventBus.php';
+            $module = str_starts_with($type, 'proxy') ? AppEvent::MOD_PROXY : AppEvent::MOD_EVALUATION;
+            $sev = $severity === self::CRITICAL ? AppEvent::SEV_CRITICAL
+                : ($severity === self::INFO ? AppEvent::SEV_INFO : AppEvent::SEV_WARNING);
+            $evType = $severity === self::CRITICAL ? AppEvent::CRITICAL_ALERT : AppEvent::STATUS_CHANGED;
+            EventBus::emit($evType, $module, $sev,
+                $type === 'proxy_error' ? 'Proxy lỗi' : 'Cảnh báo kênh',
+                "Kênh #$profileId: $message" . ($seen > 1 ? " (lần $seen)" : ''),
+                ['profile_id' => $profileId, 'status' => 'OPEN',
+                    'data' => ['alert_type' => $type, 'seen_count' => $seen]]);
+        } catch (Throwable $e) {
+        }
+    }
+
     public static function resolve(int $profileId, string $type): void
     {
         try {
-            db()->prepare("UPDATE channel_alerts SET status='RESOLVED', resolved_at=NOW() WHERE profile_id=? AND type=? AND status='OPEN'")
-                ->execute([$profileId, $type]);
+            $st = db()->prepare("UPDATE channel_alerts SET status='RESOLVED', resolved_at=NOW() WHERE profile_id=? AND type=? AND status='OPEN'");
+            $st->execute([$profileId, $type]);
+            // Recovery notification (§24): ERROR -> HEALTHY (optional setting)
+            if ($st->rowCount() > 0 && get_setting('notify_recovery', '0') === '1') {
+                try {
+                    require_once __DIR__ . '/EventBus.php';
+                    $module = str_starts_with($type, 'proxy') ? AppEvent::MOD_PROXY : AppEvent::MOD_EVALUATION;
+                    EventBus::emit(AppEvent::STATUS_CHANGED, $module, AppEvent::SEV_SUCCESS,
+                        'Đã hoạt động bình thường trở lại',
+                        "✅ Kênh #$profileId đã hoạt động bình thường trở lại",
+                        ['profile_id' => $profileId, 'status' => 'RESOLVED',
+                            'data' => ['alert_type' => $type]]);
+                } catch (Throwable $e) {
+                }
+            }
         } catch (Throwable $e) {
         }
     }

@@ -137,6 +137,31 @@ class ActivityScheduler
             SyncLogger::info('activity', '[SCHEDULER] tick ran=' . $ran . ' skipped=' . count($skipped));
         } catch (Throwable $e) {
         }
+        // Event: AUTO ACTIVITY tick summary (§20) — 1 msg/tick, that qua rules (mac dinh DIGEST)
+        if ($ran > 0) {
+            try {
+                require_once __DIR__ . '/EventBus.php';
+                $ok = 0;
+                $warn = 0;
+                $fail = 0;
+                $tasks = 0;
+                foreach ($results as $one) {
+                    foreach ((array)($one['tasks'] ?? []) as $t) {
+                        $tasks++;
+                        if (in_array($t, ['OPENED', 'REUSED', 'SUCCESS', 'CHECKED', 'CLOSED'], true)) $ok++;
+                        elseif (in_array($t, ['BLOCKED', 'MISSING'], true)) $warn++;
+                        else $fail++;
+                    }
+                }
+                EventBus::emit(AppEvent::BATCH_COMPLETED, AppEvent::MOD_AUTO_ACTIVITY, AppEvent::SEV_SUCCESS,
+                    'AUTO ACTIVITY HOÀN TẤT',
+                    "Profiles: $ran\nSuccess: $ok\nWarning: $warn\nFailed: $fail\nTasks completed: $tasks",
+                    ['status' => 'SUCCESS',
+                        'data' => ['profiles' => $ran, 'success' => $ok, 'warning' => $warn,
+                            'failed' => $fail, 'tasks' => $tasks]]);
+            } catch (Throwable $e) {
+            }
+        }
         return ['ran' => $ran, 'skipped' => $skipped, 'results' => $results];
     }
 

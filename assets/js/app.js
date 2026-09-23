@@ -24,7 +24,7 @@ function storedPerPage(key, fb) {
 const api = 'api/';
 const VIEW_TITLES = {
   dashboard: 'Tổng quan', profiles: 'Kênh', monitoring: 'Thống kê & Theo dõi', proxies: 'Proxy',
-  synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt'
+  synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt', notify: 'Thông báo & Báo cáo'
 };
 
 // ============ INIT ============
@@ -36,13 +36,14 @@ document.addEventListener('DOMContentLoaded', () => {
   checkServer();
   loadSettings(); // trong loadSettings se goi applyAutoRefresh() theo setting
   refreshAll();
+  if (typeof notifyBadge === 'function') notifyBadge();
 });
 
 // Bat/tat refresh dinh ky theo cau hinh auto_refresh (Settings)
 function applyAutoRefresh() {
   if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
   if (settings && settings.auto_refresh !== false) {
-    autoRefreshTimer = setInterval(() => { loadProfiles(); if (document.getElementById('view-synchronize').classList.contains('active')) { loadSyn(false); synLoadDebug(); } }, 15000);
+    autoRefreshTimer = setInterval(() => { loadProfiles(); if (document.getElementById('view-synchronize').classList.contains('active')) { loadSyn(false); synLoadDebug(); } if (typeof notifyBadge === 'function') notifyBadge(); }, 15000);
   }
 }
 
@@ -113,6 +114,7 @@ function switchView(view) {
   if (view === 'synchronize') { loadSyn(true); synLoadDebug(); synLoadLogs(); }
   if (view === 'settings') loadSettings();
   if (view === 'proxies') loadProxies();
+  if (view === 'notify' && typeof notifyRefresh === 'function') notifyRefresh();
   // đóng sidebar trên mobile nếu đang mở
   if (document.body.classList.contains('sidebar-open')) document.body.classList.remove('sidebar-open');
 }

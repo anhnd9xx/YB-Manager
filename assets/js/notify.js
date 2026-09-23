@@ -1,0 +1,226 @@
+// ============ NOTIFY VIEW (Thông báo & Báo cáo) ============
+function notifyTab(name) {
+  document.querySelectorAll('[data-ntab]').forEach(b => b.classList.toggle('active', b.dataset.ntab === name));
+  ['overview', 'telegram', 'rules', 'reports', 'history'].forEach(t => {
+    const el = $('nt-pane-' + t);
+    if (el) el.classList.toggle('hidden', t !== name);
+  });
+  if (name === 'rules') notifyLoadRules();
+  if (name === 'history') notifyLoadHistory();
+  if (name === 'reports') notifyLoadReports();
+  if (name === 'overview') notifyLoadOverview();
+}
+async function notifyRefresh() {
+  notifyTab('overview');
+  notifyBadge();
+}
+async function notifyBadge() {
+  try {
+    const r = await getJson(api + 'notify.php?action=badge');
+    if (!r.ok) return;
+    const el = $('nav-notify-count');
+    if (el) {
+      const n = r.data.badge || 0;
+      el.textContent = n;
+      el.classList.toggle('hidden', !n);
+    }
+  } catch (e) {}
+}
+async function notifyLoadOverview() {
+  try {
+    const [s, b] = await Promise.all([
+      getJson(api + 'notify.php?action=config').catch(() => null),
+      getJson(api + 'activity.php?action=status').catch(() => null),
+    ]);
+    const cfg = (s && s.ok && s.data) || {};
+    const kv = (k, v) => `<div class="mon-kv"><span>${k}</span><strong>${v}</strong></div>`;
+    $('nt-kpi').innerHTML =
+      kv('Telegram', cfg.enabled ? (cfg.has_token ? '● Đã kết nối' : '● Thiếu token') : '● Tắt')
+      + kv('Worker', cfg.worker_running ? '● Đang chạy' : '● Dừng')
+      + kv('Báo cáo ngày', cfg.daily_enabled ? ('Bật (' + escapeHtml(cfg.daily_time || '') + ')') : 'Tắt')
+      + kv('Báo cáo tuần', cfg.weekly_enabled ? 'Bật' : 'Tắt');
+    const w = $('nt-worker');
+    if (w) w.textContent = cfg.worker_running ? 'Worker đang chạy — queue tự gửi.' : 'Worker dừng — notification chờ trong outbox.';
+  } catch (e) {
+    $('nt-kpi').innerHTML = '<div class="empty-state">Không tải được.</div>';
+  }
+  notifyLoadConfig();
+}
+async function notifyLoadConfig() {
+  try {
+    const r = await getJson(api + 'notify.php?action=config');
+    if (!r.ok) return;
+    const c = r.data;
+    $('nt-enabled').checked = !!c.enabled;
+    $('nt-chat').value = c.chat_id || '';
+    $('nt-token-masked').textContent = c.has_token ? ('Đang dùng: ' + c.bot_token_masked) : 'Chưa có token.';
+    $('nt-s-success').checked = !!c.send_success;
+    $('nt-s-warning').checked = !!c.send_warning;
+    $('nt-s-error').checked = !!c.send_error;
+    $('nt-s-critical').checked = !!c.send_critical;
+    $('nt-s-batch').checked = !!c.send_batch_summary;
+    $('nt-recovery').checked = !!c.notify_recovery;
+    $('nt-quiet-start').value = c.quiet_start || '';
+    $('nt-quiet-end').value = c.quiet_end || '';
+    $('nt-daily').checked = !!c.daily_enabled;
+    $('nt-daily-time').value = c.daily_time || '22:00';
+    $('nt-weekly').checked = !!c.weekly_enabled;
+    $('nt-weekly-day').value = String(c.weekly_day || '1');
+    $('nt-weekly-time').value = c.weekly_time || '08:00';
+    const st = $('nt-conn-status');
+    if (st) st.textContent = c.enabled ? (c.has_token ? '● Đã cấu hình' : '● Thiếu token') : '● Chưa bật';
+  } catch (e) {}
+}
+async function notifySaveConfig() {
+  const body = {
+    enabled: $('nt-enabled').checked ? 1 : 0,
+    chat_id: $('nt-chat').value.trim(),
+    send_success: $('nt-s-success').checked ? 1 : 0,
+    send_warning: $('nt-s-warning').checked ? 1 : 0,
+    send_error: $('nt-s-error').checked ? 1 : 0,
+    send_critical: $('nt-s-critical').checked ? 1 : 0,
+    send_batch_summary: $('nt-s-batch').checked ? 1 : 0,
+    notify_recovery: $('nt-recovery').checked ? 1 : 0,
+    quiet_start: $('nt-quiet-start').value,
+    quiet_end: $('nt-quiet-end').value,
+    daily_enabled: $('nt-daily').checked ? 1 : 0,
+    daily_time: $('nt-daily-time').value,
+    weekly_enabled: $('nt-weekly').checked ? 1 : 0,
+    weekly_day: $('nt-weekly-day').value,
+    weekly_time: $('nt-weekly-time').value,
+  };
+  const tok = $('nt-token').value.trim();
+  if (tok) body.bot_token = tok;
+  const r = await sendJson(api + 'notify.php?action=config_save', body);
+  if (r.ok) {
+    $('nt-token').value = '';
+    toast('Đã lưu cấu hình Telegram', 'success');
+    notifyLoadConfig();
+  } else toast(r.message || 'Lỗi lưu', 'error');
+}
+async function notifyTestConn() {
+  const st = $('nt-conn-status');
+  if (st) st.textContent = 'Đang kiểm tra...';
+  const tok = $('nt-token').value.trim();
+  const r = await sendJson(api + 'notify.php?action=test', tok ? { bot_token: tok } : {});
+  if (st) st.textContent = r.ok ? ('● Đã kết nối (' + (r.data.bot || '') + ')') : ('● ' + (r.message || 'Lỗi'));
+  toast(r.ok ? 'Kết nối OK' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+}
+async function notifySendTest() {
+  const r = await sendJson(api + 'notify.php?action=send_test', {});
+  toast(r.ok ? 'Đã gửi thành công' : ('Không gửi được: ' + (r.message || '')), r.ok ? 'success' : 'error');
+}
+const NT_MODE_VN = { OFF: 'Tắt', IMMEDIATE: 'Ngay', DIGEST: 'Gom' };
+async function notifyLoadRules() {
+  const el = $('nt-rules');
+  try {
+    const r = await getJson(api + 'notify.php?action=rules');
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = `<table class="data-table"><thead><tr><th>Module</th><th>Event</th><th>Severity</th><th>Telegram</th><th>Mode</th></tr></thead><tbody>`
+      + rows.map(x => `<tr><td>${escapeHtml(x.module)}</td><td>${escapeHtml(x.event_type)}</td>`
+        + `<td>${escapeHtml(x.severity)}</td>`
+        + `<td><input type="checkbox" ${x.enabled ? 'checked' : ''} onchange="notifyRuleSave(${x.id}, this)"></td>`
+        + `<td><select onchange="notifyRuleSave(${x.id}, null, this)">`
+        + ['OFF', 'IMMEDIATE', 'DIGEST'].map(m => `<option value="${m}" ${x.mode === m ? 'selected' : ''}>${NT_MODE_VN[m]}</option>`).join('')
+        + `</select></td></tr>`).join('') + `</tbody></table>`;
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải rules.</div>';
+  }
+}
+async function notifyRuleSave(id, cb, sel) {
+  const row = cb ? cb.closest('tr') : sel.closest('tr');
+  const enabled = row.querySelector('input[type=checkbox]').checked ? 1 : 0;
+  const mode = row.querySelector('select').value;
+  const r = await sendJson(api + 'notify.php?action=rule_save', { id, mode, enabled });
+  if (!r.ok) toast('Lỗi lưu rule', 'error');
+}
+async function notifyLoadHistory() {
+  const el = $('nt-history');
+  try {
+    const r = await getJson(api + 'notify.php?action=history&limit=100');
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? `<table class="data-table"><thead><tr><th>Thời gian</th><th>Module</th><th>Tiêu đề</th><th>Trạng thái</th><th></th></tr></thead><tbody>`
+        + rows.map(h => `<tr><td class="mono">${escapeHtml((h.created_at || '').slice(5, 16))}</td>`
+          + `<td>${escapeHtml(h.module || '')}</td>`
+          + `<td><small>${escapeHtml((h.ev_title || h.message || '').slice(0, 80))}</small></td>`
+          + `<td>${escapeHtml(h.status)}${h.attempt_count > 1 ? ` <small class="muted">Retry ${h.attempt_count}/3</small>` : ''}`
+          + (h.last_error ? `<br><small class="muted">${escapeHtml(h.last_error)}</small>` : '') + `</td>`
+          + `<td>${h.status === 'PENDING' ? `<button class="btn btn-xs" onclick="notifyCancel('${h.notification_id}')">Hủy</button>` : ''}</td></tr>`).join('')
+        + `</tbody></table>`
+      : '<div class="empty-state">Chưa có notification nào.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+async function notifyCancel(id) {
+  await sendJson(api + 'notify.php?action=cancel', { id });
+  notifyLoadHistory();
+}
+async function notifyWorker(on) {
+  const r = await sendJson(api + `notify.php?action=monitor_${on ? 'start' : 'stop'}`, {});
+  toast(r.ok ? (on ? 'Worker đang chạy' : 'Đã dừng worker') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  notifyLoadOverview();
+}
+function notifyDocHtml(doc) {
+  if (!doc) return '';
+  let h = `<div><strong>${escapeHtml(doc.title || '')}</strong></div>`;
+  if (doc.summary) h += `<div>${escapeHtml(doc.summary)}</div>`;
+  for (const s of (doc.sections || [])) {
+    h += `<div class="sync-label" style="margin-top:6px">${escapeHtml(s.heading || '')}</div>`;
+    h += (s.lines || []).map(l => `<div>• ${escapeHtml(l)}</div>`).join('');
+  }
+  return h;
+}
+async function notifyRange() {
+  const s = ($('nt-range-start').value || '').replace('T', ' ') + ':00';
+  const e = ($('nt-range-end').value || '').replace('T', ' ') + ':00';
+  if (!$('nt-range-start').value || !$('nt-range-end').value) { toast('Chọn từ/đến', 'error'); return; }
+  const r = await sendJson(api + 'notify.php?action=report_custom', { start: s.slice(0, 19), end: e.slice(0, 19) });
+  if (r.ok) {
+    $('nt-range-out').innerHTML = notifyDocHtml(r.data)
+      + `<div style="margin-top:8px"><button class="btn btn-sm" onclick="notifyPreviewSend()">Gửi Telegram</button></div>`;
+    window.__ntLastDoc = r.data;
+    notifyLoadReports();
+  } else toast(r.message || 'Lỗi', 'error');
+}
+async function notifyRangeSend() {
+  await notifyRange();
+  await notifyPreviewSend();
+}
+async function notifyPreviewSend() {
+  // Gui bao cao vua tao: tim report moi nhat trong lich su
+  try {
+    const r = await getJson(api + 'notify.php?action=reports&limit=1');
+    const rep = (r.ok && r.data && r.data[0]) ? r.data[0] : null;
+    if (!rep) { toast('Chưa có báo cáo', 'error'); return; }
+    const s = await sendJson(api + 'notify.php?action=report_send', { report_id: rep.report_id });
+    toast(s.ok ? 'Đã xếp hàng gửi' : (s.message || 'Lỗi'), s.ok ? 'success' : 'error');
+  } catch (e) {
+    toast('Lỗi', 'error');
+  }
+}
+async function notifyLoadReports() {
+  const el = $('nt-reports');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'notify.php?action=reports&limit=20');
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? `<table class="data-table"><thead><tr><th>Loại</th><th>Phạm vi</th><th>Tạo lúc</th><th>Gửi</th><th></th></tr></thead><tbody>`
+        + rows.map(x => `<tr><td>${escapeHtml(x.type)}</td>`
+          + `<td class="mono"><small>${escapeHtml((x.range_start || '').slice(0, 16))} → ${(x.range_end || '').slice(0, 16)}</small></td>`
+          + `<td class="mono">${escapeHtml((x.generated_at || '').slice(5, 16))}</td>`
+          + `<td>${escapeHtml(x.delivery_status)}</td>`
+          + `<td><button class="btn btn-xs" onclick="notifyResend('${x.report_id}')">Gửi Telegram</button></td></tr>`).join('')
+        + `</tbody></table>`
+      : '<div class="empty-state">Chưa có báo cáo.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+async function notifyResend(reportId) {
+  const r = await sendJson(api + 'notify.php?action=report_send', { report_id: reportId });
+  toast(r.ok ? 'Đã xếp hàng gửi' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  notifyLoadReports();
+}

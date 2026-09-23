@@ -1184,6 +1184,54 @@ class ChannelEvaluationManager
                 SyncLogger::info('evaluation', "[EVAL BATCH] id=$batchId done total=" . count($ids) . " ok=$completed partial=$partial fail=$failed");
             } catch (Throwable $e) {
             }
+            // Event: 1 batch summary (khong 1 msg/profile) (§17, §19, §49)
+            try {
+                require_once __DIR__ . '/EventBus.php';
+                $agg = ['total' => count($ids), 'active' => 0, 'signed_in_no_channel' => 0,
+                    'need_login' => 0, 'verification' => 0, 'technical_errors' => 0, 'partial' => $partial];
+                // Dem tu batch file done_ids? dung results tich luy: doc last_known hien tai
+                try {
+                    $in = implode(',', array_fill(0, count($ids), '?'));
+                    $st = db()->prepare("SELECT eval_status, channel_presence, last_attempt_status
+                        FROM account_states WHERE profile_id IN ($in)");
+                    $st->execute($ids);
+                    foreach ($st->fetchAll() as $row) {
+                        $es = (string)($row['eval_status'] ?? '');
+                        if ($es === 'ACTIVE') $agg['active']++;
+                        elseif ($es === 'LOGIN_REQUIRED') $agg['need_login']++;
+                        elseif ($es === 'VERIFICATION_REQUIRED') $agg['verification']++;
+                        if (($row['channel_presence'] ?? '') === 'NO_CHANNEL' && $es === 'ACTIVE') {
+                            $agg['signed_in_no_channel']++;
+                        }
+                        if (in_array($row['last_attempt_status'] ?? '', ['FAILED', 'TIMEOUT'], true)) {
+                            $agg['technical_errors']++;
+                        }
+                    }
+                } catch (Throwable $e2) {
+                }
+                $dur = '';
+                try {
+                    $bst = db()->prepare('SELECT created_at FROM eval_batches WHERE batch_id=?');
+                    $bst->execute([$batchId]);
+                    $bc = $bst->fetchColumn();
+                    if ($bc) {
+                        $sec = max(0, time() - strtotime((string)$bc));
+                        $dur = $sec >= 60 ? intdiv($sec, 60) . 'm ' . ($sec % 60) . 's' : $sec . 's';
+                    }
+                } catch (Throwable $e2) {
+                }
+                EventBus::emit(AppEvent::BATCH_COMPLETED, AppEvent::MOD_EVALUATION,
+                    $failed > 0 && $completed === 0 ? AppEvent::SEV_ERROR : AppEvent::SEV_SUCCESS,
+                    'ĐÁNH GIÁ KÊNH HOÀN TẤT',
+                    "Tổng: " . count($ids) . "\nHoạt động: {$agg['active']}\n"
+                    . "Đã login, chưa có kênh: {$agg['signed_in_no_channel']}\n"
+                    . "Cần login: {$agg['need_login']}\nCần xác minh: {$agg['verification']}\n"
+                    . "Lỗi kiểm tra: {$agg['technical_errors']}" . ($dur !== '' ? "\nDuration: $dur" : ''),
+                    ['batch_id' => $batchId,
+                        'status' => $failed > 0 && $completed === 0 ? 'FAILED' : 'SUCCESS',
+                        'data' => $agg + ['failed' => $failed, 'completed' => $completed]]);
+            } catch (Throwable $e) {
+            }
         }
         self::saveBatch($batchId, $patch);
         // Watchdog: CHECKING qua 30s (treo tu batch cu/restart) -> revert last_known
