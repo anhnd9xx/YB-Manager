@@ -30,15 +30,32 @@ class TelegramProvider
         $cfg = self::configured();
         if (!$cfg['ok']) return ['ok' => false, 'error' => 'not_configured'];
         $chatId = $chatId ?? $cfg['chat_id'];
+        return self::sendTo($chatId, $text);
+    }
+
+    /**
+     * Send voi destination explicit (§16): (chat_id, text).
+     * Token runtime duy nhat tu ConfigService (§17). Khong log token.
+     * Loi tra RAW (error code); friendly() chi goi 1 lan o edge (§12).
+     * @return array{ok, error?, description?}
+     */
+    public static function sendTo(string $chatId, string $text): array
+    {
+        require_once __DIR__ . '/TelegramConfigService.php';
+        $token = TelegramConfigService::get_bot_token();
+        if ($token === '' || trim($chatId) === '') {
+            return ['ok' => false, 'error' => 'not_configured'];
+        }
         foreach (self::split($text) as $i => $part) {
-            $r = self::post($cfg['token'], 'sendMessage', [
-                'chat_id' => $chatId,
+            $r = self::post($token, 'sendMessage', [
+                'chat_id' => trim($chatId),
                 'text' => $part,
                 'parse_mode' => 'HTML',
                 'disable_web_page_preview' => true,
             ]);
             if (empty($r['ok'])) {
-                return ['ok' => false, 'error' => self::friendly($r)];
+                return ['ok' => false, 'error' => $r['error'] ?? 'send_failed',
+                    'description' => $r['description'] ?? ''];
             }
             if ($i > 0) usleep(400000); // throttle giua cac part
         }

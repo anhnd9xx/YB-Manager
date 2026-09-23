@@ -378,28 +378,11 @@ class TelegramSetup
             }
             db()->prepare("UPDATE tg_setup_sessions SET status='DONE' WHERE session_id=?")
                 ->execute([$sessionId]);
-            // Persist ADMIN (§11)
-            TelegramConfig::set('primary_chat_id', $chatId);
-            TelegramConfig::set('primary_user_id', $userId);
-            TelegramConfig::set('primary_username', (string)($sess['candidate_username'] ?? ''));
-            TelegramConfig::set('primary_display_name', (string)($sess['candidate_display'] ?? ''));
-            TelegramConfig::set('primary_chat_type', 'private');
-            TelegramConfig::set('role', 'ADMIN');
-            TelegramConfig::set('paired_at', date('Y-m-d H:i:s'));
-            TelegramConfig::set('enabled', '1');
-            TelegramConfig::set('inbound_enabled', '1');
-            TelegramConfig::set('outbound_enabled', '1');
-            TelegramConfig::setStatus('CONNECTED');
-            // Allowlist (dong bo de router nhan): thay receiver cu
-            require_once __DIR__ . '/PermissionService.php';
-            $list = PermissionService::allowed();
-            $kept = [];
-            foreach ($list as $a) {
-                if (($a['role'] ?? '') === 'ADMIN' && (string)$a['chat_id'] !== $chatId) continue; // replace
-                $kept[] = $a;
-            }
-            $kept[] = ['chat_id' => $chatId, 'user_id' => $userId, 'role' => 'ADMIN'];
-            PermissionService::saveAllowed($kept);
+            // Persist qua service chung (single path) (§15)
+            require_once __DIR__ . '/TelegramConfigService.php';
+            TelegramConfigService::save_pairing($chatId, $userId,
+                (string)($sess['candidate_username'] ?? ''),
+                (string)($sess['candidate_display'] ?? ''), 'telegram');
             $welcome = "✅ <b>YT Manager đã kết nối thành công.</b>\n\nBạn có thể dùng:\n\n/status\n/help\n/jobs\n\nTool đã sẵn sàng nhận báo cáo và lệnh.";
             TelegramGateway::sendMessage($chatId, $welcome);
             try {
@@ -430,6 +413,41 @@ class TelegramSetup
             return ['ok' => true, 'text' => 'Đã từ chối. Đang chờ yêu cầu khác...'];
         } catch (Throwable $e) {
             return ['ok' => false, 'text' => '❌ Lỗi.'];
+        }
+    }
+
+    /**
+     * Tool-side confirm (§21 "Dung chat nay"): ADMIN local UI xac nhan candidate.
+     * Chi khi session WAITING_CONFIRM. Log confirmed_by=tool-ui.
+     */
+    public static function confirmFromTool(string $sessionId): array
+    {
+        try {
+            self::ensureTable();
+            $st = db()->prepare("SELECT * FROM tg_setup_sessions WHERE session_id=? AND status='WAITING_CONFIRM'");
+            $st->execute([$sessionId]);
+            $sess = $st->fetch();
+            if (!$sess) return ['ok' => false, 'text' => '⌛ Yêu cầu đã hết hạn.'];
+            if (empty($sess['candidate_chat_id'])) {
+                return ['ok' => false, 'text' => 'Chưa có candidate.'];
+            }
+            db()->prepare("UPDATE tg_setup_sessions SET status='DONE' WHERE session_id=?")
+                ->execute([$sessionId]);
+            require_once __DIR__ . '/TelegramConfigService.php';
+            TelegramConfigService::save_pairing((string)$sess['candidate_chat_id'],
+                (string)($sess['candidate_user_id'] ?? ''),
+                (string)($sess['candidate_username'] ?? ''),
+                (string)($sess['candidate_display'] ?? ''), 'tool-ui');
+            require_once __DIR__ . '/TelegramGateway.php';
+            TelegramGateway::sendMessage((string)$sess['candidate_chat_id'],
+                "✅ <b>YT Manager đã kết nối thành công.</b>\n\nBạn có thể dùng:\n\n/status\n/help\n/jobs");
+            return ['ok' => true, 'text' => 'Đã ghép nối.'];
+        } catch (Throwable $e) {
+            try {
+                SyncLogger::error('telegram', 'tool confirm loi', null, $e);
+            } catch (Throwable $e2) {
+            }
+            return ['ok' => false, 'text' => 'Không gửi được tin nhắn Telegram.'];
         }
     }
 }

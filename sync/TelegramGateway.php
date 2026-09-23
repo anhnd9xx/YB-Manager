@@ -72,7 +72,9 @@ class TelegramGateway
 {
     public static function transport(): TelegramTransport
     {
-        $token = trim((string)get_setting('notify_bot_token', ''));
+        // Runtime token duy nhat tu ConfigService (§17)
+        require_once __DIR__ . '/TelegramConfigService.php';
+        $token = TelegramConfigService::get_bot_token();
         $mode = get_setting('notify_transport', 'polling');
         if ($mode === 'webhook') return new WebhookTransport();
         return new LongPollingTransport($token);

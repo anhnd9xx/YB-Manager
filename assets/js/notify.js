@@ -135,8 +135,18 @@ function tgSetupWaiting(sess, info) {
   const el = $('tg-setup-view');
   const bot = (info && info.bot_username) ? '@' + info.bot_username : 'bot';
   const step = sess.status === 'WAITING_CONFIRM' ? 'confirm' : 'wait';
-  const cand = sess.candidate_display || sess.candidate_username
-    ? `<div style="margin-top:6px">✓ Đã nhận tin nhắn Telegram${sess.candidate_display ? ' từ <strong>' + escapeHtml(sess.candidate_display) + '</strong>' : ''}</div>` : '';
+  const hasCand = !!(sess.candidate_display || sess.candidate_username);
+  // Candidate view gon (§19): phat hien + san sang + cho xac nhan + dung chat nay
+  const cand = hasCand
+    ? `<div style="margin-top:8px"><div class="sync-label">Telegram</div>`
+      + `<div class="meta-row"><span class="meta-label">Phát hiện</span><span class="meta-value"><strong>${escapeHtml(sess.candidate_display || sess.candidate_username || '?')}</strong></span></div>`
+      + `<div class="meta-row"><span class="meta-label">Trạng thái</span><span class="meta-value">● Chat Test sẵn sàng</span></div>`
+      + `<div class="meta-row"><span class="meta-label">Ghép quản trị</span><span class="meta-value">◌ Chờ xác nhận</span></div>`
+      + `<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">`
+      + `<button type="button" class="btn btn-sm btn-primary" onclick="tgUseChat('${sess.session_id || ''}')">✓ Dùng chat này</button>`
+      + `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml((info && info.bot_username) || '')}','_blank')">Mở Telegram</button>`
+      + `</div></div>`
+    : '';
   el.innerHTML = `<div class="sync-label">Kết nối Telegram</div>`
     + tgSetupSteps(step)
     + `<div style="margin-top:8px">✓ Bot Token hợp lệ<br>Bot: <strong>${escapeHtml(bot)}</strong></div>`
@@ -157,6 +167,11 @@ function tgSetupWaiting(sess, info) {
     if (pane && !pane.classList.contains('hidden')) tgSetupView();
   }, 4000);
 }
+async function tgUseChat(sid) {
+  const r = await sendJson(api + 'notify.php?action=pair_confirm_tool', { session_id: sid });
+  toast(r.ok ? 'Đã ghép nối.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  tgSetupView();
+}
 function tgDiagToggle() {
   const el = $('tg-diag');
   if (el) el.classList.toggle('hidden');
@@ -165,17 +180,32 @@ async function tgDiagLoad() {
   const el = $('tg-diag');
   if (!el) return;
   try {
-    const r = await getJson(api + 'notify.php?action=setup_diag');
-    if (!r.ok) return;
+    const [r, t] = await Promise.all([
+      getJson(api + 'notify.php?action=setup_diag').catch(() => null),
+      getJson(api + 'notify.php?action=tg_status').catch(() => null),
+    ]);
+    if (!r || !r.ok) return;
     const d = r.data;
     const row = (k, v) => `<div class="meta-row"><span class="meta-label">${k}</span><span class="meta-value">${v}</span></div>`;
     const st = d.polling || {};
+    const tdata = (t && t.ok && t.data) || {};
+    const mask = (s) => {
+      s = String(s || '');
+      return s.length <= 4 ? '••••' : '••••••' + s.slice(-4);
+    };
     el.innerHTML = row('Bot', escapeHtml((d.bot && d.bot.username ? '@' + d.bot.username : '?')))
+      + row('Transport', escapeHtml(tdata.transport || '?'))
+      + row('Pairing', escapeHtml(tdata.pairing || '?'))
       + row('Gateway', d.token ? 'RUNNING' : 'STOPPED')
       + row('Polling', escapeHtml(st.state || 'STOPPED'))
       + row('Webhook', d.webhook && d.webhook.active ? 'ACTIVE ⚠' : 'NONE')
       + row('Last poll', st.last_poll_completed_at ? 'vừa xong' : '—')
       + row('Last update', escapeHtml(st.last_update_at || 'chưa có'))
+      + row('Primary chat', tdata.effective_chat && tdata.effective_chat.source === 'primary' ? mask((tdata || {}).chat_masked || '') : 'NONE')
+      + row('Candidate chat', (tdata.setup_session && (tdata.setup_session.candidate_display || tdata.setup_session.candidate_username))
+        ? escapeHtml(tdata.setup_session.candidate_display || tdata.setup_session.candidate_username) : 'NONE')
+      + row('Inbound', tdata.last_in_at ? escapeHtml(tdata.last_in_at) : '—')
+      + row('Outbound', tdata.last_out_at ? escapeHtml(tdata.last_out_at) : '—')
       + row('Pair session', escapeHtml((d.session && d.session.status) || '—'))
       + (st.last_error ? row('Lỗi', escapeHtml(friendlyPollErr(st.last_error))) : '');
   } catch (e) {}
@@ -254,21 +284,35 @@ function ntTestStatus() {
   getJson(api + 'notify.php?action=tg_status').then(r => {
     if (!r.ok) return;
     const c = r.data;
-    const pol = (c.polling || {}).state || 'STOPPED';
-    if (!c.connected) {
-      st.textContent = '● Chưa kết nối';
-      st.className = 'badge badge-muted';
-    } else if (pol === 'LISTENING') {
-      st.textContent = '● Realtime';
-      st.className = 'badge badge-ok';
-    } else if (pol === 'RECONNECTING' || pol === 'UNHEALTHY') {
-      st.textContent = '◌ Đang kết nối lại';
-      st.className = 'badge badge-warn';
-    } else {
+    // Badge 4 trang thai (§7): transport OFFLINE / ONLINE-cho / candidate / paired
+    if (c.transport === 'OFFLINE' || c.transport === 'ERROR') {
       st.textContent = '● Mất kết nối';
       st.className = 'badge badge-err';
+    } else if (c.pairing === 'PAIRED') {
+      st.textContent = '● Đã kết nối';
+      st.className = 'badge badge-ok';
+    } else if (c.effective_chat) {
+      st.textContent = '● Chat Test sẵn sàng';
+      st.className = 'badge badge-ok';
+    } else {
+      st.textContent = '◌ Chờ tin nhắn Telegram';
+      st.className = 'badge badge-warn';
     }
+    ntTestSendState(!!c.effective_chat);
   }).catch(() => {});
+}
+function ntTestSendState(canSend) {
+  window.__ntCanSend = !!canSend;
+  const inp = $('nt-test-input');
+  const btn = $('nt-test-send');
+  if (!btn) return;
+  const hasText = inp && (inp.value || '').trim() !== '';
+  btn.disabled = !(hasText && canSend);
+  if (btn && !canSend) {
+    btn.title = 'Hãy nhắn một tin cho Bot trước.';
+  } else if (btn) {
+    btn.title = '';
+  }
 }
 function ntTestRender() {
   const el = $('nt-test-list');
@@ -365,15 +409,16 @@ function ntTestBindInput() {
   const btn = $('nt-test-send');
   if (!inp || inp.dataset.ntbound) return;
   inp.dataset.ntbound = '1';
-  const sync = () => { if (btn) btn.disabled = (inp.value || '').trim() === ''; };
-  inp.addEventListener('input', sync);
+  inp.addEventListener('input', () => {
+    if (btn) btn.disabled = (inp.value || '').trim() === '' || !window.__ntCanSend;
+  });
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       ntTestSend();
     }
   });
-  sync();
+  if (btn) btn.disabled = true;
 }
 async function sendTestMessage(text) {
   // (§9) hien SENDING ngay -> gui -> SENT/FAILED. Khong reload.

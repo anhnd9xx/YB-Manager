@@ -17,6 +17,8 @@ require_once __DIR__ . '/../sync/CommandRouter.php';
 require_once __DIR__ . '/../sync/CommandRegistry.php';
 require_once __DIR__ . '/../sync/ConversationService.php';
 require_once __DIR__ . '/../sync/TelegramGateway.php';
+require_once __DIR__ . '/../sync/TelegramConfig.php';
+require_once __DIR__ . '/../sync/TelegramConfigService.php';
 require_once __DIR__ . '/../sync/PairingService.php';
 require_once __DIR__ . '/../sync/JobManager.php';
 
@@ -129,11 +131,6 @@ try {
             break;
         }
 
-        case 'conversation': {
-            json_out(['ok' => true, 'data' => ConversationService::recent((int)($_GET['limit'] ?? 100))]);
-            break;
-        }
-
         case 'chat_page': {
             // Pagination (§AO): limit + before_id cursor + type filter
             $type = (string)($_GET['type'] ?? 'all');
@@ -143,28 +140,41 @@ try {
         }
 
         case 'send_text': {
-            // Chat test 2 chieu tu UI (§F): gui text thuong (khong parse command).
-            // Status QUEUED -> SENDING -> SENT/FAILED (§I). Offline: FAILED + giu draft o client.
+            // Chat test 2 chieu tu UI (§F, §9): text thuong, khong parse command.
+            // Chat dich: primary (paired) hoac candidate (dang pairing) (§5).
+            // Status QUEUED -> SENDING -> SENT/FAILED. Loi friendly, log stack dev (§12).
             $b = $method === 'GET' ? $_GET : json_body();
             $text = trim((string)($b['text'] ?? ''));
             if ($text === '') json_out(['ok' => false, 'message' => 'Trống'], 400);
             if (mb_strlen($text) > 4000) json_out(['ok' => false, 'message' => 'Tin nhắn quá dài (tối đa 4000 ký tự)'], 400);
-            $dest = TelegramConfig::primaryChatId();
-            if ($dest === '') json_out(['ok' => false, 'message' => 'Chưa ghép nối Telegram'], 400);
-            require_once __DIR__ . '/../sync/ConversationService.php';
-            $rowId = ConversationService::logOutbound($dest, $text, ['source' => 'UI', 'status' => 'SENDING']);
-            // Split an toan o provider (§O)
-            $r = TelegramProvider::sendMessage($text, $dest);
-            ConversationService::setStatus($rowId, !empty($r['ok']) ? 'SENT' : 'FAILED',
-                $r['ok'] ? null : TelegramProvider::friendly($r));
-            json_out(!empty($r['ok'])
-                ? ['ok' => true, 'data' => ['id' => $rowId, 'status' => 'SENT']]
-                : ['ok' => false, 'message' => TelegramProvider::friendly($r), 'data' => ['id' => $rowId]]);
+            try {
+                $eff = TelegramConfigService::get_effective_test_chat();
+                if ($eff === null) {
+                    json_out(['ok' => false,
+                        'message' => "Chưa tìm thấy Telegram nhận tin.\nHãy nhắn một tin cho Bot trước."], 400);
+                }
+                $dest = (string)$eff['chat_id'];
+                require_once __DIR__ . '/../sync/ConversationService.php';
+                $rowId = ConversationService::logOutbound($dest, $text, ['source' => 'UI', 'status' => 'SENDING']);
+                $r = TelegramProvider::sendTo($dest, $text);
+                ConversationService::setStatus($rowId, !empty($r['ok']) ? 'SENT' : 'FAILED',
+                    $r['ok'] ? null : TelegramProvider::friendly($r));
+                json_out(!empty($r['ok'])
+                    ? ['ok' => true, 'data' => ['id' => $rowId, 'status' => 'SENT']]
+                    : ['ok' => false, 'message' => 'Không gửi được tin nhắn Telegram.',
+                        'data' => ['id' => $rowId]]);
+            } catch (Throwable $e) {
+                try {
+                    SyncLogger::error('telegram', 'send_text loi: ' . get_class($e), null, $e);
+                } catch (Throwable $e2) {
+                }
+                json_out(['ok' => false, 'message' => 'Không gửi được tin nhắn Telegram.'], 500);
+            }
             break;
         }
 
         case 'resend': {
-            // [Thử lại] tin FAILED (§I, §AN)
+            // [Thử lại] tin FAILED (§11): dung message.chat_id hoac effective hien tai.
             $b = $method === 'GET' ? $_GET : json_body();
             $id = (int)($b['id'] ?? 0);
             try {
@@ -173,14 +183,27 @@ try {
                 $st->execute([$id]);
                 $row = $st->fetch();
                 if (!$row) json_out(['ok' => false, 'message' => 'Không thấy tin nhắn'], 404);
+                $dest = trim((string)($row['chat_id'] ?? ''));
+                if ($dest === '') {
+                    $eff = TelegramConfigService::get_effective_test_chat();
+                    if ($eff === null) {
+                        json_out(['ok' => false,
+                            'message' => "Chưa tìm thấy Telegram nhận tin.\nHãy nhắn một tin cho Bot trước."], 400);
+                    }
+                    $dest = (string)$eff['chat_id'];
+                }
                 ConversationService::setStatus($id, 'SENDING');
-                $r = TelegramProvider::sendMessage((string)($row['text'] ?? ''), (string)($row['chat_id'] ?? ''));
+                $r = TelegramProvider::sendTo($dest, (string)($row['text'] ?? ''));
                 ConversationService::setStatus($id, !empty($r['ok']) ? 'SENT' : 'FAILED',
                     $r['ok'] ? null : TelegramProvider::friendly($r));
                 json_out(!empty($r['ok']) ? ['ok' => true, 'data' => ['status' => 'SENT']]
-                    : ['ok' => false, 'message' => TelegramProvider::friendly($r)]);
+                    : ['ok' => false, 'message' => 'Không gửi được tin nhắn Telegram.']);
             } catch (Throwable $e) {
-                json_out(['ok' => false, 'message' => 'Lỗi'], 500);
+                try {
+                    SyncLogger::error('telegram', 'resend loi: ' . get_class($e), null, $e);
+                } catch (Throwable $e2) {
+                }
+                json_out(['ok' => false, 'message' => 'Không gửi được tin nhắn Telegram.'], 500);
             }
             break;
         }

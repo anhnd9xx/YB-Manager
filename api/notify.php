@@ -252,10 +252,24 @@ try {
             $v = TelegramConfig::publicView();
             require_once __DIR__ . '/../sync/ConversationService.php';
             require_once __DIR__ . '/../sync/TelegramGateway.php';
+            require_once __DIR__ . '/../sync/TelegramConfigService.php';
             $v['last_in_at'] = ConversationService::lastAt(ConversationService::IN);
             $v['last_out_at'] = ConversationService::lastAt(ConversationService::OUT);
             $v['polling'] = TelegramGateway::connectionState();
             $v['test_mode'] = get_setting('tg_chat_test_mode', '1') !== '0';
+            // Transport + pairing tach rieng (§6)
+            $v['transport'] = TelegramConfigService::transport_status();
+            $v['pairing'] = TelegramConfigService::pairing_status();
+            $eff = TelegramConfigService::get_effective_test_chat();
+            $v['effective_chat'] = $eff ? ['source' => $eff['source'],
+                'display_name' => $eff['display_name']] : null;
+            $sess = TelegramSetup::active();
+            $v['setup_session'] = $sess ? [
+                'session_id' => $sess['session_id'], 'status' => $sess['status'],
+                'candidate_display' => $sess['candidate_display'] ?? null,
+                'candidate_username' => $sess['candidate_username'] ?? null,
+                'candidate_count' => (int)($sess['candidate_count'] ?? 0),
+                'expires_at' => $sess['expires_at'] ?? null] : null;
             json_out(['ok' => true, 'data' => $v]);
             break;
         }
@@ -301,6 +315,21 @@ try {
             $b = $method === 'GET' ? $_GET : json_body();
             TelegramSetup::cancel((string)($b['session_id'] ?? ''));
             json_out(['ok' => true]);
+            break;
+        }
+
+        case 'pair_confirm_tool': {
+            // "Dung chat nay" tu UI (§21): ADMIN local xac nhan candidate.
+            $b = $method === 'GET' ? $_GET : json_body();
+            $sid = (string)($b['session_id'] ?? '');
+            if ($sid === '') {
+                $sess = TelegramSetup::active();
+                $sid = $sess ? (string)($sess['session_id'] ?? '') : '';
+            }
+            if ($sid === '') json_out(['ok' => false, 'message' => 'Không có yêu cầu nào đang chờ'], 400);
+            $r = TelegramSetup::confirmFromTool($sid);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['paired' => true]]
+                : ['ok' => false, 'message' => $r['text'] ?? 'Lỗi']);
             break;
         }
 

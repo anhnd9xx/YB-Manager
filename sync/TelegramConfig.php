@@ -88,6 +88,71 @@ class TelegramConfig
         return self::get('primary_user_id', '');
     }
 
+    /**
+     * Effective test chat (§5, §8): paired -> primary; chua paired nhung
+     * setup session co candidate -> candidate (CHI cho CHAT TEST, khong cho
+     * command/notification/admin).
+     * @return array{chat_id,user_id,display_name,source}|null (source: primary|candidate)
+     */
+    public static function effectiveTestChat(): ?array
+    {
+        $primary = self::primaryChatId();
+        if ($primary !== '') {
+            return ['chat_id' => $primary, 'user_id' => self::primaryUserId(),
+                'display_name' => self::get('primary_display_name', ''), 'source' => 'primary'];
+        }
+        try {
+            require_once __DIR__ . '/TelegramSetup.php';
+            $sess = TelegramSetup::active();
+            if ($sess !== null && !empty($sess['candidate_chat_id'])) {
+                return ['chat_id' => (string)$sess['candidate_chat_id'],
+                    'user_id' => (string)($sess['candidate_user_id'] ?? ''),
+                    'display_name' => (string)($sess['candidate_display'] ?? ''),
+                    'source' => 'candidate'];
+            }
+        } catch (Throwable $e) {
+        }
+        return null;
+    }
+
+    /** Transport status (§6): OFFLINE|CONNECTING|ONLINE|ERROR (polling thuc te). */
+    public static function transportStatus(): string
+    {
+        try {
+            require_once __DIR__ . '/TelegramGateway.php';
+            $gw = TelegramGateway::connectionState();
+            $state = (string)($gw['state'] ?? 'STOPPED');
+            if ($state === 'LISTENING') return 'ONLINE';
+            if (in_array($state, ['STARTING', 'RECONNECTING', 'UNHEALTHY'], true)) return $state;
+            if (self::token() === '') return 'OFFLINE';
+            if (($gw['last_error'] ?? '') !== '') return 'ERROR';
+            return 'OFFLINE';
+        } catch (Throwable $e) {
+            return 'OFFLINE';
+        }
+    }
+
+    /** Pairing status (§6): UNPAIRED|WAITING_MESSAGE|CANDIDATE_FOUND|WAITING_CONFIRMATION|PAIRED. */
+    public static function pairingStatus(): string
+    {
+        if (self::primaryChatId() !== '') return 'PAIRED';
+        try {
+            require_once __DIR__ . '/TelegramSetup.php';
+            $sess = TelegramSetup::active();
+            if ($sess === null) return 'UNPAIRED';
+            $st = (string)($sess['status'] ?? '');
+            if ($st === 'WAITING_CONFIRM') {
+                return !empty($sess['candidate_chat_id']) ? 'WAITING_CONFIRMATION' : 'WAITING_MESSAGE';
+            }
+            if ($st === 'WAITING_MESSAGE') {
+                return !empty($sess['candidate_chat_id']) ? 'CANDIDATE_FOUND' : 'WAITING_MESSAGE';
+            }
+            return 'UNPAIRED';
+        } catch (Throwable $e) {
+            return 'UNPAIRED';
+        }
+    }
+
     /** @return array{chat_id, user_id, display_name} */
     public static function primaryDestination(): array
     {
