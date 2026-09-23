@@ -11,6 +11,12 @@ try {
             require_once __DIR__ . '/../sync/AccountRepository.php';
             require_once __DIR__ . '/../sync/TabSessionStore.php';
             AccountRepository::ensureAll();
+            // Supervisor: app mo -> dam bao inbound receiver chay (throttle 60s) (§42)
+            try {
+                require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+                TelegramSupervisor::ensure();
+            } catch (Throwable $e) {
+            }
             $hasPlace = false;
             $hasEval = false;
             try {

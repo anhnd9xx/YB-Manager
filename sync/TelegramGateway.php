@@ -235,4 +235,12 @@ class TelegramGateway
         if (($prev['state'] ?? '') !== 'LISTENING') $prev['state'] = 'LISTENING';
         @file_put_contents($f, json_encode($prev, JSON_UNESCAPED_UNICODE));
     }
+
+    public static function setWorkerStart(int $ts): void
+    {
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_poll.json';
+        $prev = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        $prev['worker_started_at'] = $ts;
+        @file_put_contents($f, json_encode($prev, JSON_UNESCAPED_UNICODE));
+    }
 }

@@ -60,6 +60,42 @@ class TgBotStore
                 UNIQUE KEY uq_dest_conn_chat (connection_id, chat_id),
                 KEY idx_dest_primary (is_primary, is_active)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            // Health fields (§29): enabled/auto_connect/runtime/poll/inbound/error/reconnect
+            $cols = [];
+            foreach (db()->query('SHOW COLUMNS FROM telegram_bot_connections')->fetchAll() as $r) {
+                $cols[(string)$r['Field']] = true;
+            }
+            $add = [
+                'enabled' => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'auto_connect' => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'runtime_state' => 'VARCHAR(20) NULL',
+                'last_update_id' => 'BIGINT NULL',
+                'last_poll_at' => 'DATETIME NULL',
+                'last_poll_success_at' => 'DATETIME NULL',
+                'last_inbound_at' => 'DATETIME NULL',
+                'last_error_code' => 'VARCHAR(40) NULL',
+                'last_error_at' => 'DATETIME NULL',
+                'reconnect_count' => 'INT NOT NULL DEFAULT 0',
+            ];
+            foreach ($add as $col => $def) {
+                if (empty($cols[$col])) {
+                    try {
+                        db()->exec("ALTER TABLE telegram_bot_connections ADD COLUMN $col $def");
+                    } catch (Throwable $e) {
+                    }
+                }
+            }
+            // Raw update queue (§10-§12): bounded, dispatcher rieng error boundary
+            db()->exec("CREATE TABLE IF NOT EXISTS tg_update_queue (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                connection_id INT NOT NULL DEFAULT 0,
+                update_id BIGINT NOT NULL,
+                update_json MEDIUMTEXT NOT NULL,
+                status VARCHAR(15) NOT NULL DEFAULT 'QUEUED',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_conn_update (connection_id, update_id),
+                KEY idx_queue_status (status, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         } catch (Throwable $e) {
         }
     }
@@ -349,8 +385,10 @@ class TgBotStore
             $n = (int)db()->query("SELECT COUNT(*) FROM telegram_bot_connections
                 WHERE status='CONNECTED' AND deleted_at IS NULL")->fetchColumn();
             if ($n === 0) {
-                $ps = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process '
-                    . '| Where-Object { $_.CommandLine -like \'*telegram_polling*\' } '
+                $self = getmypid();
+                $ps = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name=\'php.exe\'\\"'
+                    . ' | Where-Object { $_.CommandLine -like \'*telegram_polling.php*\' } '
+                    . '| Where-Object { $_.ProcessId -ne ' . $self . ' } '
                     . '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
                 @shell_exec($ps);
             }

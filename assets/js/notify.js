@@ -67,7 +67,7 @@ async function tgSetupView() {
         try { return formatRelativeTime(ts); } catch (e) { return String(ts); }
       };
       const pol = c.polling || {};
-      const polOk = pol.state === 'LISTENING';
+      const [polLabel, polSub] = pollingStateLabel(pol.state || 'STOPPED');
       const conn = c.connection || {};
       const stColor = { CONNECTED: 'ok', DISCONNECTED: 'muted', CONNECTING: 'warn', ERROR: 'err', INVALID_TOKEN: 'err', ARCHIVED: 'muted' };
       const stLabel = { CONNECTED: 'Đã kết nối', DISCONNECTED: 'Đã ngắt', CONNECTING: 'Đang kết nối', ERROR: 'Có lỗi', INVALID_TOKEN: 'Token không hợp lệ', ARCHIVED: 'Đã lưu trữ' };
@@ -76,7 +76,7 @@ async function tgSetupView() {
         + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Người nhận</span><span class="meta-value">${escapeHtml(c.display_name || c.username || '?')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${polOk ? '● Online' : '● ' + escapeHtml(pol.state || 'Offline')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${escapeHtml(polLabel)}${polSub ? ' <small class="muted">' + escapeHtml(polSub) + '</small>' : ''}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
         + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">`
@@ -207,32 +207,66 @@ async function tgDiagLoad() {
       s = String(s || '');
       return s.length <= 4 ? '••••' : '••••••' + s.slice(-4);
     };
+    const ago = (ts) => {
+      if (!ts) return '—';
+      if (typeof ts === 'number') {
+        const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+        if (s < 5) return 'vừa xong';
+        if (s < 60) return s + 's trước';
+        return Math.floor(s / 60) + 'm trước';
+      }
+      return String(ts);
+    };
+    const hcol = { HEALTHY: 'ok', DEGRADED: 'warn', FAILED: 'err' };
     el.innerHTML = row('Bot', escapeHtml((d.bot && d.bot.username ? '@' + d.bot.username : '?')))
-      + row('Transport', escapeHtml(tdata.transport || '?'))
-      + row('Pairing', escapeHtml(tdata.pairing || '?'))
-      + row('Gateway', d.token ? 'RUNNING' : 'STOPPED')
+      + row('Gateway', d.token ? 'ONLINE' : 'OFFLINE')
       + row('Polling', escapeHtml(st.state || 'STOPPED'))
+      + row('Health', `<span class="badge badge-${hcol[d.health] || 'muted'}">${escapeHtml(d.health || '?')}</span>`)
       + row('Webhook', d.webhook && d.webhook.active ? 'ACTIVE ⚠' : 'NONE')
-      + row('Last poll', st.last_poll_completed_at ? 'vừa xong' : '—')
+      + row('Pairing', escapeHtml(tdata.pairing || '?'))
+      + row('Last poll', ago(st.last_poll_completed_at))
+      + row('Last successful poll', escapeHtml(d.last_poll_success || '—'))
+      + row('Last inbound', escapeHtml(tdata.last_in_at || '—'))
+      + row('Update offset', d.offset || 0)
+      + row('Queue depth', d.queue_depth || 0)
+      + row('Reconnect count', d.reconnect_count || 0)
+      + (d.counters ? row('Inbound nhận', d.counters.in_recv) + row('Duplicates discarded', (d.counters.in_dedup || 0) + (d.counters.ui_dedup || 0))
+        + row('Outbound gửi', d.counters.out_sent + '/' + d.counters.out_req) : '')
       + row('Last update', escapeHtml(st.last_update_at || 'chưa có'))
-      + row('Primary chat', tdata.effective_chat && tdata.effective_chat.source === 'primary' ? mask((tdata || {}).chat_masked || '') : 'NONE')
-      + row('Candidate chat', (tdata.setup_session && (tdata.setup_session.candidate_display || tdata.setup_session.candidate_username))
-        ? escapeHtml(tdata.setup_session.candidate_display || tdata.setup_session.candidate_username) : 'NONE')
-      + row('Inbound', tdata.last_in_at ? escapeHtml(tdata.last_in_at) : '—')
-      + row('Outbound', tdata.last_out_at ? escapeHtml(tdata.last_out_at) : '—')
-      + row('Pair session', escapeHtml((d.session && d.session.status) || '—'))
-      + (d.counters ? row('Inbound nhận', d.counters.in_recv) + row('Inbound dedup', d.counters.in_dedup)
-        + row('Outbound gửi', d.counters.out_sent + '/' + d.counters.out_req)
-        + row('UI dedup', d.counters.ui_dedup) : '')
-      + (st.last_error ? row('Lỗi', escapeHtml(friendlyPollErr(st.last_error))) : '');
+      + row('Worker uptime', escapeHtml(d.uptime || '—'))
+      + (st.last_error ? row('Lỗi', escapeHtml(friendlyPollErr(st.last_error))) : '')
+      + `<div style="margin-top:6px"><button type="button" class="btn btn-xs" onclick="tgReceiverRestart()">Restart receiver</button></div>`;
   } catch (e) {}
+}
+async function tgReceiverRestart() {
+  toast('Đang restart receiver...', '');
+  const r = await sendJson(api + 'notify.php?action=supervisor_restart', {});
+  toast(r.ok ? 'Receiver đã restart.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  tgDiagLoad();
 }
 function friendlyPollErr(e) {
   e = String(e || '');
   if (e === 'TELEGRAM_POLLING_CONFLICT') return 'Bot đang được một tiến trình khác sử dụng (409).';
   if (e === 'poll_unauthorized') return 'Bot Token không hợp lệ (401).';
+  if (e === 'poll_conflict') return 'Xung đột getUpdates (409).';
   if (e === 'inbound_disabled') return 'Worker chờ (chưa bật inbound, không có setup session).';
   return e;
+}
+function pollingStateLabel(st) {
+  // Runtime states (§30-§31)
+  const map = {
+    LISTENING: ['● Online', 'Đang nhận tin nhắn realtime'],
+    RECONNECTING: ['◌ Đang kết nối lại', ''],
+    BACKOFF: ['◌ Đang kết nối lại', ''],
+    UNHEALTHY: ['◌ Đang kết nối lại', ''],
+    CONFLICT: ['● Xung đột', 'Bot đang được tiến trình khác sử dụng'],
+    AUTH_ERROR: ['● Token lỗi', 'Bot Token không còn hợp lệ.'],
+    WEBHOOK_CONFLICT: ['● Webhook', 'Bot đang dùng webhook khác.'],
+    ERROR: ['● Có lỗi', ''],
+    STARTING: ['◌ Đang kết nối', ''],
+    STOPPED: ['● Offline', ''],
+  };
+  return map[st] || ['● ' + st, ''];
 }
 async function tgSetupPing() {
   const note = $('tg-setup-note');
@@ -433,8 +467,20 @@ function ntTestStatus() {
       st.textContent = '● Chat Test sẵn sàng';
       st.className = 'badge badge-ok';
     } else {
-      st.textContent = '◌ Chờ tin nhắn Telegram';
-      st.className = 'badge badge-warn';
+      const pst = (c.polling || {}).state || '';
+      if (pst === 'CONFLICT') {
+        st.textContent = '● Xung đột';
+        st.className = 'badge badge-err';
+      } else if (pst === 'AUTH_ERROR') {
+        st.textContent = '● Token lỗi';
+        st.className = 'badge badge-err';
+      } else if (pst === 'RECONNECTING' || pst === 'UNHEALTHY' || pst === 'BACKOFF') {
+        st.textContent = '◌ Reconnecting';
+        st.className = 'badge badge-warn';
+      } else {
+        st.textContent = '◌ Chờ tin nhắn Telegram';
+        st.className = 'badge badge-warn';
+      }
     }
     ntTestSendState(!!c.effective_chat);
   }).catch(() => {});

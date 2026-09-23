@@ -456,6 +456,29 @@ try {
             break;
         }
 
+        case 'supervisor_restart': {
+            // [Restart receiver] chi restart inbound (§35), khong restart Tool
+            require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $cid = (int)($b['connection_id'] ?? 0);
+            if ($cid <= 0) {
+                require_once __DIR__ . '/../sync/TgBotStore.php';
+                $prim = TgBotStore::primary();
+                $cid = $prim ? (int)$prim['id'] : 0;
+            }
+            $r = TelegramSupervisor::restart($cid);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['restarted' => true]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            break;
+        }
+
+        case 'supervisor_health': {
+            require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => true, 'data' => TelegramSupervisor::health((int)($b['connection_id'] ?? 0) ?: null)]);
+            break;
+        }
+
         case 'setup_ping': {
             // "Toi da nhan /start" / "Tim tin nhan moi" (§24-§25):
             // 1 getUpdates truc tiep neu worker KHONG listening (tranh 409).
