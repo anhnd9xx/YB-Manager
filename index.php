@@ -484,18 +484,9 @@
           </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-telegram">
-          <div class="panel">
+          <div class="panel" id="tg-setup-panel">
             <div class="sync-label">Kết nối Telegram</div>
-            <label>Bot Token</label>
-            <input type="password" id="nt-token" placeholder="123456:ABC-DEF..." autocomplete="off">
-            <div class="hint" id="nt-token-masked"></div>
-            <label>Chat ID</label>
-            <input type="text" id="nt-chat" placeholder="-100123... / 123456789">
-            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-              <button type="button" class="btn btn-sm" onclick="notifyTestConn()">Kiểm tra kết nối</button>
-              <button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi tin nhắn thử</button>
-              <span class="summary-text" id="nt-conn-status"></span>
-            </div>
+            <div id="tg-setup-view"><div class="skeleton"></div></div>
           </div>
           <div class="panel">
             <div class="sync-label">Gửi theo mức</div>

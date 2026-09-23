@@ -6,9 +6,11 @@ declare(strict_types=1);
  * reply. Backoff exponential khi loi. Persist offset (§43). Khong chay tren UI.
  */
 require_once __DIR__ . '/../sync/TelegramGateway.php';
+require_once __DIR__ . '/../sync/TelegramOffset.php';
 require_once __DIR__ . '/../sync/CommandRouter.php';
 require_once __DIR__ . '/../sync/ConversationService.php';
 require_once __DIR__ . '/../sync/ConfirmationService.php';
+require_once __DIR__ . '/../sync/TelegramSetup.php';
 require_once __DIR__ . '/../sync/SyncLogger.php';
 
 $lock = @fopen(__DIR__ . '/.tg_polling.lock', 'c');
@@ -20,18 +22,16 @@ if (!@flock($lock, LOCK_EX | LOCK_NB)) exit(0);
 
 function tg_offset_file(): string
 {
+    // Legacy shim: offset that su dung TelegramOffset (persist, restart-safe)
     return rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_offset.json';
 }
 function tg_offset_get(): int
 {
-    $f = tg_offset_file();
-    if (!is_file($f)) return 0;
-    $j = json_decode((string)@file_get_contents($f), true);
-    return (int)(is_array($j) ? ($j['offset'] ?? 0) : 0);
+    return TelegramOffset::get();
 }
 function tg_offset_set(int $offset): void
 {
-    @file_put_contents(tg_offset_file(), json_encode(['offset' => $offset]));
+    TelegramOffset::set($offset);
 }
 
 try {
@@ -99,6 +99,16 @@ function handle_update(array $u): void
     if ($chatId === '' || $text === '') return;
     ConversationService::log(ConversationService::IN, $chatId, $text,
         ['user_id' => $userId, 'message_id' => (string)($msg['message_id'] ?? '')]);
+    // Setup session uu tien cho sender chua authorized (one-field pairing §5-§9).
+    // Sender da authorized van di router binh thuong.
+    require_once __DIR__ . '/../sync/PermissionService.php';
+    $chk = PermissionService::check($chatId, $userId);
+    if (empty($chk['ok']) && ($msg['chat']['type'] ?? '') === 'private') {
+        $setup = TelegramSetup::onPrivateMessage($msg, $uid);
+        if (!empty($setup['asked_confirm']) || TelegramSetup::active() !== null) {
+            return; // dang trong setup flow, khong route command
+        }
+    }
     $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
     send_reply($chatId, $reply, $text);
 }
@@ -115,6 +125,20 @@ function handle_callback(array $cb): void
     }
     // answer truoc de Telegram khong spinning (§44)
     TelegramGateway::answerCallback($cbId);
+    if (str_starts_with($data, 'setup:confirm:')) {
+        $sid = substr($data, 15);
+        $r = TelegramSetup::confirm($sid, $chatId, $userId);
+        ConversationService::log(ConversationService::OUT, $chatId, (string)($r['text'] ?? ''));
+        TelegramGateway::sendMessage($chatId, (string)($r['text'] ?? ''));
+        return;
+    }
+    if (str_starts_with($data, 'setup:reject:')) {
+        $sid = substr($data, 14);
+        $r = TelegramSetup::reject($sid, $chatId, $userId);
+        ConversationService::log(ConversationService::OUT, $chatId, (string)($r['text'] ?? ''));
+        TelegramGateway::sendMessage($chatId, (string)($r['text'] ?? ''));
+        return;
+    }
     if (str_starts_with($data, 'confirm:')) {
         $id = substr($data, 8);
         $r = CommandRouter::confirm($id, $chatId, $userId);

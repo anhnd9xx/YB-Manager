@@ -20,6 +20,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/../sync/NotificationManager.php';
 require_once __DIR__ . '/../sync/NotificationQueue.php';
 require_once __DIR__ . '/../sync/TelegramProvider.php';
+require_once __DIR__ . '/../sync/TelegramConfig.php';
+require_once __DIR__ . '/../sync/TelegramSetup.php';
 require_once __DIR__ . '/../sync/ReportManager.php';
 require_once __DIR__ . '/../sync/ReportScheduler.php';
 require_once __DIR__ . '/../sync/EventBus.php';
@@ -242,6 +244,83 @@ try {
                 @shell_exec('powershell -NoProfile -Command "Stop-Process -Id ' . $pid . ' -Force -ErrorAction SilentlyContinue"');
             }
             json_out(['ok' => true, 'data' => ['running' => false]]);
+            break;
+        }
+
+        // ---- One-field setup (§1-§2, §12, §15-§16) ----
+        case 'tg_status': {
+            json_out(['ok' => true, 'data' => TelegramConfig::publicView()]);
+            break;
+        }
+
+        case 'setup_start': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TelegramSetup::start((string)($b['token'] ?? ''), !empty($b['force']));
+            if (!$r['ok']) {
+                if (($r['error'] ?? '') === 'webhook_active') {
+                    json_out(['ok' => false, 'message' => 'Bot này đang được sử dụng bởi một webhook khác.',
+                        'data' => ['webhook_active' => true, 'webhook_url' => $r['webhook_url'] ?? '']]);
+                }
+                json_out(['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            }
+            $bot = $r['bot'] ?? [];
+            json_out(['ok' => true, 'data' => [
+                'session_id' => $r['session_id'], 'expires_at' => $r['expires_at'],
+                'bot_username' => $bot['username'] ?? '']]);
+            break;
+        }
+
+        case 'setup_start_existing': {
+            // Doi nguoi nhan: dung token da luu, tao session moi (§15)
+            $token = TelegramConfig::token();
+            if ($token === '') json_out(['ok' => false, 'message' => 'Chưa có Bot Token'], 400);
+            $me = TelegramProvider::getMeVia($token);
+            if (empty($me['ok'])) json_out(['ok' => false, 'message' => 'Token không còn hợp lệ'], 400);
+            $r = TelegramSetup::start($token);
+            if (!$r['ok']) json_out(['ok' => false, 'message' => $r['error'] ?? 'Lỗi']);
+            json_out(['ok' => true, 'data' => [
+                'session_id' => $r['session_id'], 'expires_at' => $r['expires_at'],
+                'bot_username' => ($r['bot']['username'] ?? '')]]);
+            break;
+        }
+
+        case 'setup_status': {
+            $s = TelegramSetup::active();
+            json_out(['ok' => true, 'data' => ['session' => $s]]);
+            break;
+        }
+
+        case 'setup_cancel': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            TelegramSetup::cancel((string)($b['session_id'] ?? ''));
+            json_out(['ok' => true]);
+            break;
+        }
+
+        case 'disconnect': {
+            // Ngat: disable inbound+outbound, remove authorized receiver. Giu token (§16).
+            $b = $method === 'GET' ? $_GET : json_body();
+            TelegramConfig::set('enabled', '0');
+            TelegramConfig::set('inbound_enabled', '0');
+            TelegramConfig::set('outbound_enabled', '0');
+            TelegramConfig::set('connection_status', 'DISCONNECTED');
+            require_once __DIR__ . '/../sync/PermissionService.php';
+            $list = PermissionService::allowed();
+            $chat = TelegramConfig::primaryChatId();
+            $kept = array_values(array_filter($list, fn($a) => (string)$a['chat_id'] !== $chat));
+            PermissionService::saveAllowed($kept);
+            TelegramConfig::set('primary_chat_id', '');
+            TelegramConfig::set('primary_user_id', '');
+            TelegramConfig::set('primary_username', '');
+            TelegramConfig::set('primary_display_name', '');
+            TelegramConfig::set('role', '');
+            if (!empty($b['wipe'])) {
+                TelegramConfig::clearToken();
+                TelegramConfig::set('bot_username', '');
+                TelegramConfig::set('bot_first_name', '');
+                TelegramConfig::set('bot_id', '');
+            }
+            json_out(['ok' => true, 'data' => ['disconnected' => true]]);
             break;
         }
 

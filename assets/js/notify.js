@@ -46,6 +46,109 @@ async function notifyLoadOverview() {
     $('nt-kpi').innerHTML = '<div class="empty-state">Không tải được.</div>';
   }
   notifyLoadConfig();
+  tgSetupView();
+}
+// ============ ONE-FIELD TELEGRAM SETUP (§1-§2, §12, §23) ============
+async function tgSetupView() {
+  const el = $('tg-setup-view');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'notify.php?action=tg_status');
+    if (!r.ok) { el.innerHTML = '<p class="muted">Lỗi tải.</p>'; return; }
+    const c = r.data;
+    if (c.connected) {
+      el.innerHTML = `<div class="sync-label">Telegram</div>`
+        + `<div class="meta-row"><span class="meta-label">Trạng thái</span><span class="meta-value">● Đã kết nối</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Người nhận</span><span class="meta-value">${escapeHtml(c.display_name || c.username || '?')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Loại</span><span class="meta-value">${escapeHtml(c.chat_type || 'private')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Chat ID</span><span class="meta-value mono">${escapeHtml(c.chat_masked || '')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Điều khiển Tool</span><span class="meta-value">${c.inbound_enabled ? '[ ON ]' : '[ OFF ]'}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Thông báo</span><span class="meta-value">${c.enabled ? '[ ON ]' : '[ OFF ]'}</span></div>`
+        + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">`
+        + `<button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi thử</button>`
+        + (c.bot_username ? `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml(c.bot_username)}','_blank')">Mở chat</button>` : '')
+        + `<button type="button" class="btn btn-sm" onclick="tgChangeReceiver()">Đổi người nhận</button>`
+        + `<button type="button" class="btn btn-sm btn-danger" onclick="tgDisconnect()">Ngắt kết nối</button>`
+        + `</div><div class="hint" id="tg-setup-note"></div>`;
+      return;
+    }
+    // Chua ket noi: kiem tra session dang mo
+    const s = await getJson(api + 'notify.php?action=setup_status').catch(() => null);
+    const sess = (s && s.ok && s.data && s.data.session) ? s.data.session : null;
+    if (sess && (sess.status === 'WAITING_MESSAGE' || sess.status === 'WAITING_CONFIRM')) {
+      tgSetupWaiting(sess, c);
+      return;
+    }
+    el.innerHTML = `<label>Bot Token</label>`
+      + `<input type="password" id="tg-token" placeholder="123456:ABC-DEF..." autocomplete="off">`
+      + `<div style="margin-top:8px"><button type="button" class="btn btn-sm btn-primary" onclick="tgConnect()">Kết nối Telegram</button></div>`
+      + `<div class="hint" id="tg-setup-note"></div>`;
+  } catch (e) {
+    el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+}
+async function tgConnect(force) {
+  const tok = ($('tg-token').value || '').trim();
+  if (!tok) { toast('Nhập Bot Token', 'error'); return; }
+  const note = $('tg-setup-note');
+  if (note) note.textContent = 'Đang kiểm tra token...';
+  const r = await sendJson(api + 'notify.php?action=setup_start', { token: tok, force: force ? 1 : 0 });
+  if (!r.ok) {
+    if (r.data && r.data.webhook_active) {
+      if (note) note.innerHTML = `Bot này đang được sử dụng bởi một webhook khác (${escapeHtml(r.data.webhook_url || '')}).`
+        + `<div style="margin-top:6px"><button type="button" class="btn btn-sm" onclick="tgSetupView()">Quay lại</button> `
+        + `<button type="button" class="btn btn-sm btn-danger" onclick="tgConnect(true)">Chuyển bot sang YT Manager</button></div>`;
+    } else if (note) {
+      note.textContent = r.message || 'Lỗi';
+    }
+    toast(r.message || 'Lỗi', 'error');
+    return;
+  }
+  tgSetupWaiting({ status: 'WAITING_MESSAGE', expires_at: r.data.expires_at }, r.data);
+}
+function tgSetupSteps(step) {
+  const steps = [['token', 'Token hợp lệ'], ['wait', 'Chờ bạn nhắn /start'], ['confirm', 'Chờ xác nhận'], ['done', 'Kết nối hoàn tất']];
+  return steps.map(([k, label]) => {
+    const done = (k === 'token') || (step === 'confirm' && k === 'wait') || step === 'done';
+    const cur = (step === 'wait' && k === 'wait') || (step === 'confirm' && k === 'confirm');
+    return `<div>${done ? '✓' : (cur ? '◌' : '○')} ${label}</div>`;
+  }).join('');
+}
+function tgSetupWaiting(sess, info) {
+  const el = $('tg-setup-view');
+  const bot = (info && info.bot_username) ? '@' + info.bot_username : 'bot';
+  const step = sess.status === 'WAITING_CONFIRM' ? 'confirm' : 'wait';
+  el.innerHTML = `<div class="sync-label">Kết nối Telegram</div>`
+    + tgSetupSteps(step)
+    + `<div style="margin-top:8px">✓ Bot Token hợp lệ<br>Bot: <strong>${escapeHtml(bot)}</strong></div>`
+    + `<div style="margin-top:6px">Bây giờ hãy mở Telegram và nhắn <strong>/start</strong> cho ${escapeHtml(bot)}</div>`
+    + `<div class="eval-prev">◌ Đang chờ tin nhắn... ${sess.candidate_count > 0 ? `(phát hiện ${sess.candidate_count} yêu cầu)` : ''}</div>`
+    + `<div style="margin-top:6px"><button type="button" class="btn btn-sm" onclick="tgSetupCancel('${sess.session_id || ''}')">Hủy</button></div>`
+    + `<div class="hint" id="tg-setup-note"></div>`;
+  clearTimeout(window.__tgSetupTimer);
+  window.__tgSetupTimer = setTimeout(() => {
+    const pane = $('nt-pane-telegram');
+    if (pane && !pane.classList.contains('hidden')) tgSetupView();
+  }, 4000);
+}
+async function tgSetupCancel(sid) {
+  clearTimeout(window.__tgSetupTimer);
+  await sendJson(api + 'notify.php?action=setup_cancel', { session_id: sid });
+  tgSetupView();
+}
+async function tgChangeReceiver() {
+  const r = await sendJson(api + 'notify.php?action=setup_start_existing', {});
+  if (!r.ok) { toast(r.message || 'Lỗi', 'error'); return; }
+  tgSetupWaiting({ status: 'WAITING_MESSAGE', expires_at: r.data.expires_at }, r.data);
+}
+async function tgDisconnect() {
+  confirmDelete('Ngắt kết nối Telegram?<br><small>Tool sẽ ngừng gửi báo cáo và nhận lệnh.</small>', async () => {
+    const r = await sendJson(api + 'notify.php?action=disconnect', {});
+    if (r.ok) { toast('Đã ngắt kết nối', 'success'); tgSetupView(); notifyLoadConfig(); }
+    else toast(r.message || 'Lỗi', 'error');
+  });
 }
 async function notifyLoadConfig() {
   try {

@@ -152,6 +152,10 @@ class NotificationManager
     public static function telegramEnabled(): bool
     {
         try {
+            require_once __DIR__ . '/TelegramConfig.php';
+            // New model: connected (token + primary chat + enabled, co migration chat cu)
+            if (TelegramConfig::isConnected()) return true;
+            // Legacy fallback
             return get_setting('notify_telegram_enabled', '0') === '1'
                 && trim(get_setting('notify_bot_token', '')) !== ''
                 && trim(get_setting('notify_chat_id', '')) !== '';

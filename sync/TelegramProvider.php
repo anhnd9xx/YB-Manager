@@ -15,8 +15,11 @@ class TelegramProvider
 
     public static function configured(): array
     {
-        $token = trim((string)get_setting('notify_bot_token', ''));
-        $chat = trim((string)get_setting('notify_chat_id', ''));
+        require_once __DIR__ . '/TelegramConfig.php';
+        $token = TelegramConfig::token();
+        if ($token === '') $token = trim((string)get_setting('notify_bot_token', ''));
+        $chat = TelegramConfig::primaryChatId();
+        if ($chat === '') $chat = trim((string)get_setting('notify_chat_id', ''));
         return ['token' => $token, 'chat_id' => $chat,
             'ok' => $token !== '' && $chat !== ''];
     }
@@ -55,10 +58,42 @@ class TelegramProvider
         return ['ok' => false, 'error' => self::friendly($r)];
     }
 
+    /** getMe voi token chua luu (setup flow). @return array{ok, error?, bot?} */
+    public static function getMeVia(string $token): array
+    {
+        if (trim($token) === '') return ['ok' => false, 'error' => 'empty_token'];
+        $r = self::post($token, 'getMe', []);
+        if (!empty($r['ok'])) {
+            $u = $r['result'] ?? [];
+            return ['ok' => true, 'bot' => [
+                'id' => (string)($u['id'] ?? ''),
+                'username' => (string)($u['username'] ?? ''),
+                'first_name' => (string)($u['first_name'] ?? '')]];
+        }
+        return ['ok' => false, 'error' => self::friendly($r)];
+    }
+
+    /** @return array{active, url?} */
+    public static function webhookInfoVia(string $token): array
+    {
+        $r = self::post($token, 'getWebhookInfo', []);
+        if (empty($r['ok'])) return ['active' => false];
+        $info = $r['result'] ?? [];
+        $url = (string)($info['url'] ?? '');
+        return ['active' => $url !== '', 'url' => $url];
+    }
+
+    public static function deleteWebhookVia(string $token): bool
+    {
+        $r = self::post($token, 'deleteWebhook', ['drop_pending_updates' => false]);
+        return !empty($r['ok']);
+    }
+
     /** @return array{ok, error?} */
     public static function sendTest(): array
     {
-        return self::sendMessage("✅ YT Manager kết nối Telegram thành công.");
+        return self::sendMessage("✅ <b>YT Manager</b>\n\nTelegram đang hoạt động bình thường.\n\nThời gian:\n"
+            . date('d/m/Y H:i') . "\n\nServer:\nOnline");
     }
 
     /** @return array{ok, error?} */
