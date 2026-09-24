@@ -80,11 +80,25 @@ class TelegramGateway
         return new LongPollingTransport($token);
     }
 
+    /**
+     * Inbound co duoc bat? Nguon that: connection row truoc, settings sau.
+     * (Cu chi doc notify_inbound_enabled trong khi pairing luu tg_inbound_enabled
+     * -> worker STOPPED vinh vien sau khi pair xong. Da fix.)
+     */
     public static function inboundEnabled(): bool
     {
         try {
-            return get_setting('notify_inbound_enabled', '0') === '1'
-                && trim((string)get_setting('notify_bot_token', '')) !== '';
+            require_once __DIR__ . '/TgBotStore.php';
+            $prim = TgBotStore::primary();
+            if ($prim) {
+                return (int)($prim['inbound_enabled'] ?? 1) === 1
+                    && (int)($prim['enabled'] ?? 1) === 1;
+            }
+        } catch (Throwable $e) {
+        }
+        try {
+            return get_setting('tg_inbound_enabled', '0') === '1'
+                || get_setting('notify_inbound_enabled', '0') === '1';
         } catch (Throwable $e) {
             return false;
         }
@@ -92,8 +106,9 @@ class TelegramGateway
 
     /**
      * Worker co nen poll? inbound ON hoac setup session active (pairing).
-     * Voi bot model: chi poll khi primary CONNECTED (disconnect = dung).
-     * Legacy (chua migrate): fallback hanh vi cu.
+     * Voi bot model: chi poll khi primary CONNECTED + credential VALID
+     * (disconnect = dung; 401 = dung). Token lay tu ConfigService
+     * (decrypted truoc), khong phu thuoc legacy plaintext.
      */
     public static function shouldPoll(): bool
     {
@@ -116,7 +131,8 @@ class TelegramGateway
                 require_once __DIR__ . '/TelegramSetup.php';
                 return TelegramSetup::active() !== null;
             }
-            if (trim((string)get_setting('notify_bot_token', '')) === '') return false;
+            require_once __DIR__ . '/TelegramConfigService.php';
+            if (TelegramConfigService::get_bot_token() === '') return false;
             if (self::inboundEnabled()) return true;
             require_once __DIR__ . '/TelegramSetup.php';
             return TelegramSetup::active() !== null;
@@ -186,7 +202,7 @@ class TelegramGateway
         $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_tg_poll.json';
         $st = ['listening' => false, 'last_update_at' => null, 'last_error' => null,
             'state' => 'STOPPED', 'last_poll_started_at' => null, 'last_poll_completed_at' => null,
-            'poll_error_count' => 0];
+            'heartbeat_at' => null, 'poll_error_count' => 0];
         if (is_file($f)) {
             $j = json_decode((string)@file_get_contents($f), true);
             if (is_array($j)) {
@@ -195,6 +211,7 @@ class TelegramGateway
                 $st['last_update_at'] = $j['last_update_at'] ?? null;
                 $st['last_error'] = $j['last_error'] ?? null;
                 $st['state'] = $j['state'] ?? 'STOPPED';
+                $st['heartbeat_at'] = isset($j['heartbeat']) ? (float)$j['heartbeat'] : null;
                 $st['last_poll_started_at'] = $j['last_poll_started_at'] ?? null;
                 $st['last_poll_completed_at'] = $j['last_poll_completed_at'] ?? null;
                 $st['poll_error_count'] = (int)($j['poll_error_count'] ?? 0);

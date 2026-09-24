@@ -83,6 +83,9 @@ class TgBotStore
                 'last_error_code' => 'VARCHAR(40) NULL',
                 'last_error_at' => 'DATETIME NULL',
                 'reconnect_count' => 'INT NOT NULL DEFAULT 0',
+                'worker_restart_count' => 'INT NOT NULL DEFAULT 0',
+                'last_restart_reason' => 'VARCHAR(40) NULL',
+                'last_restart_at' => 'DATETIME NULL',
             ];
             foreach ($add as $col => $def) {
                 if (empty($cols[$col])) {
@@ -611,7 +614,8 @@ class TgBotStore
             $enc = TgSecret::protect($token);
             if ($enc === null) return ['ok' => false, 'error' => 'DPAPI unavailable'];
             // Giu ket noi hien tai: neu truoc day inbound bat hoac worker dang chay -> CONNECTED
-            $wasLive = get_setting('notify_inbound_enabled', '0') === '1';
+            $wasLive = get_setting('tg_inbound_enabled', '0') === '1'
+                || get_setting('notify_inbound_enabled', '0') === '1';
             if (!$wasLive) {
                 try {
                     require_once __DIR__ . '/TelegramPollingCtl.php';

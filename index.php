@@ -647,8 +647,7 @@
             </div>
             <div style="display:flex;gap:8px;margin-top:6px">
               <button type="button" class="btn btn-sm" onclick="tgSaveInbound()">Lưu inbound</button>
-              <button type="button" class="btn btn-sm" onclick="tgPoll(1)">Chạy polling</button>
-              <button type="button" class="btn btn-sm" onclick="tgPoll(0)">Dừng polling</button>
+              <button type="button" class="btn btn-sm" onclick="tgReceiverRestart()">Restart receiver</button>
               <button type="button" class="btn btn-sm" onclick="tgJob(1)">Chạy job worker</button>
               <button type="button" class="btn btn-sm" onclick="tgJob(0)">Dừng job worker</button>
             </div>

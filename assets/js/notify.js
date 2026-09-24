@@ -69,6 +69,16 @@ async function tgSetupView() {
       const pol = c.polling || {};
       const [polLabel, polSub] = pollingStateLabel(pol.state || 'STOPPED');
       const conn = c.connection || {};
+      const hl = c.health || {};
+      const hcol2 = { HEALTHY: 'ok', RECOVERING: 'warn', DEGRADED: 'warn', FAILED: 'err' };
+      const agoUnix = (ts) => {
+        if (!ts) return '—';
+        const s = Math.max(0, Math.round(Date.now() / 1000 - Number(ts)));
+        if (s < 5) return 'vừa xong';
+        if (s < 60) return s + ' giây trước';
+        if (s < 3600) return Math.floor(s / 60) + ' phút trước';
+        return Math.floor(s / 3600) + ' giờ trước';
+      };
       const stColor = { CONNECTED: 'ok', DISCONNECTED: 'muted', CONNECTING: 'warn', ERROR: 'err', INVALID_TOKEN: 'err', ARCHIVED: 'muted' };
       const stLabel = { CONNECTED: 'Đã kết nối', DISCONNECTED: 'Đã ngắt', CONNECTING: 'Đang kết nối', ERROR: 'Có lỗi', INVALID_TOKEN: 'Token không hợp lệ', ARCHIVED: 'Đã lưu trữ' };
       const cst = conn.status || 'CONNECTED';
@@ -80,15 +90,21 @@ async function tgSetupView() {
         + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Token</span><span class="meta-value mono">${escapeHtml(conn.token_preview || '')}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Tự kết nối khi mở Tool</span><span class="meta-value"><input type="checkbox" id="tg-auto-conn" ${conn.auto_connect ? 'checked' : ''} onchange="tgBotAutoConn(${(conn.id || 0)}, this.checked)" style="width:auto"></span></div>`
-        + `<div class="meta-row"><span class="meta-label">Polling</span><span class="meta-value">${escapeHtml(polLabel)}${polSub ? ' <small class="muted">' + escapeHtml(polSub) + '</small>' : ''}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Receiver</span><span class="meta-value">${escapeHtml(polLabel)}${polSub ? ' <small class="muted">' + escapeHtml(polSub) + '</small>' : ''}</span></div>`
+        + (hl.health ? `<div class="meta-row"><span class="meta-label">Health</span><span class="meta-value"><span class="badge badge-${hcol2[hl.health] || 'muted'}">${escapeHtml(hl.health)}</span></span></div>` : '')
+        + (hl.uptime ? `<div class="meta-row"><span class="meta-label">Receiver uptime</span><span class="meta-value">${escapeHtml(hl.uptime)}</span></div>` : '')
+        + `<div class="meta-row"><span class="meta-label">Poll cuối</span><span class="meta-value">${escapeHtml(agoUnix(pol.last_poll_completed_at))}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Tin nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
+        + ((hl.reconnect_count || hl.worker_restarts)
+          ? `<div class="meta-row"><span class="meta-label">Reconnect / Restart</span><span class="meta-value">${escapeHtml(String(hl.reconnect_count || 0))} / ${escapeHtml(String(hl.worker_restarts || 0))}${hl.last_restart_reason ? ' <small class="muted">(' + escapeHtml(hl.last_restart_reason) + ')</small>' : ''}</span></div>` : '')
         + (cred !== 'VALID' ? `<div class="eval-prev">⚠ ${escapeHtml(credLabel)} — nhập token mới hoặc kiểm tra lại.</div>` : '')
-        + `<div class="meta-row"><span class="meta-label">Nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
         + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
         + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">`
         + (cst === 'CONNECTED'
           ? `<button type="button" class="btn btn-sm" onclick="tgBotDisconnect(${conn.id || 0})">Ngắt kết nối</button>`
           : `<button type="button" class="btn btn-sm btn-primary" onclick="tgBotConnect(${conn.id || 0})">Kết nối</button>`)
         + `<button type="button" class="btn btn-sm" onclick="notifySendTest()">Gửi thử</button>`
+        + `<button type="button" class="btn btn-sm" onclick="tgRecvTest()">Kiểm tra nhận</button>`
         + (c.bot_username ? `<button type="button" class="btn btn-sm" onclick="window.open('https://t.me/${escapeHtml(c.bot_username)}','_blank')">Mở Telegram</button>` : '')
         + `<div class="dropdown" style="position:relative;display:inline-block">`
         + `<button type="button" class="btn btn-sm" onclick="tgBotMenuToggle(event)">⋮</button>`
@@ -224,11 +240,17 @@ async function tgDiagLoad() {
       }
       return String(ts);
     };
-    const hcol = { HEALTHY: 'ok', DEGRADED: 'warn', FAILED: 'err' };
+    const hcol = { HEALTHY: 'ok', RECOVERING: 'warn', DEGRADED: 'warn', FAILED: 'err' };
+    const tconn = (tdata && tdata.connection) || {};
     el.innerHTML = row('Bot', escapeHtml((d.bot && d.bot.username ? '@' + d.bot.username : '?')))
+      + row('Credential', escapeHtml(tconn.credential_status || '?'))
       + row('Gateway', d.token ? 'ONLINE' : 'OFFLINE')
-      + row('Polling', escapeHtml(st.state || 'STOPPED'))
-      + row('Health', `<span class="badge badge-${hcol[d.health] || 'muted'}">${escapeHtml(d.health || '?')}</span>`)
+      + row('Receiver', escapeHtml(st.state || 'STOPPED'))
+      + row('Supervisor', `<span class="badge badge-${hcol[d.health] || 'muted'}">${escapeHtml(d.health || '?')}</span>`)
+      + row('Worker', d.worker_alive ? 'ALIVE' : 'DEAD')
+      + row('Last poll start', ago(st.last_poll_started_at))
+      + row('Last poll complete', ago(st.last_poll_completed_at))
+      + row('Heartbeat', ago(st.heartbeat_at))
       + row('Webhook', d.webhook && d.webhook.active ? 'ACTIVE ⚠' : 'NONE')
       + row('Pairing', escapeHtml(tdata.pairing || '?'))
       + row('Last poll', ago(st.last_poll_completed_at))
@@ -237,6 +259,8 @@ async function tgDiagLoad() {
       + row('Update offset', d.offset || 0)
       + row('Queue depth', d.queue_depth || 0)
       + row('Reconnect count', d.reconnect_count || 0)
+      + row('Worker restarts', d.worker_restarts || 0)
+      + (d.last_restart_reason ? row('Last restart', escapeHtml(d.last_restart_reason + (d.last_restart_at ? ' · ' + d.last_restart_at : ''))) : '')
       + (d.counters ? row('Inbound nhận', d.counters.in_recv) + row('Duplicates discarded', (d.counters.in_dedup || 0) + (d.counters.ui_dedup || 0))
         + row('Outbound gửi', d.counters.out_sent + '/' + d.counters.out_req) : '')
       + row('Last update', escapeHtml(st.last_update_at || 'chưa có'))
@@ -251,6 +275,30 @@ async function tgReceiverRestart() {
   toast(r.ok ? 'Receiver đã restart.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   tgDiagLoad();
 }
+// §35 Kiem tra nhan: KHONG tao poller moi, chi theo doi last_inbound_at 30s.
+async function tgRecvTest() {
+  const note = $('tg-setup-note');
+  let before = null;
+  try {
+    const r0 = await getJson(api + 'notify.php?action=tg_status');
+    before = (r0 && r0.ok && r0.data) ? r0.data.last_in_at : null;
+  } catch (e) {}
+  toast('Hãy gửi một tin nhắn cho Bot trong 30 giây...', '');
+  if (note) note.textContent = 'Đang chờ tin nhắn đến (30s)...';
+  setTimeout(async () => {
+    try {
+      const r1 = await getJson(api + 'notify.php?action=tg_status');
+      const after = (r1 && r1.ok && r1.data) ? r1.data.last_in_at : null;
+      const pass = after && after !== before;
+      toast(pass ? 'PASS: Tool đã nhận tin nhắn.' : 'FAIL: 30s chưa thấy tin mới. Kiểm tra Bot/receiver.',
+        pass ? 'success' : 'error');
+      if (note) note.textContent = pass ? 'Kiểm tra nhận: PASS.' : 'Kiểm tra nhận: FAIL.';
+    } catch (e) {
+      toast('Lỗi kiểm tra.', 'error');
+    }
+    tgSetupView();
+  }, 30000);
+}
 function friendlyPollErr(e) {
   e = String(e || '');
   if (e === 'TELEGRAM_POLLING_CONFLICT') return 'Bot đang được một tiến trình khác sử dụng (409).';
@@ -262,10 +310,11 @@ function friendlyPollErr(e) {
 function pollingStateLabel(st) {
   // Runtime states (§30-§31)
   const map = {
-    LISTENING: ['● Online', 'Đang nhận tin nhắn realtime'],
-    RECONNECTING: ['◌ Đang kết nối lại', ''],
-    BACKOFF: ['◌ Đang kết nối lại', ''],
-    UNHEALTHY: ['◌ Đang kết nối lại', ''],
+    LISTENING: ['● Đang lắng nghe', 'Đang nhận tin nhắn realtime'],
+    POLLING: ['● Đang lắng nghe', ''],
+    RECONNECTING: ['◌ Đang khôi phục kết nối', ''],
+    BACKOFF: ['◌ Đang khôi phục kết nối', ''],
+    UNHEALTHY: ['◌ Đang khôi phục kết nối', ''],
     CONFLICT: ['● Xung đột', 'Bot đang được tiến trình khác sử dụng'],
     AUTH_ERROR: ['● Token lỗi', 'Bot Token không còn hợp lệ.'],
     WEBHOOK_CONFLICT: ['● Webhook', 'Bot đang dùng webhook khác.'],
@@ -1284,9 +1333,12 @@ async function ntInboundLoad() {
       || '<p class="muted">Chưa có chat nào. Dùng ghép nối hoặc thêm tay.</p>';
     window.__tgAllowed = c.allowed || [];
     const ps = $('tg-poll-status');
-    if (ps) ps.textContent = 'Polling: ' + (c.poll_running ? '● Listening' : '● Dừng')
-      + ' · Job worker: ' + (c.job_running ? '● Chạy' : '● Dừng')
-      + (c.polling && c.polling.last_update_at ? ' · Update cuối: ' + c.polling.last_update_at : '');
+    if (ps) {
+      const [lbl] = pollingStateLabel((c.polling && c.polling.state) || 'STOPPED');
+      ps.textContent = 'Receiver: ' + lbl
+        + ' · Job worker: ' + (c.job_running ? '● Chạy' : '● Dừng')
+        + (c.polling && c.polling.last_update_at ? ' · Update cuối: ' + c.polling.last_update_at : '');
+    }
   } catch (e) {}
 }
 async function tgSaveInbound() {
@@ -1318,8 +1370,13 @@ async function tgPairCreate() {
   } else toast(r.message || 'Lỗi', 'error');
 }
 async function tgPoll(on) {
-  const r = await sendJson(api + `telegram.php?action=poll_${on ? 'start' : 'stop'}`, {});
-  toast(r.ok ? (on ? 'Polling đang chạy' : 'Đã dừng polling') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  // Cu: UI kill worker truc tiep (§53 cam). Gio: start = ensure, stop = huong dan.
+  if (!on) {
+    toast('Receiver do Supervisor quản lý. Dùng [Restart receiver] hoặc [Ngắt kết nối].', 'error');
+    return;
+  }
+  const r = await sendJson(api + 'telegram.php?action=poll_start', {});
+  toast(r.ok ? 'Polling đang chạy' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   ntInboundLoad();
 }
 async function tgJob(on) {

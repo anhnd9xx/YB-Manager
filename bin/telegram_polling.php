@@ -22,17 +22,23 @@ require_once __DIR__ . '/../sync/TgBotStore.php';
 require_once __DIR__ . '/../sync/TelegramCounters.php';
 require_once __DIR__ . '/../sync/SyncLogger.php';
 
-$lock = @fopen(__DIR__ . '/.tg_polling.lock', 'c');
-if (!$lock) exit(0);
-if (!@flock($lock, LOCK_EX | LOCK_NB)) exit(0);
-@fwrite($lock, (string)getmypid());
-@fflush($lock);
-@file_put_contents(__DIR__ . '/.tg_polling.pid', (string)getmypid());
+$lock = null;
+$TG_SELFTEST = in_array('--selftest', $argv ?? [], true);
+if (!$TG_SELFTEST) {
+    $lock = @fopen(__DIR__ . '/.tg_polling.lock', 'c');
+    if (!$lock) exit(0);
+    if (!@flock($lock, LOCK_EX | LOCK_NB)) exit(0);
+    @fwrite($lock, (string)getmypid());
+    @fflush($lock);
+    @file_put_contents(__DIR__ . '/.tg_polling.pid', (string)getmypid());
+}
 
 const TG_MAX_QUEUE = 1000;
 $workerStartedAt = time();
-TelegramGateway::heartbeat(null, null, 'STARTING');
-TelegramGateway::setWorkerStart($workerStartedAt);
+if (!$TG_SELFTEST) {
+    TelegramGateway::heartbeat(null, null, 'STARTING');
+    TelegramGateway::setWorkerStart($workerStartedAt);
+}
 
 function tg_conn_id(): int
 {
@@ -41,6 +47,48 @@ function tg_conn_id(): int
         return $conn ? (int)$conn['id'] : 0;
     } catch (Throwable $e) {
         return 0;
+    }
+}
+
+/**
+ * Ly do idle DE BUG (§38): status/credential/inbound/setup — khong secret.
+ * Vi du: IDLE_NO_CONNECTION | IDLE_STATUS_DISCONNECTED | IDLE_CREDENTIAL_INVALID
+ *       | IDLE_INBOUND_OFF_NO_SETUP | IDLE_WAITING_SETUP
+ */
+function tg_idle_reason(): string
+{
+    try {
+        $conns = TgBotStore::list();
+        if (!$conns) {
+            require_once __DIR__ . '/../sync/TelegramConfigService.php';
+            if (TelegramConfigService::get_bot_token() === '') return 'NO_TOKEN';
+            if (!TelegramGateway::inboundEnabled()) {
+                require_once __DIR__ . '/../sync/TelegramSetup.php';
+                return TelegramSetup::active() !== null ? 'WAITING_SETUP' : 'INBOUND_OFF_NO_SETUP';
+            }
+            return 'WAITING_SETUP';
+        }
+        $prim = null;
+        foreach ($conns as $c) {
+            if (!empty($c['is_primary'])) {
+                $prim = $c;
+                break;
+            }
+        }
+        $prim = $prim ?? $conns[0];
+        if (($prim['status'] ?? '') !== TgBotStore::ST_CONNECTED) {
+            return 'STATUS_' . preg_replace('/[^A-Z_]/', '', (string)($prim['status'] ?? 'UNKNOWN'));
+        }
+        if (isset($prim['credential_status']) && $prim['credential_status'] === 'INVALID') {
+            return 'CREDENTIAL_INVALID';
+        }
+        if (!TelegramGateway::inboundEnabled()) {
+            require_once __DIR__ . '/../sync/TelegramSetup.php';
+            return TelegramSetup::active() !== null ? 'WAITING_SETUP' : 'INBOUND_OFF_NO_SETUP';
+        }
+        return 'UNKNOWN';
+    } catch (Throwable $e) {
+        return 'CHECK_ERROR';
     }
 }
 
@@ -69,8 +117,10 @@ try {
 $backoff = 1;
 $backoffSteps = [1, 2, 5, 10, 30];
 $bi = 0;
-// Self-test mode: --selftest xu ly 1 update gia qua queue+dispatcher roi exit
-if (in_array('--selftest', $argv ?? [], true)) {
+$idleReasonLogged = '';
+// Self-test mode: --selftest XU LY 1 update gia qua queue+dispatcher roi exit.
+// Chay TRUOC lock (co $TG_SELFTEST gate o tren) de test duoc ngay ca khi worker dang chay.
+if ($TG_SELFTEST) {
     $fake = ['update_id' => 999001, 'message' => [
         'message_id' => 777001, 'date' => time(),
         'chat' => ['id' => 'testchat', 'type' => 'private'],
@@ -114,12 +164,37 @@ if (in_array('--selftest', $argv ?? [], true)) {
 }
 while (true) {
     try {
-        // Chi dung khi enabled/setup; nguoc lai idle (supervisor se spawn khi can)
+        // DB stale (sleep/wake, wait_timeout): reconnect truoc khi lam gi khac.
+        // Khong bao gio de "gone away" giet worker vinh vien.
+        if (!db_ping()) {
+            TelegramGateway::heartbeat('db_down', null, 'RECONNECTING');
+            tg_conn_touch(['runtime_state' => 'RECONNECTING', 'last_error_code' => 'DB_DOWN',
+                'last_error_at' => date('Y-m-d H:i:s')]);
+            try {
+                SyncLogger::warn('telegram', '[TG RECONNECT] reason=DB_DOWN delay=5s');
+            } catch (Throwable $e2) {
+            }
+            sleep(5);
+            continue;
+        }
+        // Chi dung khi enabled/setup; nguoc lai idle (supervisor se spawn khi can).
+        // Log LY DO cu the khi chuyen sang idle (§38: WHY?) — khong log lap moi vong.
         if (!TelegramGateway::shouldPoll()) {
-            TelegramGateway::heartbeat('', null, 'STOPPED');
+            $reason = tg_idle_reason();
+            if ($reason !== $idleReasonLogged) {
+                $idleReasonLogged = $reason;
+                TelegramGateway::heartbeat('idle_' . $reason, null, 'STOPPED');
+                try {
+                    SyncLogger::info('telegram', '[TG IDLE] reason=' . $reason);
+                } catch (Throwable $e2) {
+                }
+            } else {
+                TelegramGateway::heartbeat(null, null, 'STOPPED');
+            }
             sleep(10);
             continue;
         }
+        $idleReasonLogged = '';
         $transport = TelegramGateway::transport();
         $offset = TelegramOffset::get();
         TelegramGateway::pollStarted();

@@ -26,6 +26,14 @@ require_once __DIR__ . '/../sync/ReportManager.php';
 require_once __DIR__ . '/../sync/ReportScheduler.php';
 require_once __DIR__ . '/../sync/EventBus.php';
 
+// Supervisor tick: moi request qua API la 1 nhip heartbeat cho inbound receiver
+// (auto-start khi app mo, watchdog khi worker stuck). Throttle trong ensure().
+try {
+    require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+    TelegramSupervisor::ensure();
+} catch (Throwable $e) {
+}
+
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? 'config';
 
@@ -287,6 +295,12 @@ try {
             }
             require_once __DIR__ . '/../sync/TelegramCounters.php';
             $v['counters'] = TelegramCounters::all();
+            // Supervisor health gop chung (§31): card 1 request duy nhat
+            try {
+                require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+                $v['health'] = TelegramSupervisor::health();
+            } catch (Throwable $e) {
+            }
             json_out(['ok' => true, 'data' => $v]);
             break;
         }

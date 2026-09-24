@@ -9,8 +9,22 @@ require_once __DIR__ . '/TelegramConfig.php';
 
 class TelegramConfigService
 {
+    /**
+     * Runtime token DUY NHAT cho moi consumer (transport/probe/diagnostics):
+     * connection encrypted (decrypt) truoc, legacy plaintext fallback.
+     * Khong bao gio tra token ra frontend/log (caller tu chiu trach nhiem).
+     */
     public static function get_bot_token(): string
     {
+        try {
+            require_once __DIR__ . '/TgBotStore.php';
+            $conn = TgBotStore::primary();
+            if ($conn) {
+                $t = TgBotStore::runtimeToken($conn);
+                if ($t !== '') return $t;
+            }
+        } catch (Throwable $e) {
+        }
         return TelegramConfig::token();
     }
 

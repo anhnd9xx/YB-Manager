@@ -22,15 +22,42 @@ if (!is_dir(PROFILES_DIR)) {
 
 function db(): PDO
 {
-    static $pdo = null;
-    if ($pdo === null) {
+    // Giu trong $GLOBALS (thay vi static) de db_reconnect() reset duoc —
+    // worker chay nhieu gio/sleep-wake phai tu phuc hoi "MySQL gone away".
+    if (!isset($GLOBALS['__pdo']) || !($GLOBALS['__pdo'] instanceof PDO)) {
         $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4';
-        $pdo = new PDO($dsn, DB_USER, DB_PASS, [
+        $GLOBALS['__pdo'] = new PDO($dsn, DB_USER, DB_PASS, [
             PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
     }
-    return $pdo;
+    return $GLOBALS['__pdo'];
+}
+
+/** Xoa handle PDO hien tai de db() tao lai o lan goi sau. */
+function db_reconnect(): void
+{
+    unset($GLOBALS['__pdo']);
+}
+
+/**
+ * Ping DB; stale handle (sleep/wake, wait_timeout) -> reconnect 1 lan.
+ * Worker goi moi vong poll (re ~1 query/25s, khong dang ke).
+ */
+function db_ping(): bool
+{
+    try {
+        db()->query('SELECT 1');
+        return true;
+    } catch (Throwable $e) {
+        try {
+            db_reconnect();
+            db()->query('SELECT 1');
+            return true;
+        } catch (Throwable $e2) {
+            return false;
+        }
+    }
 }
 
 function get_setting(string $key, string $default = ''): string

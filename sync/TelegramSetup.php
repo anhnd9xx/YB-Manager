@@ -122,9 +122,19 @@ class TelegramSetup
     }
 
     /** Probe server de lay max update hien tai (khong skip unprocessed §11).
-     *  Offset share giu nguyen — worker van nhan binh thuong; loc bang DATE. */
+     *  Offset share giu nguyen — worker van nhan binh thuong; loc bang DATE.
+     *  Neu worker dang LISTENING: KHONG probe (tranh getUpdates consumer thu 2 -> 409). */
     private static function currentOffset(string $token): int
     {
+        try {
+            require_once __DIR__ . '/TelegramGateway.php';
+            $gw = TelegramGateway::connectionState();
+            if (!empty($gw['listening'])) {
+                require_once __DIR__ . '/TelegramOffset.php';
+                return TelegramOffset::get();
+            }
+        } catch (Throwable $e) {
+        }
         try {
             $ch = curl_init(TelegramProvider::API . $token . '/getUpdates');
             curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true,
@@ -219,6 +229,10 @@ class TelegramSetup
             $d['uptime'] = $h['uptime'] ?? null;
             $d['last_poll_success'] = $h['last_poll_success_at'] ?? null;
             $d['reconnect_count'] = $h['reconnect_count'] ?? 0;
+            $d['worker_alive'] = !empty($h['worker_alive']);
+            $d['worker_restarts'] = $h['worker_restarts'] ?? 0;
+            $d['last_restart_reason'] = $h['last_restart_reason'] ?? null;
+            $d['last_restart_at'] = $h['last_restart_at'] ?? null;
         } catch (Throwable $e) {
         }
         return $d;

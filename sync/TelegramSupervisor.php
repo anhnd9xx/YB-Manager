@@ -12,7 +12,9 @@ require_once __DIR__ . '/SyncLogger.php';
 class TelegramSupervisor
 {
     public const WATCHDOG_STALE_SEC = 75; // LISTENING nhung khong completed qua 75s -> restart
-    public const ENSURE_THROTTLE_SEC = 60;
+    public const ENSURE_THROTTLE_SEC = 30; // tick global (moi API) -> phat hien chet <= ~30s
+    public const RESTART_COOLDOWN_SEC = 90; // chong kill-loop
+    public const STUCK_NO_HEARTBEAT_SEC = 120; // worker alive nhung khong loop -> restart
 
     public static function stateFile(): string
     {
@@ -87,32 +89,76 @@ class TelegramSupervisor
         }
     }
 
-    /** Watchdog chung (§16): worker alive nhung stale -> restart (khong restart app). */
+    /** Watchdog (§13-§14): worker alive nhung stuck/stale -> restart (khong restart app). */
     public static function watchdog(): void
     {
         try {
             require_once __DIR__ . '/TelegramGateway.php';
+            require_once __DIR__ . '/TelegramPollingCtl.php';
             $gw = TelegramGateway::connectionState();
-            if (($gw['state'] ?? '') === 'UNHEALTHY') {
-                require_once __DIR__ . '/TelegramPollingCtl.php';
-                $pid = TelegramPollingCtl::pid();
-                if ($pid !== null) {
-                    @shell_exec('powershell -NoProfile -Command "Stop-Process -Id ' . $pid . ' -Force -ErrorAction SilentlyContinue"');
-                }
-                usleep(500000);
-                TelegramPollingCtl::ensureRunning();
-                try {
-                    require_once __DIR__ . '/TgBotStore.php';
-                    $prim = TgBotStore::primary();
-                    if ($prim) {
-                        $rc = ((int)($prim['reconnect_count'] ?? 0)) + 1;
-                        db()->prepare('UPDATE telegram_bot_connections SET reconnect_count=? WHERE id=?')
-                            ->execute([$rc, (int)$prim['id']]);
-                    }
-                    SyncLogger::warn('telegram', '[WATCHDOG] stale worker restarted');
-                } catch (Throwable $e) {
-                }
+            $state = (string)($gw['state'] ?? 'STOPPED');
+            $alive = TelegramPollingCtl::alive();
+            if (!$alive) return; // chet han -> ensure() spawn lai, khong phai viec watchdog
+            if (in_array($state, ['CONFLICT', 'AUTH_ERROR'], true)) return; // can human, khong storm
+            $now = microtime(true);
+            $hbAge = isset($gw['heartbeat_at']) ? ($now - (float)$gw['heartbeat_at']) : 1e9;
+            $reason = '';
+            if ($state === 'UNHEALTHY') {
+                $reason = 'POLL_STUCK';
+            } elseif ($state === 'ERROR' && $hbAge > self::STUCK_NO_HEARTBEAT_SEC) {
+                $reason = 'ERROR_STALE';
+            } elseif ($state === 'STOPPED' && $hbAge > self::STUCK_NO_HEARTBEAT_SEC
+                && TelegramGateway::shouldPoll()) {
+                // Can poll nhung worker dung yen, khong loop -> stale handle/deadlock
+                $reason = 'WORKER_STUCK';
             }
+            if ($reason === '') return;
+            if (!self::restartCooldownOk()) return;
+            self::touchRestart();
+            $pid = TelegramPollingCtl::pid();
+            if ($pid !== null) {
+                @shell_exec('powershell -NoProfile -Command "Stop-Process -Id ' . $pid . ' -Force -ErrorAction SilentlyContinue"');
+            }
+            usleep(500000);
+            TelegramPollingCtl::ensureRunning();
+            self::bumpRestart($reason);
+            try {
+                SyncLogger::warn('telegram', '[WATCHDOG] stale worker restarted reason=' . $reason);
+            } catch (Throwable $e) {
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    private static function restartCooldownOk(): bool
+    {
+        $f = self::stateFile();
+        $j = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        return (microtime(true) - (float)($j['restart_at'] ?? 0)) >= self::RESTART_COOLDOWN_SEC;
+    }
+
+    private static function touchRestart(): void
+    {
+        $f = self::stateFile();
+        $j = is_file($f) ? (json_decode((string)@file_get_contents($f), true) ?: []) : [];
+        $j['restart_at'] = microtime(true);
+        @file_put_contents($f, json_encode($j));
+    }
+
+    /** Dem restart + ly do de diagnostics (§15). */
+    private static function bumpRestart(string $reason): void
+    {
+        try {
+            require_once __DIR__ . '/TgBotStore.php';
+            TgBotStore::ensureTables();
+            $prim = TgBotStore::primary();
+            if (!$prim) return;
+            $id = (int)$prim['id'];
+            db()->prepare('UPDATE telegram_bot_connections SET
+                    worker_restart_count=COALESCE(worker_restart_count,0)+1,
+                    reconnect_count=reconnect_count+1,
+                    last_restart_reason=?, last_restart_at=NOW() WHERE id=?')
+                ->execute([mb_substr($reason, 0, 40), $id]);
         } catch (Throwable $e) {
         }
     }
@@ -170,7 +216,8 @@ class TelegramSupervisor
         $out = ['state' => 'STOPPED', 'health' => 'FAILED', 'worker_alive' => false,
             'queue_depth' => 0, 'uptime' => null, 'last_poll_at' => null,
             'last_poll_success_at' => null, 'last_inbound_at' => null,
-            'offset' => 0, 'reconnect_count' => 0, 'duplicates' => 0, 'last_error' => null];
+            'offset' => 0, 'reconnect_count' => 0, 'duplicates' => 0, 'last_error' => null,
+            'worker_restarts' => 0, 'last_restart_reason' => null, 'last_restart_at' => null];
         try {
             require_once __DIR__ . '/TgBotStore.php';
             $conn = $connectionId ? TgBotStore::get($connectionId) : TgBotStore::primary();
@@ -182,6 +229,9 @@ class TelegramSupervisor
                 $out['last_inbound_at'] = $conn['last_inbound_at'] ?? null;
                 $out['reconnect_count'] = (int)($conn['reconnect_count'] ?? 0);
                 $out['last_error'] = $conn['last_error_code'] ?? $conn['last_error'] ?? null;
+                $out['worker_restarts'] = (int)($conn['worker_restart_count'] ?? 0);
+                $out['last_restart_reason'] = $conn['last_restart_reason'] ?? null;
+                $out['last_restart_at'] = $conn['last_restart_at'] ?? null;
             }
             require_once __DIR__ . '/TelegramGateway.php';
             $gw = TelegramGateway::connectionState();
@@ -205,11 +255,14 @@ class TelegramSupervisor
             $out['duplicates'] = (int)($c['in_dedup'] ?? 0) + (int)($c['ui_dedup'] ?? 0);
             $out['in_recv'] = (int)($c['in_recv'] ?? 0);
             $out['out_sent'] = (int)($c['out_sent'] ?? 0);
-            // Health tong hop (§34): FAILED neu can can thiep; idle-hop-le thi HEALTHY
+            // Health tong hop (§34): FAILED neu can can thiep; idle-hop-le thi HEALTHY.
+            // RECOVERING rieng (§32): dang reconnect, khong phai "mat ket noi".
             $st = $out['state'];
             if (in_array($st, ['AUTH_ERROR', 'CONFLICT', 'WEBHOOK_CONFLICT'], true)) {
                 $out['health'] = 'FAILED';
-            } elseif (in_array($st, ['RECONNECTING', 'BACKOFF', 'UNHEALTHY'], true)) {
+            } elseif ($st === 'RECONNECTING') {
+                $out['health'] = 'RECOVERING';
+            } elseif (in_array($st, ['BACKOFF', 'UNHEALTHY', 'ERROR'], true)) {
                 $out['health'] = 'DEGRADED';
             } elseif ($st === 'LISTENING') {
                 $out['health'] = 'HEALTHY';

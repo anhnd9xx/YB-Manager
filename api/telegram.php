@@ -22,6 +22,13 @@ require_once __DIR__ . '/../sync/TelegramConfigService.php';
 require_once __DIR__ . '/../sync/PairingService.php';
 require_once __DIR__ . '/../sync/JobManager.php';
 
+// Supervisor tick (giong notify.php): auto-start + watchdog moi request.
+try {
+    require_once __DIR__ . '/../sync/TelegramSupervisor.php';
+    TelegramSupervisor::ensure();
+} catch (Throwable $e) {
+}
+
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? 'config';
 
@@ -86,12 +93,15 @@ try {
             $st = db()->prepare('INSERT INTO settings (skey, svalue) VALUES (?,?)
                 ON DUPLICATE KEY UPDATE svalue=VALUES(svalue)');
             if (array_key_exists('inbound_enabled', $b)) {
-                // Mac dinh OFF (§50): chi bat khi user tich + co bot token
+                // Mac dinh OFF (§50): chi bat khi user tich + co bot token.
+                // Ghi CA 2 key (cu + moi) de khong lech nhu bug INBOUND_OFF_NO_SETUP.
                 $on = !empty($b['inbound_enabled']) ? '1' : '0';
-                if ($on === '1' && trim((string)get_setting('notify_bot_token', '')) === '') {
+                if ($on === '1' && trim((string)get_setting('notify_bot_token', '')) === ''
+                    && TelegramConfigService::get_bot_token() === '') {
                     json_out(['ok' => false, 'message' => 'Cần cấu hình Bot Token trước'], 400);
                 }
                 $st->execute(['notify_inbound_enabled', $on]);
+                $st->execute(['tg_inbound_enabled', $on]);
             }
             if (array_key_exists('allowed', $b) && is_array($b['allowed'])) {
                 PermissionService::saveAllowed($b['allowed']);
@@ -401,8 +411,10 @@ try {
         }
 
         case 'poll_stop': {
-            tgp_kill('tg_polling');
-            json_out(['ok' => true, 'data' => ['running' => false]]);
+            // BI CAM (§22, §53): receiver thuoc Supervisor, UI khong duoc kill worker
+            // (kill khong recovery -> OFFLINE vinh vien). Dung Ngat ket noi / Restart.
+            json_out(['ok' => false,
+                'message' => 'Receiver do Supervisor quản lý. Dùng [Restart receiver] hoặc [Ngắt kết nối].'], 400);
             break;
         }
 
