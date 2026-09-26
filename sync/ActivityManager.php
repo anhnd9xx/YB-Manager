@@ -24,6 +24,7 @@ class ActivityManager
     public const T_CHECK = 'CHECK_TAB';
     public const T_CLOSE_AUTO = 'CLOSE_AUTOMATION_TAB';
     public const T_WEBSITE = 'OPEN_RANDOM_WEBSITE';
+    public const T_SEARCH_VISIT = 'SEARCH_VISIT';
 
     // Results / errors (§32)
     public const R_OPENED = 'OPENED';
@@ -110,6 +111,8 @@ class ActivityManager
                 'template' => "VARCHAR(20) NOT NULL DEFAULT 'NORMAL'",
                 'planner_enabled' => 'TINYINT(1) NOT NULL DEFAULT 1',
                 'next_run_at' => 'DATETIME NULL',
+                'search_behavior' => "VARCHAR(15) NOT NULL DEFAULT 'SEARCH_VISIT'",
+                'max_result_depth' => 'INT NOT NULL DEFAULT 10',
             ];
             foreach ($add as $col => $def) {
                 if (empty($cols[$col])) {
@@ -182,7 +185,7 @@ class ActivityManager
             'active_days' => '1,2,3,4,5,6,7', 'sessions_min' => 6, 'sessions_max' => 10,
             'tasks_min' => 1, 'tasks_max' => 3, 'gap_min' => 30, 'gap_max' => 120,
             'limits_json' => null, 'template' => 'NORMAL', 'planner_enabled' => 1,
-            'next_run_at' => null];
+            'next_run_at' => null, 'search_behavior' => 'SEARCH_VISIT', 'max_result_depth' => 10];
     }
 
     public static function getConfig(int $profileId): array
@@ -216,6 +219,9 @@ class ActivityManager
             $r['template'] = in_array(($r['template'] ?? 'NORMAL'), ['LIGHT', 'NORMAL', 'HIGH', 'CUSTOM'], true)
                 ? (string)$r['template'] : 'NORMAL';
             $r['planner_enabled'] = (int)($r['planner_enabled'] ?? 1);
+            $bh = strtoupper((string)($r['search_behavior'] ?? 'SEARCH_VISIT'));
+            $r['search_behavior'] = in_array($bh, ['SEARCH_ONLY', 'SEARCH_VISIT', 'DIRECT'], true) ? $bh : 'SEARCH_VISIT';
+            $r['max_result_depth'] = max(1, min(30, (int)($r['max_result_depth'] ?? 10)));
             return $r;
         } catch (Throwable $e) {
             return self::defaultConfig($profileId);
@@ -272,13 +278,17 @@ class ActivityManager
         if (!in_array($tpl, ['LIGHT', 'NORMAL', 'HIGH', 'CUSTOM'], true)) $tpl = 'NORMAL';
         $plannerOn = array_key_exists('planner_enabled', $in) ? (!empty($in['planner_enabled']) ? 1 : 0) : (int)$cur['planner_enabled'];
         $limits = self::cleanLimits($in['limits_json'] ?? ($cur['limits_json'] ?? null));
+        $bh = strtoupper((string)($in['search_behavior'] ?? $cur['search_behavior']));
+        if (!in_array($bh, ['SEARCH_ONLY', 'SEARCH_VISIT', 'DIRECT'], true)) $bh = 'SEARCH_VISIT';
+        $depth = (int)($in['max_result_depth'] ?? $cur['max_result_depth']);
+        $depth = max(1, min(30, $depth));
         try {
             db()->prepare('INSERT INTO activity_configs (profile_id, enabled, schedule_start, schedule_end,
                     interval_minutes, max_tabs, keep_required_tabs, required_pages, search_queries,
                     activity_mode, auto_start_profile, maintain_always, store_queries, pause_until,
                     active_days, sessions_min, sessions_max, tasks_min, tasks_max, gap_min, gap_max,
-                    limits_json, template, planner_enabled)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    limits_json, template, planner_enabled, search_behavior, max_result_depth)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON DUPLICATE KEY UPDATE enabled=VALUES(enabled), schedule_start=VALUES(schedule_start),
                     schedule_end=VALUES(schedule_end), interval_minutes=VALUES(interval_minutes),
                     max_tabs=VALUES(max_tabs), keep_required_tabs=VALUES(keep_required_tabs),
@@ -290,7 +300,8 @@ class ActivityManager
                     tasks_min=VALUES(tasks_min), tasks_max=VALUES(tasks_max),
                     gap_min=VALUES(gap_min), gap_max=VALUES(gap_max),
                     limits_json=VALUES(limits_json), template=VALUES(template),
-                    planner_enabled=VALUES(planner_enabled)')
+                    planner_enabled=VALUES(planner_enabled),
+                    search_behavior=VALUES(search_behavior), max_result_depth=VALUES(max_result_depth)')
                 ->execute([$profileId, $enabled, $ss . ':00', $se . ':00', $iv, $mt,
                     !empty($in['keep_required_tabs']) || !array_key_exists('keep_required_tabs', $in) ? 1 : 0,
                     json_encode(array_values($rp), JSON_UNESCAPED_UNICODE),
@@ -301,7 +312,7 @@ class ActivityManager
                     !empty($in['maintain_always']) ? 1 : 0,
                     !empty($in['store_queries']) ? 1 : 0,
                     $pauseUntil, $days, $sMin, $sMax, $tMin, $tMax, $gMin, $gMax,
-                    $limits, $tpl, $plannerOn]);
+                    $limits, $tpl, $plannerOn, $bh, $depth]);
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['db_error']];
         }
@@ -466,6 +477,42 @@ class ActivityManager
         @unlink(self::stateFile($profileId));
     }
 
+    /** @return string[] queries vua dung gan nhat (selector tranh lap) */
+    public static function recentQueries(int $profileId): array
+    {
+        $st = self::stateGet($profileId);
+        $q = (array)($st['recent_queries'] ?? []);
+        return array_values(array_filter(array_map('strval', $q)));
+    }
+
+    public static function pushRecentQuery(int $profileId, string $query): void
+    {
+        $st = self::stateGet($profileId);
+        $q = self::recentQueries($profileId);
+        array_unshift($q, $query);
+        $st['recent_queries'] = array_slice(array_values(array_unique($q)), 0, 5);
+        self::stateSet($profileId, $st);
+    }
+
+    /** @return string[] domains 3 visits gan nhat (§28) */
+    public static function recentDomains(int $profileId): array
+    {
+        $st = self::stateGet($profileId);
+        $d = (array)($st['recent_domains'] ?? []);
+        return array_values(array_filter(array_map('strval', $d)));
+    }
+
+    public static function pushRecentDomain(int $profileId, string $domain): void
+    {
+        $domain = strtolower(trim($domain));
+        if ($domain === '') return;
+        $st = self::stateGet($profileId);
+        $d = self::recentDomains($profileId);
+        array_unshift($d, $domain);
+        $st['recent_domains'] = array_slice(array_values(array_unique($d)), 0, 3);
+        self::stateSet($profileId, $st);
+    }
+
     // ================= CDP helpers =================
 
     private static function portOf(int $profileId): int
@@ -585,6 +632,9 @@ class ActivityManager
                     return self::taskOpen($profileId, $port, (string)($task['url'] ?? ''), $ms, false);
                 case self::T_SEARCH:
                     return self::taskSearch($profileId, $port, (string)($task['query'] ?? ''), $ms);
+                case self::T_SEARCH_VISIT:
+                    return self::taskSearchVisit($profileId, $port, (string)($task['query'] ?? ''),
+                        (int)($task['depth'] ?? 0), (bool)($task['test_mode'] ?? false), $ms);
                 case self::T_WEBSITE:
                     return self::taskWebsite($profileId, $port, (array)($task['exclude'] ?? []), $ms);
                 case self::T_CHECK:
@@ -821,6 +871,143 @@ class ActivityManager
         return $r;
     }
 
+    /**
+     * SEARCH_VISIT (§19): search -> parse organic -> loc pool -> visit 1 random.
+     * Khong approved result -> SEARCH SUCCESS + VISIT SKIPPED (§24).
+     * @return array{ok, result, ...}
+     */
+    private static function taskSearchVisit(int $profileId, int $port, string $query,
+        int $depth = 0, bool $testMode = false, ?callable $ms = null): array
+    {
+        $t0 = microtime(true);
+        $ms = $ms ?? fn() => (int)round((microtime(true) - $t0) * 1000);
+        $query = trim($query);
+        $cfg = self::getConfig($profileId);
+        if ($query === '') {
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => 'empty_query', 'ms' => $ms()];
+        }
+        if ($depth <= 0) $depth = (int)$cfg['max_result_depth'];
+        // Buoc 1: search (reuse search tab automation)
+        $sr = self::taskSearch($profileId, $port, $query, $ms);
+        if (empty($sr['ok'])) return $sr; // BLOCKED/SKIPPED lan truyen
+        $tabId = (string)($sr['tab'] ?? '');
+        $detail = ['query' => $testMode ? $query : ('qhash=' . substr(md5($query), 0, 8)),
+            'organic' => 0, 'approved' => 0, 'selected' => null, 'visit' => 'SKIPPED', 'reason' => ''];
+        if ($tabId === '') {
+            self::record($profileId, self::T_SEARCH_VISIT, 'google.com', self::R_SUCCESS, $ms(), null,
+                json_encode($detail, JSON_UNESCAPED_UNICODE));
+            return ['ok' => true, 'result' => self::R_SUCCESS, 'ms' => $ms(), 'detail' => $detail];
+        }
+        // Buoc 2: parse organic (defensive §48)
+        $parsed = self::extractOrganic($port, $tabId);
+        if ($parsed === null) {
+            $detail['visit'] = 'SKIPPED';
+            $detail['reason'] = 'RESULT_PARSE_FAILED';
+            self::record($profileId, self::T_SEARCH_VISIT, 'google.com', self::R_SUCCESS, $ms(),
+                'RESULT_PARSE_FAILED', json_encode($detail, JSON_UNESCAPED_UNICODE));
+            return ['ok' => true, 'result' => self::R_SUCCESS, 'ms' => $ms(), 'detail' => $detail];
+        }
+        // Buoc 3: loc pool
+        require_once __DIR__ . '/ActivityContentSelector.php';
+        $sel = ActivityContentSelector::select_approved_search_result($parsed, $depth, !$testMode);
+        $detail['organic'] = (int)$sel['organic_count'];
+        $detail['approved'] = count($sel['approved']);
+        if (empty($sel['picked'])) {
+            $detail['reason'] = 'NO_APPROVED_RESULT';
+            self::record($profileId, self::T_SEARCH_VISIT, 'google.com', self::R_SUCCESS, $ms(), null,
+                json_encode($detail, JSON_UNESCAPED_UNICODE));
+            self::pushRecentQuery($profileId, $query);
+            return ['ok' => true, 'result' => self::R_SUCCESS, 'ms' => $ms(), 'detail' => $detail];
+        }
+        // Buoc 4: visit candidate (automation tab, khong click quang cao — navigate truc tiep)
+        $picked = $sel['picked'];
+        $detail['selected'] = $picked['domain'];
+        $vr = self::taskOpen($profileId, $port, (string)$picked['url'], $ms, false);
+        if (!empty($vr['ok']) && !empty($vr['tab']) && self::waitPageReady($port, (string)$vr['tab'], 8000)) {
+            $detail['visit'] = 'SUCCESS';
+            self::pushRecentDomain($profileId, (string)$picked['domain']);
+            self::pushRecentQuery($profileId, $query);
+            if (!$testMode) {
+                self::record($profileId, self::T_SEARCH_VISIT, (string)$picked['domain'],
+                    self::R_SUCCESS, $ms(), null, json_encode($detail, JSON_UNESCAPED_UNICODE));
+            }
+            return ['ok' => true, 'result' => self::R_SUCCESS, 'ms' => $ms(),
+                'tab' => $vr['tab'], 'detail' => $detail];
+        }
+        $detail['visit'] = 'FAILED';
+        $detail['reason'] = (string)($vr['error'] ?? 'VISIT_FAILED');
+        if (!$testMode) {
+            self::record($profileId, self::T_SEARCH_VISIT, (string)$picked['domain'],
+                'VISIT_FAILED', $ms(), $detail['reason'], json_encode($detail, JSON_UNESCAPED_UNICODE));
+        }
+        return ['ok' => false, 'result' => 'VISIT_FAILED', 'error' => $detail['reason'],
+            'ms' => $ms(), 'detail' => $detail];
+    }
+
+    /**
+     * Trich organic results tu Google SERP (defensive: DOM doi -> null, khong crash).
+     * @return array[]|null [{url, title, sponsored}]
+     */
+    private static function extractOrganic(int $port, string $tabId): ?array
+    {
+        $js = "(()=>{try{const out=[];const seen=new Set();"
+            . "const adSel='[data-text-ad],.uEierd,#tads,#tads a,.commercial-unit,.commercial-unit a,[data-rw],.Krnil';"
+            . "const isAd=(el)=>{try{"
+            . "if(el.closest(adSel))return true;"
+            . "let p=el;for(let i=0;i<4&&p;i++){p=p.parentElement;if(!p)break;"
+            . "const t=(p.innerText||'').trim().slice(0,24).toLowerCase();"
+            . "if(t.indexOf('sponsored')===0||t.indexOf('được tài trợ')===0||t.indexOf('quảng cáo')===0||t.indexOf('ad ' )===0||t==='ad')return true;}"
+            . "return false;}catch(e){return false}};"
+            . "const links=document.querySelectorAll('a[href]');"
+            . "for(const a of links){try{"
+            . "const href=a.getAttribute('href')||'';"
+            . "if(!href||href.charAt(0)==='#'||href.indexOf('javascript:')===0)continue;"
+            . "if(href.indexOf('/search?')===0||href.indexOf('/advanced_search')===0)continue;"
+            . "const h3=a.querySelector('h3');"
+            . "if(!h3)continue;"
+            . "const title=(h3.innerText||'').trim().slice(0,150);"
+            . "if(!title)continue;"
+            . "if(seen.has(href))continue;seen.add(href);"
+            . "out.push({url:href,title:title,sponsored:isAd(a)});"
+            . "if(out.length>=30)break;"
+            . "}catch(e){}}"
+            . "return out;}catch(e){return null}})()";
+        try {
+            $d = AccountDataCollector::eval($port, $tabId, $js);
+        } catch (Throwable $e) {
+            return null;
+        }
+        if (!is_array($d) || !array_key_exists('value', $d)) return null;
+        $v = $d['value'];
+        if (!is_array($v)) return null;
+        $out = [];
+        foreach ($v as $r) {
+            if (!is_array($r) || empty($r['url'])) continue;
+            $out[] = ['url' => (string)$r['url'], 'title' => (string)($r['title'] ?? ''),
+                'sponsored' => !empty($r['sponsored'])];
+        }
+        return $out;
+    }
+
+    /**
+     * Doi page ready (poll readyState, toi da $timeoutMs). Khong sleep(10) (§47).
+     */
+    private static function waitPageReady(int $port, string $tabId, int $timeoutMs = 8000): bool
+    {
+        $deadline = microtime(true) + max(1000, $timeoutMs) / 1000;
+        while (microtime(true) < $deadline) {
+            try {
+                $d = AccountDataCollector::eval($port, $tabId,
+                    "(()=>{try{return document.readyState||''}catch(e){return ''}})()");
+                if (is_array($d) && ($d['value'] ?? '') === 'complete') return true;
+            } catch (Throwable $e) {
+                return false;
+            }
+            usleep(500000);
+        }
+        return false;
+    }
+
     /** CHECK_TAB: verify required hien dien (khong mo gi). */
     private static function taskCheck(int $profileId, int $port, callable $ms): array
     {
@@ -923,22 +1110,38 @@ class ActivityManager
     {
         self::ensureTables();
         $url = trim((string)($in['url'] ?? ''));
+        // Chap nhan domain tran (§11): tu them https://; reject scheme la
+        if (!preg_match('#^[a-z][a-z0-9+.-]*://#i', $url)) {
+            if (preg_match('#^(javascript|file|data|ftp|about):#i', $url)) {
+                return ['ok' => false, 'error' => 'Scheme không hỗ trợ'];
+            }
+            $url = 'https://' . ltrim($url, '/');
+        }
         if (!self::validHttpUrl($url)) return ['ok' => false, 'error' => 'URL không hợp lệ'];
         $cat = strtoupper((string)($in['category'] ?? 'CUSTOM'));
         if (!in_array($cat, self::WEB_CATEGORIES, true)) $cat = 'CUSTOM';
         $name = mb_substr(trim((string)($in['name'] ?? '')) ?: self::hostOf($url), 0, 120);
         $weight = max(1, min(10, (int)($in['weight'] ?? 1)));
         $enabled = array_key_exists('enabled', $in) ? (!empty($in['enabled']) ? 1 : 0) : 1;
+        $domain = self::normHost($url);
         try {
             if ($id > 0) {
                 db()->prepare('UPDATE activity_websites SET name=?, url=?, domain=?, category=?, enabled=?, weight=? WHERE id=?')
-                    ->execute([$name, $url, self::normHost($url), $cat, $enabled, $weight, $id]);
+                    ->execute([$name, $url, $domain, $cat, $enabled, $weight, $id]);
                 return ['ok' => true, 'id' => $id];
             }
+            // Dedupe theo domain (§12, §79): www/https khac nhau nhung cung domain -> 1 row
+            $ex = db()->prepare('SELECT id FROM activity_websites WHERE domain=? LIMIT 1');
+            $ex->execute([$domain]);
+            $dup = $ex->fetchColumn();
+            if ($dup) {
+                db()->prepare('UPDATE activity_websites SET name=?, url=?, category=?, enabled=?, weight=? WHERE id=?')
+                    ->execute([$name, $url, $cat, $enabled, $weight, (int)$dup]);
+                return ['ok' => true, 'id' => (int)$dup, 'duplicate' => true];
+            }
             db()->prepare('INSERT INTO activity_websites (name, url, domain, category, enabled, weight)
-                VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), domain=VALUES(domain),
-                category=VALUES(category), enabled=VALUES(enabled), weight=VALUES(weight)')
-                ->execute([$name, $url, self::normHost($url), $cat, $enabled, $weight]);
+                VALUES (?,?,?,?,?,?)')
+                ->execute([$name, $url, $domain, $cat, $enabled, $weight]);
             return ['ok' => true, 'id' => (int)db()->lastInsertId()];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'db_error'];
@@ -957,10 +1160,11 @@ class ActivityManager
         }
     }
 
-    /** Import nhieu dong URL (§5). @return array{added, skipped} */
+    /** Import nhieu dong URL (§5). @return array{added, duplicate, skipped} */
     public static function webImport(string $text, string $category = 'CUSTOM'): array
     {
         $added = 0;
+        $dup = 0;
         $skipped = 0;
         foreach (preg_split('/\r?\n/', $text) as $line) {
             $line = trim($line);
@@ -972,10 +1176,12 @@ class ActivityManager
                 [$name, $url] = array_map('trim', explode('|', $line, 2));
             }
             $r = self::webSave(null, ['name' => $name, 'url' => $url, 'category' => $category]);
-            if (!empty($r['ok'])) $added++;
-            else $skipped++;
+            if (!empty($r['ok'])) {
+                if (!empty($r['duplicate'])) $dup++;
+                else $added++;
+            } else $skipped++;
         }
-        return ['added' => $added, 'skipped' => $skipped];
+        return ['added' => $added, 'duplicate' => $dup, 'skipped' => $skipped];
     }
 
     // ================= Search Pool (§8-9) =================

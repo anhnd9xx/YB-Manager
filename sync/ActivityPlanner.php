@@ -326,8 +326,11 @@ class ActivityPlanner
             }
             if (!empty($r['ok']) || ($r['result'] ?? '') === ActivityManager::R_REUSED) $ok++;
             else $fail++;
-            // Domain vua dung -> exclude trong session (§7)
+            // Domain vua dung -> exclude trong session (§7); query vua dung -> recent (§27)
             if (!empty($tk['url'])) $excludeDomains[] = ActivityManager::domainOf((string)$tk['url']);
+            if (!empty($mapped['query']) && !empty($r['ok'])) {
+                ActivityManager::pushRecentQuery($profileId, (string)$mapped['query']);
+            }
             if ($kind === 'WEBSITE' && !empty($r['tab'])) {
                 // tab vua mo: lay domain thuc te? dung exclude rong — pool tu tranh lap gan
             }
@@ -373,10 +376,23 @@ class ActivityPlanner
                 return ['type' => ActivityManager::T_OPEN, 'url' => $url];
             case 'SEARCH': {
                 $cfg = ActivityManager::getConfig($profileId);
+                $bh = (string)($cfg['search_behavior'] ?? 'SEARCH_VISIT');
+                if ($bh === 'DIRECT') {
+                    // DIRECT: bo search, mo website pool thang (§25)
+                    $limits = ActivityManager::limitsFor($cfg);
+                    $done = ActivityManager::countToday($profileId);
+                    if ($done['WEBSITE'] >= (int)($limits['WEBSITE'][1] ?? 99)) return null;
+                    return ['type' => ActivityManager::T_WEBSITE, 'exclude' => $excludeDomains];
+                }
                 $limits = ActivityManager::limitsFor($cfg);
-                $pick = ActivityManager::pickSearch($profileId, (int)($limits['SEARCH'][1] ?? 0));
+                require_once __DIR__ . '/ActivityContentSelector.php';
+                $pick = ActivityContentSelector::select_query($profileId);
                 if (!$pick) return null;
-                return ['type' => ActivityManager::T_SEARCH, 'query' => (string)$pick['query']];
+                if ($bh === 'SEARCH_ONLY') {
+                    return ['type' => ActivityManager::T_SEARCH, 'query' => (string)$pick['query']];
+                }
+                return ['type' => ActivityManager::T_SEARCH_VISIT, 'query' => (string)$pick['query'],
+                    'depth' => (int)$cfg['max_result_depth']];
             }
             case 'WEBSITE': {
                 $cfg = ActivityManager::getConfig($profileId);

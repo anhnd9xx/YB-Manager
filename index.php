@@ -789,7 +789,7 @@
               <button type="button" class="btn btn-sm" onclick="tgPairCreate()">Tạo mã ghép nối</button>
               <span class="summary-text" id="tg-pair-out"></span>
             </div>
-            <div class="win-row" style="margin-top:6px">
+          <div class="win-row" style="margin-top:6px">
               <div class="win-field"><label>Role mặc định cho chat mới ghép nối</label>
                 <select id="tg-default-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="DEVELOPER">DEVELOPER</option><option value="ADMIN">ADMIN</option></select>
               </div>
@@ -1331,6 +1331,18 @@
             </div>
           </div>
           <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Hành vi Search</label>
+              <select id="act-search-behavior">
+                <option value="SEARCH_ONLY">Chỉ tìm kiếm</option>
+                <option value="SEARCH_VISIT" selected>Tìm kiếm + mở website hợp lệ</option>
+                <option value="DIRECT">Mở website trực tiếp</option>
+              </select>
+            </div>
+            <div class="win-field"><label>Độ sâu kết quả</label>
+              <input type="number" id="act-result-depth" value="10" min="1" max="30">
+            </div>
+          </div>
+          <div class="win-row" style="margin-top:6px">
             <div class="win-field"><label>Sessions/ngày</label>
               <div style="display:flex;gap:6px;align-items:center">
                 <input type="number" id="act-sess-min" value="6" min="1" max="24" style="width:100%">
@@ -1358,20 +1370,14 @@
           </div>
           <div class="form-group-title" style="margin-top:10px">Pool chung (mọi kênh)</div>
           <div class="hint">Website Pool + Search Pool dùng chung cho OPEN_RANDOM_WEBSITE và GOOGLE_SEARCH.</div>
+          <div class="sync-label" style="margin-top:6px">Website được phép truy cập</div>
           <div id="act-pool-web"><div class="skeleton"></div></div>
           <div style="display:flex;gap:6px;margin-top:6px">
-            <input type="text" id="act-web-url" placeholder="https://..." style="flex:1">
+            <input type="text" id="act-web-url" placeholder="https://... (Enter để thêm)" style="flex:1" onkeydown="if(event.key==='Enter')actWebAdd()">
             <button type="button" class="btn btn-sm" onclick="actWebAdd()">+ Thêm</button>
           </div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <textarea id="act-web-import" rows="2" style="flex:1" placeholder="Import nhiều URL (mỗi dòng 1 URL, hoặc Tên | URL)"></textarea>
-            <button type="button" class="btn btn-sm" onclick="actWebImport()">Nhập</button>
-          </div>
-          <div id="act-pool-search" style="margin-top:8px"><div class="skeleton"></div></div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <textarea id="act-search-import" rows="2" style="flex:1" placeholder="Import nhiều query (mỗi dòng 1 query)"></textarea>
-            <button type="button" class="btn btn-sm" onclick="actSearchImport()">Nhập</button>
-          </div>
+          <div class="sync-label" style="margin-top:8px">Danh sách từ khóa Google</div>
+          <div id="act-pool-search" style="margin-top:4px"><div class="skeleton"></div></div>
           <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="act-maintain" style="width:auto"> Luôn duy trì tab (tạo lại sau debounce)</label>
           <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="act-autostart" style="width:auto"> Cho phép tự mở profile tới lịch</label>
           <div class="hint">Tab automation chạy nền, không activate, không giành focus. Không click quảng cáo/CAPTCHA.</div>
@@ -1506,6 +1512,46 @@
       <button class="btn" onclick="closeModal('proxy-modal')">Hủy</button>
       <button class="btn" onclick="testProxyModal()">Test</button>
       <button class="btn btn-primary" onclick="saveProxy()">Lưu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: Import Pool (Auto Activity) ===== -->
+<div id="act-import-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="act-import-title">Nhập danh sách</h2>
+      <button class="modal-close" onclick="closeModal('act-import-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label>Dán danh sách (mỗi dòng 1 mục, paste 1000 dòng vẫn được)</label>
+      <textarea id="act-import-text" rows="10" style="width:100%" placeholder="Mỗi dòng một từ khóa..."></textarea>
+      <div id="act-import-preview" style="margin-top:8px"><p class="muted">Paste danh sách rồi bấm Kiểm tra.</p></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('act-import-modal')">Hủy</button>
+      <button class="btn" onclick="actImportCheck()">Kiểm tra</button>
+      <button class="btn btn-primary" onclick="actImportAdd()">Thêm danh sách</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: Import Pool (Auto Activity) ===== -->
+<div id="act-import-modal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="act-import-title">Nhập danh sách</h2>
+      <button class="modal-close" onclick="closeModal('act-import-modal')">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label>Dán danh sách (mỗi dòng 1 mục, paste 1000 dòng vẫn được)</label>
+      <textarea id="act-import-text" rows="10" style="width:100%" placeholder="Mỗi dòng một từ khóa..."></textarea>
+      <div id="act-import-preview" style="margin-top:8px"><p class="muted">Paste danh sách rồi bấm Kiểm tra.</p></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('act-import-modal')">Hủy</button>
+      <button class="btn" onclick="actImportCheck()">Kiểm tra</button>
+      <button class="btn btn-primary" onclick="actImportAdd()">Thêm danh sách</button>
     </div>
   </div>
 </div>

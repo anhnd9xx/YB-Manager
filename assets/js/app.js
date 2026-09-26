@@ -1515,8 +1515,8 @@ async function openAccountDrawer(id, keepOpen) {
   }
 }
 // Lich su activity trong drawer (§17): timeline + filter
-const ACT_TASK_VN = { ENSURE_TAB: 'Duy trì tab', OPEN_PAGE: 'Mở trang', OPEN_SEARCH: 'Tìm kiếm', CHECK_TAB: 'Kiểm tra tab', CLOSE_AUTOMATION_TAB: 'Dọn tab' };
-const ACT_RES_VN = { OPENED: 'Đã mở', REUSED: 'Đã có', SUCCESS: 'Thành công', CHECKED: 'Đã kiểm tra', MISSING: 'Thiếu', CLOSED: 'Đã đóng', SKIPPED: 'Bỏ qua', WAIT: 'Chờ', BLOCKED: 'Bị chặn' };
+const ACT_TASK_VN = { ENSURE_TAB: 'Duy trì tab', OPEN_PAGE: 'Mở trang', OPEN_SEARCH: 'Tìm kiếm', SEARCH_VISIT: 'Tìm + Mở', OPEN_RANDOM_WEBSITE: 'Mở web', CHECK_TAB: 'Kiểm tra tab', CLOSE_AUTOMATION_TAB: 'Dọn tab' };
+const ACT_RES_VN = { OPENED: 'Đã mở', REUSED: 'Đã có', SUCCESS: 'Thành công', CHECKED: 'Đã kiểm tra', MISSING: 'Thiếu', CLOSED: 'Đã đóng', SKIPPED: 'Bỏ qua', WAIT: 'Chờ', BLOCKED: 'Bị chặn', VISIT_FAILED: 'Mở lỗi' };
 async function actDrawerHistory(id) {
   const el = $('act-hist-list');
   if (!el || accDrawerId !== Number(id)) return;
@@ -1526,12 +1526,22 @@ async function actDrawerHistory(id) {
     if (accDrawerId !== Number(id)) return;
     const rows = (r.ok && r.data) ? r.data : [];
     el.innerHTML = rows.length
-      ? `<table class="data-table"><tbody>` + rows.map(h =>
-        `<tr><td class="mono">${escapeHtml((h.created_at || '').slice(5, 16))}</td>`
+      ? `<table class="data-table"><tbody>` + rows.map(h => {
+        let det = '';
+        try {
+          const d = JSON.parse(h.detail || 'null');
+          if (d && (d.organic !== undefined || d.selected || d.query)) {
+            det = `<br><small class="muted">organic ${d.organic || 0} · approved ${d.approved || 0}`
+              + (d.selected ? ` · → ${escapeHtml(d.selected)}` : '')
+              + (d.visit && d.visit !== 'SUCCESS' ? ` · visit ${escapeHtml(d.visit)}${d.reason ? ' (' + escapeHtml(d.reason) + ')' : ''}` : '') + `</small>`;
+          }
+        } catch (e) {}
+        return `<tr><td class="mono">${escapeHtml((h.created_at || '').slice(5, 16))}</td>`
         + `<td>${escapeHtml(h.domain || '')}</td>`
         + `<td>${escapeHtml(ACT_TASK_VN[h.task_type] || h.task_type || '')} · ${escapeHtml(ACT_RES_VN[h.result] || h.result || '')}`
-        + (h.error_code ? ` <small class="muted">(${escapeHtml(h.error_code)})</small>` : '') + `</td></tr>`).join('')
-        + `</tbody></table>`
+        + (h.error_code ? ` <small class="muted">(${escapeHtml(h.error_code)})</small>` : '') + det + `</td></tr>`;
+      }).join('')
+      + `</tbody></table>`
       : '<p class="muted">Chưa có hoạt động.</p>';
   } catch (e) {
     el.innerHTML = '<p class="muted">Lỗi tải.</p>';
@@ -1900,6 +1910,8 @@ async function actLoad(id) {
     $('act-interval').value = String(c.interval_minutes || 30);
     $('act-maxtabs').value = String(c.max_tabs || 5);
     $('act-mode').value = c.activity_mode || 'maintain';
+    $('act-search-behavior').value = c.search_behavior || 'SEARCH_VISIT';
+    $('act-result-depth').value = c.max_result_depth || 10;
     $('act-maintain').checked = !!c.maintain_always;
     $('act-autostart').checked = !!c.auto_start_profile;
     document.querySelectorAll('#act-presets input[data-preset]').forEach(cb => {
@@ -1962,6 +1974,8 @@ function actCollect() {
     required_pages: pages,
     search_queries: $('act-queries').value.split('\n').map(s => s.trim()).filter(Boolean),
     activity_mode: $('act-mode').value,
+    search_behavior: $('act-search-behavior').value,
+    max_result_depth: Number($('act-result-depth').value) || 10,
     template: $('act-template').value,
     sessions_min: Number($('act-sess-min').value) || 6,
     sessions_max: Number($('act-sess-max').value) || 10,
@@ -2023,62 +2037,168 @@ async function actRegen() {
   toast(r.ok ? 'Đã tạo lại lịch còn lại hôm nay.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   actPlanLoad(id);
 }
-// ---- Pool chung (§51-52) ----
+// ---- Pool chung (§51-52): bang + bulk + filter + paging ----
+let actWebPage = 1, actSearchPage = 1;
+const ACT_PER = 15;
 async function actPoolLoad() {
+  actWebTable();
+  actSearchTable();
+}
+function actPoolCatOpts(sel) {
+  return ['all', 'NEWS', 'TECH', 'WORK', 'EDUCATION', 'REFERENCE', 'TOOLS', 'CUSTOM']
+    .map(c => `<option value="${c}" ${sel === c ? 'selected' : ''}>${c === 'all' ? 'Mọi nhóm' : c}</option>`).join('');
+}
+async function actWebTable() {
+  const el = $('act-pool-web');
+  if (!el) return;
+  const q = ($('act-web-q') || {}).value || '';
+  const cat = ($('act-web-cat') || {}).value || 'all';
   try {
-    const [w, s] = await Promise.all([
-      getJson(api + 'activity.php?action=websites').catch(() => null),
-      getJson(api + 'activity.php?action=searchpool').catch(() => null),
-    ]);
-    const wel = $('act-pool-web');
-    if (wel) {
-      const rows = (w && w.ok && w.data) ? w.data : [];
-      wel.innerHTML = rows.length ? rows.slice(0, 30).map(x =>
-        `<div class="meta-row"><span class="meta-label">${escapeHtml(x.name || x.domain)} <small class="muted">${escapeHtml(x.category || '')} · w${x.weight} · dùng ${x.use_count || 0}</small></span>`
-        + `<span class="meta-value"><button type="button" class="btn btn-xs" onclick="actWebDel(${x.id})">✕</button></span></div>`).join('')
-        + (rows.length > 30 ? `<p class="muted">…và ${rows.length - 30} URL nữa</p>` : '')
-        : '<p class="muted">Pool trống — thêm URL để dùng OPEN_RANDOM_WEBSITE.</p>';
+    const r = await getJson(api + `activity.php?action=websites_table&page=${actWebPage}&per=${ACT_PER}&q=${encodeURIComponent(q)}&category=${cat}`);
+    const d = (r.ok && r.data) || { rows: [], total: 0 };
+    const pages = Math.max(1, Math.ceil(d.total / ACT_PER));
+    el.innerHTML = `<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">`
+      + `<input type="text" id="act-web-q" placeholder="Lọc..." value="${escapeHtml(q)}" style="flex:1" onkeydown="if(event.key==='Enter'){actWebPage=1;actWebTable()}">`
+      + `<select id="act-web-cat" onchange="actWebPage=1;actWebTable()">${actPoolCatOpts(cat)}</select></div>`
+      + `<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">`
+      + `<button type="button" class="btn btn-xs" onclick="actWebBulk('enable')">Bật</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actWebBulk('disable')">Tắt</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actWebBulk('delete')">Xóa</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actImportOpen('web')">Nhập DS</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actExport('web')">Xuất</button></div>`
+      + (d.rows.length ? `<table class="data-table"><thead><tr><th><input type="checkbox" onchange="actCheckAll('act-pool-web',this.checked)"></th><th>Tên/Domain</th><th>Nhóm</th><th>W</th><th>Dùng HN</th><th></th></tr></thead><tbody>`
+        + d.rows.map(x => `<tr><td><input type="checkbox" data-id="${x.id}"></td>`
+          + `<td><strong>${escapeHtml(x.name || '')}</strong><br><small class="mono muted">${escapeHtml(x.domain || '')}</small>${x.enabled ? '' : ' <span class="badge badge-muted">Tắt</span>'}</td>`
+          + `<td><small>${escapeHtml(x.category || '')}</small></td><td>${x.weight}</td>`
+          + `<td>${x.usage_today_count || 0}</td>`
+          + `<td style="white-space:nowrap"><button type="button" class="btn btn-xs" onclick="actWebTest(${x.id},this)">Test</button> <button type="button" class="btn btn-xs" onclick="actWebDel(${x.id})">✕</button></td></tr>`).join('')
+        + `</tbody></table><div class="hint">Trang ${d.page}/${pages} · tổng ${d.total} `
+        + (d.page > 1 ? `<button type="button" class="btn btn-xs" onclick="actWebPage--;actWebTable()">‹</button>` : '')
+        + (d.page < pages ? ` <button type="button" class="btn btn-xs" onclick="actWebPage++;actWebTable()">›</button>` : '') + `</div>`
+        : '<p class="muted">Pool trống.</p>');
+  } catch (e) {
+    el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+}
+async function actSearchTable() {
+  const el = $('act-pool-search');
+  if (!el) return;
+  const q = ($('act-search-q') || {}).value || '';
+  try {
+    const r = await getJson(api + `activity.php?action=searchpool_table&page=${actSearchPage}&per=${ACT_PER}&q=${encodeURIComponent(q)}`);
+    const d = (r.ok && r.data) || { rows: [], total: 0 };
+    const pages = Math.max(1, Math.ceil(d.total / ACT_PER));
+    el.innerHTML = `<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">`
+      + `<input type="text" id="act-search-q" placeholder="Lọc từ khóa..." value="${escapeHtml(q)}" style="flex:1" onkeydown="if(event.key==='Enter'){actSearchPage=1;actSearchTable()}">`
+      + `<button type="button" class="btn btn-xs" onclick="actSearchBulk('enable')">Bật</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actSearchBulk('disable')">Tắt</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actSearchBulk('delete')">Xóa</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actImportOpen('search')">Nhập DS</button>`
+      + `<button type="button" class="btn btn-xs" onclick="actExport('search')">Xuất</button></div>`
+      + (d.rows.length ? `<table class="data-table"><thead><tr><th><input type="checkbox" onchange="actCheckAll('act-pool-search',this.checked)"></th><th>Từ khóa</th><th>W</th><th>HN</th><th></th></tr></thead><tbody>`
+        + d.rows.map(x => `<tr><td><input type="checkbox" data-id="${x.id}"></td>`
+          + `<td>${escapeHtml((x.query || '').slice(0, 70))}${x.enabled ? '' : ' <span class="badge badge-muted">Tắt</span>'}<br><small class="muted">${escapeHtml(x.category || '')} · tổng ${x.use_count || 0}</small></td>`
+          + `<td>${x.weight}</td><td>${x.use_today_count || 0}</td>`
+          + `<td><button type="button" class="btn btn-xs" onclick="actSearchDel(${x.id})">✕</button></td></tr>`).join('')
+        + `</tbody></table><div class="hint">Trang ${d.page}/${pages} · tổng ${d.total} `
+        + (d.page > 1 ? `<button type="button" class="btn btn-xs" onclick="actSearchPage--;actSearchTable()">‹</button>` : '')
+        + (d.page < pages ? ` <button type="button" class="btn btn-xs" onclick="actSearchPage++;actSearchTable()">›</button>` : '') + `</div>`
+        : '<p class="muted">Pool trống.</p>');
+  } catch (e) {
+    el.innerHTML = '<p class="muted">Lỗi tải.</p>';
+  }
+}
+function actCheckAll(boxId, on) {
+  document.querySelectorAll('#' + boxId + ' input[type=checkbox][data-id]').forEach(cb => { cb.checked = on; });
+}
+function actCheckedIds(boxId) {
+  return [...document.querySelectorAll('#' + boxId + ' input[type=checkbox][data-id]:checked')].map(cb => Number(cb.dataset.id));
+}
+async function actWebBulk(op) {
+  const ids = actCheckedIds('act-pool-web');
+  if (!ids.length) { toast('Chưa chọn dòng nào', 'error'); return; }
+  if (op === 'delete' && !confirm(`Xóa ${ids.length} website?`)) return;
+  const r = await sendJson(api + 'activity.php?action=websites_bulk', { ids, op });
+  toast(r.ok ? 'Xong.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actWebTable();
+}
+async function actSearchBulk(op) {
+  const ids = actCheckedIds('act-pool-search');
+  if (!ids.length) { toast('Chưa chọn dòng nào', 'error'); return; }
+  if (op === 'delete' && !confirm(`Xóa ${ids.length} query?`)) return;
+  const r = await sendJson(api + 'activity.php?action=searchpool_bulk', { ids, op });
+  toast(r.ok ? 'Xong.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actSearchTable();
+}
+async function actWebTest(id, btn) {
+  if (btn) btn.textContent = '...';
+  const r = await getJson(api + `activity.php?action=website_test&id=${id}`);
+  const s = r.ok ? r.data.status : 'FAIL';
+  toast(r.ok ? (s === 'OK' ? '✓ Hoạt động' : (s === 'TIMEOUT' ? '⚠ Timeout' : '✕ Không truy cập được')) : 'Lỗi', r.ok && s === 'OK' ? 'success' : 'error');
+  if (btn) btn.textContent = 'Test';
+}
+async function actExport(pool) {
+  const r = await getJson(api + `activity.php?action=${pool === 'web' ? 'websites_export' : 'searchpool_export'}&format=txt`);
+  if (!r.ok) { toast('Lỗi', 'error'); return; }
+  const blob = new Blob([r.data.text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = pool + '-pool.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+// ---- Import modal (preview truoc khi them §69-70) ----
+let actImportPool = 'search';
+function actImportOpen(pool) {
+  actImportPool = pool;
+  $('act-import-title').textContent = pool === 'web' ? 'Nhập website (mỗi dòng 1 URL/domain)' : 'Nhập từ khóa (mỗi dòng 1 query)';
+  $('act-import-text').value = '';
+  $('act-import-preview').innerHTML = '<p class="muted">Paste danh sách rồi bấm Kiểm tra.</p>';
+  showModal('act-import-modal');
+}
+function actImportParse() {
+  const lines = ($('act-import-text').value || '').split('\n');
+  const seen = new Set();
+  let valid = 0, dup = 0, empty = 0;
+  const preview = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { empty++; continue; }
+    let key = line, ok = true;
+    if (actImportPool === 'web') {
+      let u = line.includes('://') ? line : 'https://' + line;
+      try {
+        const h = new URL(u).hostname.toLowerCase().replace(/^www\./, '');
+        if (!h.includes('.')) ok = false;
+        else key = h;
+      } catch (e) { ok = false; }
+    } else {
+      key = line.toLowerCase();
+      if (line.length > 200) ok = false;
     }
-    const sel = $('act-pool-search');
-    if (sel) {
-      const rows = (s && s.ok && s.data) ? s.data : [];
-      sel.innerHTML = rows.length ? `<div class="hint" style="margin:0 0 4px">${rows.length} query · hôm nay đã dùng: ${rows.reduce((a, x) => a + (Number(x.use_today_count) || 0), 0)}</div>`
-        + rows.slice(0, 20).map(x =>
-        `<div class="meta-row"><span class="meta-label">${escapeHtml((x.query || '').slice(0, 60))} <small class="muted">· w${x.weight}</small></span>`
-        + `<span class="meta-value"><button type="button" class="btn btn-xs" onclick="actSearchDel(${x.id})">✕</button></span></div>`).join('')
-        + (rows.length > 20 ? `<p class="muted">…và ${rows.length - 20} query nữa</p>` : '')
-        : '<p class="muted">Pool trống — import query để dùng GOOGLE_SEARCH.</p>';
-    }
-  } catch (e) {}
+    if (!ok) { empty++; continue; }
+    if (seen.has(key)) { dup++; continue; }
+    seen.add(key);
+    valid++;
+    if (preview.length < 20) preview.push(line);
+  }
+  return { total: lines.length, valid, dup, empty, preview };
 }
-async function actWebAdd() {
-  const url = ($('act-web-url').value || '').trim();
-  if (!url) return;
-  const r = await sendJson(api + 'activity.php?action=website_save', { url });
-  toast(r.ok ? 'Đã thêm URL.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
-  if (r.ok) { $('act-web-url').value = ''; actPoolLoad(); }
+function actImportCheck() {
+  const s = actImportParse();
+  $('act-import-preview').innerHTML = `<div class="hint">Tổng dòng: ${s.total} · Hợp lệ: <strong>${s.valid}</strong> · Trùng: ${s.dup} · Trống/lỗi: ${s.empty}</div>`
+    + (s.preview.length ? '<div class="mono"><small>' + s.preview.map(escapeHtml).join('<br>') + (s.valid > 20 ? '<br>…' : '') + '</small></div>' : '');
 }
-async function actWebImport() {
-  const t = ($('act-web-import').value || '').trim();
-  if (!t) return;
-  const r = await sendJson(api + 'activity.php?action=website_import', { text: t });
-  toast(r.ok ? `Đã thêm ${r.data.added}, bỏ qua ${r.data.skipped}.` : 'Lỗi', r.ok ? 'success' : 'error');
-  if (r.ok) { $('act-web-import').value = ''; actPoolLoad(); }
-}
-async function actWebDel(id) {
-  await sendJson(api + 'activity.php?action=website_delete', { id });
-  actPoolLoad();
-}
-async function actSearchImport() {
-  const t = ($('act-search-import').value || '').trim();
-  if (!t) return;
-  const r = await sendJson(api + 'activity.php?action=search_import', { text: t });
-  toast(r.ok ? `Đã thêm ${r.data.added}, bỏ qua ${r.data.skipped}.` : 'Lỗi', r.ok ? 'success' : 'error');
-  if (r.ok) { $('act-search-import').value = ''; actPoolLoad(); }
-}
-async function actSearchDel(id) {
-  await sendJson(api + 'activity.php?action=search_delete', { id });
-  actPoolLoad();
+async function actImportAdd() {
+  const s = actImportParse();
+  if (!s.valid) { toast('Không có dòng hợp lệ', 'error'); return; }
+  const text = ($('act-import-text').value || '');
+  const r = await sendJson(api + (actImportPool === 'web' ? 'activity.php?action=website_import' : 'activity.php?action=search_import'), { text });
+  if (r.ok) {
+    toast(`Đã thêm ${r.data.added}, bỏ qua ${r.data.skipped}.`, 'success');
+    closeModal('act-import-modal');
+    actPoolLoad();
+  } else toast(r.message || 'Lỗi', 'error');
 }
 async function actSave() {
   const body = actCollect();
