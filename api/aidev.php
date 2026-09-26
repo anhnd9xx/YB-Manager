@@ -26,6 +26,11 @@ try {
             foreach ($active as $j) {
                 if (in_array($j['status'], ['REVIEW_READY'], true)) $pending++;
             }
+            $sessCount = 0;
+            try {
+                $sessCount = (int)db()->query("SELECT COUNT(*) FROM ai_sessions WHERE status='ACTIVE'")->fetchColumn();
+            } catch (Throwable $e) {
+            }
             // Git workspace
             $git = ['clean' => null, 'branch' => null];
             if ($prim && is_dir((string)$prim['root_path'])) {
@@ -38,6 +43,7 @@ try {
                 'project' => $prim ? ['id' => $prim['id'], 'name' => $prim['name'],
                     'root_path' => $prim['root_path']] : null,
                 'active_jobs' => count($active),
+                'active_sessions' => $sessCount,
                 'pending_reviews' => $pending,
                 'git' => $git,
                 'config' => [
@@ -123,6 +129,13 @@ try {
             } catch (Throwable $e) {
             }
             $job['diff_files'] = $files;
+            try {
+                $st = db()->prepare('SELECT session_id, model, status, tokens_input, tokens_output, cost, updated_at
+                    FROM ai_sessions WHERE dev_job_id=? ORDER BY id DESC LIMIT 1');
+                $st->execute([(int)$job['id']]);
+                $job['ai_session'] = $st->fetch() ?: null;
+            } catch (Throwable $e) {
+            }
             json_out(['ok' => true, 'data' => $job]);
             break;
         }

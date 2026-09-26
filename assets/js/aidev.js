@@ -51,6 +51,7 @@ function aiRenderOc(d) {
     + kv('Server', `<span class="mono">${escapeHtml(oc.url || '')}</span>`)
     + (oc.pid ? kv('PID', escapeHtml(String(oc.pid))) : '')
     + kv('Dev Jobs', escapeHtml(String(d.active_jobs || 0)) + ' active · ' + escapeHtml(String(d.pending_reviews || 0)) + ' chờ duyệt')
+    + kv('Sessions', escapeHtml(String(d.active_sessions || 0)) + ' active')
     + kv('Git', escapeHtml((d.git && d.git.branch) || '?') + ' · ' + ((d.git && d.git.clean) ? 'sạch' : 'đang có thay đổi'))
     + `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">`
     + `<button type="button" class="btn btn-sm" onclick="aiOc('oc_restart')">Restart OpenCode</button>`
@@ -148,6 +149,9 @@ async function aiDrawerLoad(quiet) {
       + kv('Session', `<span class="mono"><small>${escapeHtml(j.opencode_session_id || '—')}</small></span>`)
       + kv('Thay đổi', escapeHtml(`${j.files_changed || 0} files · +${j.lines_added || 0} −${j.lines_removed || 0}`))
       + kv('Tests', escapeHtml(j.test_status || '—'))
+      + (j.ai_session ? kv('Model/Cost', escapeHtml((j.ai_session.model || '?')
+        + ' · tok ' + (j.ai_session.tokens_input || 0) + '/' + (j.ai_session.tokens_output || 0)
+        + ' · $' + (j.ai_session.cost || 0))) : '')
       + (j.test_report ? `<div class="mono"><small>${escapeHtml(j.test_report.slice(0, 400))}</small></div>` : '')
       + (risky ? `<div class="eval-prev">⚠ Rủi ro cao${j.has_db_migration ? ' · DB migration' : ''}${j.has_dependency_change ? ' · deps' : ''}${j.high_risk_flags ? ' · ' + escapeHtml(j.high_risk_flags) : ''}</div>` : '')
       + (files ? `<div class="cc-dsec">Files</div>` + files : '')

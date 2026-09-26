@@ -542,6 +542,56 @@ class AIDevConsole
                         : "✅ $arg applied: " . ($r['commit'] ?? ''));
                     return true;
                 }
+                case 'aidev:tgapprove': {
+                    // Duyet nhanh tu Telegram (ADMIN only, high-risk can CONFIRM2)
+                    if (!PermissionService::canApprove($role)) {
+                        self::reply($chatId, '⛔ Cần quyền ADMIN.');
+                        return true;
+                    }
+                    require_once __DIR__ . '/DevJobManager.php';
+                    $r = DevJobManager::approve($arg, 'telegram:' . $userId, false);
+                    if (!empty($r['ok'])) {
+                        self::sendWithButtons($chatId, "✅ $arg đã duyệt. Áp dụng vào main?",
+                            [['Áp dụng', 'aidev:apply:' . $arg], ['Để sau', 'aidev:cancel:']]);
+                    } elseif (($r['need'] ?? '') === 'CONFIRM2') {
+                        self::sendWithButtons($chatId, '⚠ ' . ($r['message'] ?? 'Rủi ro cao') . "\nJob: $arg",
+                            [['Tiếp tục duyệt', 'aidev:approve2:' . $arg], ['Hủy', 'aidev:cancel:']]);
+                    } else {
+                        self::reply($chatId, '❌ ' . ($r['error'] ?? 'Lỗi'));
+                    }
+                    return true;
+                }
+                case 'aidev:tgject': {
+                    if (!PermissionService::canApprove($role)) {
+                        self::reply($chatId, '⛔ Cần quyền ADMIN.');
+                        return true;
+                    }
+                    require_once __DIR__ . '/DevJobManager.php';
+                    $r = DevJobManager::reject($arg, 'telegram:' . $userId);
+                    self::reply($chatId, !empty($r['ok']) ? "Đã từ chối $arg. Main không đổi." : '❌ ' . ($r['error'] ?? 'Lỗi'));
+                    return true;
+                }
+                case 'aidev:tgfix': {
+                    // "Cho AI sua": tiep tuc CUNG session (§48)
+                    if (!PermissionService::canDev($role)) {
+                        self::reply($chatId, '⛔ Cần quyền DEVELOPER.');
+                        return true;
+                    }
+                    require_once __DIR__ . '/DevJobManager.php';
+                    $job = DevJobManager::get($arg);
+                    if (!$job) {
+                        self::reply($chatId, 'Không thấy job.');
+                        return true;
+                    }
+                    DevJobManager::setActiveForChat($chatId, $arg);
+                    $r = DevJobManager::followup($arg,
+                        'Tests đang FAIL. Hãy sửa lỗi cho tests pass, rồi báo cáo lại structured.',
+                        'telegram:' . $userId);
+                    self::reply($chatId, !empty($r['ok'])
+                        ? "🔧 Đã yêu cầu AI sửa trong cùng session $arg."
+                        : '❌ ' . ($r['error'] ?? 'Lỗi'));
+                    return true;
+                }
                 case 'dev:status': {
                     require_once __DIR__ . '/DevJobManager.php';
                     $job = DevJobManager::get($arg);
@@ -579,6 +629,7 @@ class AIDevConsole
             }
             $code = (string)$job['job_code'];
             DevJobManager::setActiveForChat($chatId, $code);
+            set_setting('ai_dev_chat_' . $code, $chatId); // milestone notify (§21-23)
             self::reply($chatId, "🛠 $code đã tạo. Đang chuẩn bị worktree cách ly...");
             $pr = DevJobManager::prepare($code, 'telegram:' . $userId);
             if (empty($pr['ok'])) {

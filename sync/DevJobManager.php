@@ -483,7 +483,11 @@ class DevJobManager
             self::set($code, ['test_status' => $ok ? 'PASS' : 'FAIL',
                 'test_report' => json_encode($report, JSON_UNESCAPED_UNICODE)]);
             if ($ok) self::finishReview($code, $by);
-            else self::set($code, ['error' => 'Lint fail: ' . implode(',', array_slice($failList, 0, 5))]);
+            else {
+                self::set($code, ['error' => 'Lint fail: ' . implode(',', array_slice($failList, 0, 5))]);
+                self::notifyMilestone($code, 'TEST_FAILED', 0, 0, 0,
+                    'Lint: ' . count($failList) . ' file lỗi');
+            }
             return ['ok' => $ok, 'report' => $report];
         } catch (Throwable $e) {
             self::set($code, ['test_status' => 'ERROR', 'error' => mb_substr($e->getMessage(), 0, 200)]);
@@ -574,7 +578,34 @@ class DevJobManager
             'high_risk_flags' => mb_substr(implode(';', $risks), 0, 255)
                 . ($files > $maxFiles ? ';LARGE_DIFF' : '')]);
         self::audit('REVIEW_READY', $code, $by, "files=$files +$add -$del");
+        self::notifyMilestone($code, 'REVIEW_READY', $files, $add, $del);
         return ['ok' => true, 'files' => $names];
+    }
+
+    /** Bao milestone gon ve Telegram requester (§21-23), khong spam tokens. */
+    private static function notifyMilestone(string $code, string $kind,
+        int $files = 0, int $add = 0, int $del = 0, string $extra = ''): void
+    {
+        try {
+            $chatId = (string)get_setting('ai_dev_chat_' . $code, '');
+            if ($chatId === '') return;
+            require_once __DIR__ . '/AIDevConsole.php';
+            if ($kind === 'REVIEW_READY') {
+                $txt = "✅ CODE HOÀN TẤT\nJob: $code\nFiles changed: $files\nLines: +$add -$del\n"
+                    . "Status: Chờ duyệt";
+                if ($extra !== '') $txt .= "\nTests: $extra";
+                AIDevConsole::sendWithButtons($chatId, $txt,
+                    [['Duyệt', 'aidev:tgapprove:' . $code], ['Từ chối', 'aidev:tgject:' . $code],
+                        ['Xem tiến độ', 'dev:status:' . $code]]);
+            } elseif ($kind === 'TEST_FAILED') {
+                AIDevConsole::sendWithButtons($chatId,
+                    "❌ $code TEST FAILED\n$extra\nKhông apply.",
+                    [['Cho AI sửa', 'aidev:tgfix:' . $code], ['Dừng', 'aidev:cancel:']]);
+            } elseif ($kind === 'APPLIED') {
+                AIDevConsole::reply($chatId, "✅ $code Applied\nCommit: $extra");
+            }
+        } catch (Throwable $e) {
+        }
     }
 
     public static function approve(string $code, string $by, bool $confirmedHighRisk = false): array
@@ -649,6 +680,7 @@ class DevJobManager
                 'applied_commit' => $commit, 'completed_at' => date('Y-m-d H:i:s')]);
             self::cleanupWorktree($job, true);
             self::audit('APPLY', $code, $by, "commit=$commit snapshot=$snap");
+            self::notifyMilestone($code, 'APPLIED', 0, 0, 0, $commit);
             return ['ok' => true, 'commit' => $commit, 'snapshot' => $snap];
         } catch (Throwable $e) {
             self::set($code, ['status' => self::ST_APPROVED, 'error' => mb_substr($e->getMessage(), 0, 200)]);
