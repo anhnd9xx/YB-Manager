@@ -711,11 +711,12 @@ class DevJobManager
             if (empty($v['ok'])) return ['ok' => false, 'error' => 'Root không hợp lệ'];
             $root = (string)$v['canonical'];
             if (self::isDirty($root)) return ['ok' => false, 'error' => 'Main tree dirty'];
-            // Revert merge commit can -m 1 (mainline); revert thuong khong can
+            // Revert merge commit can -m 1 (mainline); revert thuong khong can.
+            // Dung rev-list (khong dung --format=%P vi % bi cmd.exe expand).
             $isMerge = false;
             try {
-                $p = self::git($root, ['log', '--format=%P', '-n', '1', (string)$job['applied_commit']]);
-                $isMerge = !empty($p['ok']) && count(preg_split('/\s+/', trim((string)$p['out']))) > 1;
+                $p = self::git($root, ['rev-list', '--parents', '-n', '1', (string)$job['applied_commit']]);
+                $isMerge = !empty($p['ok']) && count(preg_split('/\s+/', trim((string)$p['out']))) > 2;
             } catch (Throwable $e) {
             }
             $args = ['revert', '--no-commit'];
