@@ -245,7 +245,9 @@ class DevJobManager
 
     public static function isDirty(string $root): bool
     {
-        $r = self::git($root, ['status', '--porcelain']);
+        // Chi tracked modifications (staged/unstaged). Bo qua untracked (pid/lock,
+        // .worktrees cua job khac) — khong thi job nao cung thay "dirty".
+        $r = self::git($root, ['status', '--porcelain', '--untracked-files=no']);
         return !empty($r['ok']) && trim((string)($r['out'] ?? '')) !== '';
     }
 
