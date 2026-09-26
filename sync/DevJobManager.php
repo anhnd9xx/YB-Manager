@@ -711,7 +711,18 @@ class DevJobManager
             if (empty($v['ok'])) return ['ok' => false, 'error' => 'Root không hợp lệ'];
             $root = (string)$v['canonical'];
             if (self::isDirty($root)) return ['ok' => false, 'error' => 'Main tree dirty'];
-            $r = self::git($root, ['revert', '--no-commit', (string)$job['applied_commit']], 120);
+            // Revert merge commit can -m 1 (mainline); revert thuong khong can
+            $isMerge = false;
+            try {
+                $p = self::git($root, ['log', '--format=%P', '-n', '1', (string)$job['applied_commit']]);
+                $isMerge = !empty($p['ok']) && count(preg_split('/\s+/', trim((string)$p['out']))) > 1;
+            } catch (Throwable $e) {
+            }
+            $args = ['revert', '--no-commit'];
+            if ($isMerge) $args[] = '-m';
+            if ($isMerge) $args[] = '1';
+            $args[] = (string)$job['applied_commit'];
+            $r = self::git($root, $args, 120);
             if (empty($r['ok'])) {
                 self::git($root, ['revert', '--abort']);
                 return ['ok' => false, 'error' => 'Revert conflict — đã abort'];
