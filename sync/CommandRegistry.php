@@ -114,5 +114,11 @@ class CommandRegistry
                 'handler' => [$H, 'pair']],
         ];
         foreach ($defs as $d) self::register($d);
+        // AI Dev Console commands (khong sua core khi them module AI)
+        try {
+            require_once __DIR__ . '/AIDevConsole.php';
+            AIDevConsole::register();
+        } catch (Throwable $e) {
+        }
     }
 }

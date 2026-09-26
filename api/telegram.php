@@ -108,7 +108,7 @@ try {
             }
             if (array_key_exists('default_role', $b)) {
                 $r = strtoupper(trim((string)$b['default_role']));
-                if (in_array($r, ['VIEWER', 'OPERATOR', 'ADMIN'], true)) {
+                if (in_array($r, PermissionService::ROLES, true)) {
                     $st->execute(['notify_default_role', $r]);
                 }
             }

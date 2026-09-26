@@ -11,9 +11,11 @@ class PermissionService
 {
     public const VIEWER = 'VIEWER';
     public const OPERATOR = 'OPERATOR';
+    public const DEVELOPER = 'DEVELOPER';
     public const ADMIN = 'ADMIN';
 
     public const RATE_PER_MIN = 10;
+    public const ROLES = ['VIEWER', 'OPERATOR', 'DEVELOPER', 'ADMIN'];
 
     /** @return array[] [{chat_id, user_id?, role}] */
     public static function allowed(): array
@@ -32,7 +34,7 @@ class PermissionService
         foreach ($list as $a) {
             if (!is_array($a) || trim((string)($a['chat_id'] ?? '')) === '') continue;
             $role = strtoupper(trim((string)($a['role'] ?? 'VIEWER')));
-            if (!in_array($role, [self::VIEWER, self::OPERATOR, self::ADMIN], true)) $role = self::VIEWER;
+            if (!in_array($role, self::ROLES, true)) $role = self::VIEWER;
             $clean[] = ['chat_id' => trim((string)$a['chat_id']),
                 'user_id' => trim((string)($a['user_id'] ?? '')),
                 'role' => $role];
@@ -53,12 +55,28 @@ class PermissionService
 
     public static function roleRank(string $role): int
     {
-        return $role === self::ADMIN ? 3 : ($role === self::OPERATOR ? 2 : 1);
+        if ($role === self::ADMIN) return 3;
+        if ($role === self::DEVELOPER || $role === self::OPERATOR) return 2;
+        return 1;
     }
 
     public static function can(string $role, string $required): bool
     {
+        if ($required === 'DEVELOPER') return self::canDev($role);
         return self::roleRank($role) >= self::roleRank($required);
+    }
+
+    /** Dev (plan/code): DEVELOPER hoac ADMIN. OPERATOR khong du. */
+    public static function canDev(string $role): bool
+    {
+        return $role === self::DEVELOPER || $role === self::ADMIN;
+    }
+
+    /** Approve/apply/rollback: mac dinh ADMIN (configurable). */
+    public static function canApprove(string $role): bool
+    {
+        if (get_setting('ai_require_admin_apply', '1') !== '1') return self::canDev($role);
+        return $role === self::ADMIN;
     }
 
     /** Rate limit 10/phut/chat. @return array{ok, retry_after?} */
@@ -82,6 +100,6 @@ class PermissionService
     public static function defaultRole(): string
     {
         $r = strtoupper(trim((string)get_setting('notify_default_role', self::VIEWER)));
-        return in_array($r, [self::VIEWER, self::OPERATOR, self::ADMIN], true) ? $r : self::VIEWER;
+        return in_array($r, self::ROLES, true) ? $r : self::VIEWER;
     }
 }

@@ -18,6 +18,7 @@ class ConversationService
     public const T_JOB = 'JOB';
     public const T_ALERT = 'ALERT';
     public const T_REPORT = 'REPORT';
+    public const T_AI = 'AI';
 
     public static function ensureTable(): void
     {
@@ -244,7 +245,7 @@ class ConversationService
             $w .= ' AND id < ?';
             $params[] = $beforeId;
         }
-        if (in_array($type, ['TEXT', 'COMMAND', 'JOB', 'ALERT', 'REPORT', 'SYSTEM'], true)) {
+        if (in_array($type, ['TEXT', 'COMMAND', 'JOB', 'ALERT', 'REPORT', 'SYSTEM', 'AI'], true)) {
             if ($type === 'TEXT') {
                 // Chat filter: TEXT + COMMAND? Spec filter: Chat/Command rieng -> Chat = TEXT
                 $w .= " AND msg_type='TEXT'";

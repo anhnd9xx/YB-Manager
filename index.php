@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260921i">
+  <link rel="stylesheet" href="assets/css/style.css?v=20260924a">
 </head>
 <body>
 
@@ -25,6 +25,16 @@
       <button class="nav-btn active" data-view="dashboard" data-tip="Tổng quan">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
         <span>Tổng quan</span>
+      </button>
+      <button class="nav-btn" data-view="controlcenter" data-tip="Trung tâm điều hành">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2 1 21h22L12 2zm0 4.2L19.5 19h-15L12 6.2zM11 10v5h2v-5h-2zm0 6v2h2v-2h-2z"/></svg>
+        <span>Trung tâm điều hành</span>
+        <span id="nav-cc-count" class="nav-count hidden"></span>
+      </button>
+      <button class="nav-btn" data-view="aidev" data-tip="AI Dev Console">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-2.3l-.85-.6C7.8 12.16 7 10.63 7 9c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.63-.8 3.16-2.15 4.1z"/></svg>
+        <span>AI Dev</span>
+        <span id="nav-ai-count" class="nav-count hidden"></span>
       </button>
       <button class="nav-btn" data-view="profiles" data-tip="Kênh">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
@@ -96,6 +106,139 @@
             <thead><tr><th>Thời gian</th><th>Kênh</th><th>Hành động</th><th>Chi tiết</th></tr></thead>
             <tbody id="dash-logs-tbody"></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- ===== VIEW: CONTROL CENTER (Trung tâm điều hành) ===== -->
+      <section id="view-controlcenter" class="view">
+        <div class="cc-hero">
+          <div class="cc-hero-text">
+            <div class="cc-hero-title">Trung tâm điều hành</div>
+            <div class="cc-hero-sub">Theo dõi hệ thống, công việc và cảnh báo theo thời gian thực</div>
+          </div>
+          <div class="cc-hero-right">
+            <span id="cc-live" class="badge badge-ok"><span class="nt-dot on"></span> Realtime</span>
+            <span id="cc-overall" class="badge badge-muted">…</span>
+            <button type="button" class="btn btn-sm" onclick="ccRefresh(true)">↻ Làm mới</button>
+          </div>
+        </div>
+        <div class="cc-kpis" id="cc-kpis">
+          <div class="skeleton"></div>
+        </div>
+        <div class="cc-grid">
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">▶</span>Công việc đang chạy
+                <button type="button" class="btn btn-xs" onclick="ccJobsToggle()" id="cc-jobs-toggle">Xem tất cả công việc</button>
+              </div>
+              <div id="cc-jobs"><div class="skeleton"></div></div>
+              <div id="cc-jobs-all" class="hidden">
+                <div class="cc-filters">
+                  <select id="cc-f-module" onchange="ccJobsLoad()"><option value="all">Mọi module</option><option>EVALUATION</option><option>BROWSER</option><option>AUTO_ACTIVITY</option><option>PROXY</option><option>SYSTEM</option></select>
+                  <select id="cc-f-status" onchange="ccJobsLoad()"><option value="ACTIVE">Đang hoạt động</option><option value="all">Tất cả</option><option>QUEUED</option><option>RUNNING</option><option>PAUSED</option><option>SUCCESS</option><option>PARTIAL</option><option>FAILED</option><option>CANCELLED</option><option>INTERRUPTED</option></select>
+                  <select id="cc-f-source" onchange="ccJobsLoad()"><option value="all">Mọi nguồn</option><option>UI</option><option>TELEGRAM</option><option>SCHEDULER</option><option>SYSTEM</option><option>API</option></select>
+                </div>
+                <div id="cc-jobs-list"><div class="skeleton"></div></div>
+              </div>
+            </div>
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">⚠</span>Cần chú ý <span id="cc-alert-n" class="badge badge-muted">0</span></div>
+              <div id="cc-alerts"><div class="skeleton"></div></div>
+            </div>
+          </div>
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">♥</span>Sức khỏe hệ thống</div>
+              <div id="cc-health"><div class="skeleton"></div></div>
+            </div>
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">◷</span>Lịch sắp tới</div>
+              <div id="cc-sched"><div class="skeleton"></div></div>
+            </div>
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">⚡</span>Thao tác nhanh</div>
+              <div class="cc-actions">
+                <button type="button" class="btn btn-sm" onclick="ccQuick('BROWSER_START')">▶ Mở kênh</button>
+                <button type="button" class="btn btn-sm" onclick="ccQuick('BROWSER_STOP')">■ Đóng kênh</button>
+                <button type="button" class="btn btn-sm" onclick="ccQuick('EVALUATION')">✓ Đánh giá</button>
+                <button type="button" class="btn btn-sm" onclick="ccQuick('PROXY_CHECK')">⌖ Kiểm tra Proxy</button>
+                <button type="button" class="btn btn-sm" onclick="ccQuick('AUTO_ACTIVITY')">◷ Activity</button>
+                <button type="button" class="btn btn-sm" onclick="ccSchedOpen()">＋ Tạo lịch</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="cc-grid">
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">◔</span>Tài nguyên</div>
+              <div id="cc-res"><div class="skeleton"></div></div>
+            </div>
+          </div>
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">☰</span>Hoạt động gần đây</div>
+              <div id="cc-activity"><div class="skeleton"></div></div>
+            </div>
+          </div>
+        </div>
+        <div id="cc-drawer" class="cc-drawer hidden">
+          <div class="cc-drawer-head">
+            <strong id="cc-drawer-title">Job</strong>
+            <button type="button" class="modal-close" onclick="ccDrawerClose()">×</button>
+          </div>
+          <div id="cc-drawer-body" class="cc-drawer-body"><div class="skeleton"></div></div>
+        </div>
+        <div id="cc-modal" class="modal-overlay hidden">
+          <div class="modal">
+            <div class="modal-header"><strong id="cc-modal-title">Thao tác</strong>
+              <button type="button" class="modal-close" onclick="ccModalClose()">×</button>
+            </div>
+            <div id="cc-modal-body" class="modal-body"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== VIEW: AI DEV CONSOLE ===== -->
+      <section id="view-aidev" class="view">
+        <div class="cc-hero">
+          <div class="cc-hero-text">
+            <div class="cc-hero-title">AI Dev Console</div>
+            <div class="cc-hero-sub">Hỏi project, lập phương án và code cùng OpenCode — duyệt trước khi áp dụng</div>
+          </div>
+          <div class="cc-hero-right">
+            <span id="ai-oc-state" class="badge badge-muted">…</span>
+            <button type="button" class="btn btn-sm" onclick="aiRefresh(true)">↻ Làm mới</button>
+          </div>
+        </div>
+        <div class="cc-grid">
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">✦</span>OpenCode</div>
+              <div id="ai-oc"><div class="skeleton"></div></div>
+            </div>
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">🛠</span>Dev Jobs đang hoạt động</div>
+              <div id="ai-jobs"><div class="skeleton"></div></div>
+            </div>
+          </div>
+          <div class="cc-col">
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">⚙</span>Cấu hình AI</div>
+              <div id="ai-config"><div class="skeleton"></div></div>
+            </div>
+            <div class="panel nt-panel">
+              <div class="nt-panel-head"><span class="nt-panel-ico">▦</span>Project</div>
+              <div id="ai-project"><div class="skeleton"></div></div>
+            </div>
+          </div>
+        </div>
+        <div id="ai-drawer" class="cc-drawer hidden">
+          <div class="cc-drawer-head">
+            <strong id="ai-drawer-title">Dev Job</strong>
+            <button type="button" class="modal-close" onclick="aiDrawerClose()">×</button>
+          </div>
+          <div id="ai-drawer-body" class="cc-drawer-body"><div class="skeleton"></div></div>
         </div>
       </section>
 
@@ -464,18 +607,25 @@
       </section>
       <!-- ===== VIEW: NOTIFY (Thông báo & Báo cáo) ===== -->
       <section id="view-notify" class="view">
-        <div class="mon-tabs">
-          <button class="mon-tab active" data-ntab="overview" onclick="notifyTab('overview')">Tổng quan</button>
-          <button class="mon-tab" data-ntab="telegram" onclick="notifyTab('telegram')">Telegram</button>
-          <button class="mon-tab" data-ntab="rules" onclick="notifyTab('rules')">Quy tắc</button>
-          <button class="mon-tab" data-ntab="reports" onclick="notifyTab('reports')">Báo cáo định kỳ</button>
-          <button class="mon-tab" data-ntab="history" onclick="notifyTab('history')">Lịch sử gửi</button>
-          <button class="mon-tab" data-ntab="chat" onclick="notifyTab('chat')">Chat & Điều khiển</button>
+        <div class="nt-hero">
+          <div class="nt-hero-text">
+            <div class="nt-hero-title">Thông báo &amp; Báo cáo</div>
+            <div class="nt-hero-sub">Trung tâm điều phối Telegram, quy tắc gửi và báo cáo định kỳ.</div>
+          </div>
+          <span id="nav-notify-count-hero" class="badge badge-danger hidden"></span>
+        </div>
+        <div class="mon-tabs nt-tabs">
+          <button class="mon-tab active" data-ntab="overview" onclick="notifyTab('overview')"><span class="nt-tab-ico">◈</span>Tổng quan</button>
+          <button class="mon-tab" data-ntab="telegram" onclick="notifyTab('telegram')"><span class="nt-tab-ico">✈</span>Telegram</button>
+          <button class="mon-tab" data-ntab="rules" onclick="notifyTab('rules')"><span class="nt-tab-ico">⚙</span>Quy tắc</button>
+          <button class="mon-tab" data-ntab="reports" onclick="notifyTab('reports')"><span class="nt-tab-ico">▤</span>Báo cáo định kỳ</button>
+          <button class="mon-tab" data-ntab="history" onclick="notifyTab('history')"><span class="nt-tab-ico">◷</span>Lịch sử gửi</button>
+          <button class="mon-tab" data-ntab="chat" onclick="notifyTab('chat')"><span class="nt-tab-ico">✎</span>Chat &amp; Điều khiển</button>
         </div>
         <div class="mon-pane" id="nt-pane-overview">
-          <div class="panel"><div id="nt-kpi" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
-          <div class="panel">
-            <div class="sync-label">Worker</div>
+          <div class="panel nt-panel"><div class="nt-panel-head"><span class="nt-panel-ico">◈</span>Trạng thái hệ thống</div><div id="nt-kpi" class="nt-kpi-grid"><div class="skeleton"></div></div></div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">⬢</span>Worker gửi tin<span id="nt-worker-dot" class="nt-dot"></span></div>
             <div id="nt-worker" class="muted">—</div>
             <div style="display:flex;gap:8px;margin-top:8px">
               <button class="btn btn-sm" onclick="notifyWorker(1)">Chạy worker</button>
@@ -486,16 +636,16 @@
         <div class="mon-pane hidden" id="nt-pane-telegram">
           <div class="nt-tg-grid">
             <div>
-              <div class="panel" id="tg-setup-panel">
-                <div class="sync-label">Kết nối Telegram</div>
+              <div class="panel nt-panel" id="tg-setup-panel">
+                <div class="nt-panel-head"><span class="nt-panel-ico">✈</span>Kết nối Telegram</div>
                 <div id="tg-setup-view"><div class="skeleton"></div></div>
               </div>
             </div>
-            <div class="panel" id="tg-test-panel">
+            <div class="panel nt-panel" id="tg-test-panel">
               <div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
                 <div>
-                  <div class="sync-label" style="margin:0">Chat Test</div>
-                  <div class="hint" style="margin:0">Gửi và nhận tin nhắn trực tiếp để kiểm tra kết nối Telegram.</div>
+                  <div class="nt-panel-head" style="margin:0"><span class="nt-panel-ico">✎</span>Chat Test</div>
+                  <div class="hint" style="margin:2px 0 0">Gửi và nhận tin nhắn trực tiếp để kiểm tra kết nối Telegram.</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                   <span id="nt-test-status" class="badge badge-muted">…</span>
@@ -512,8 +662,8 @@
               </div>
             </div>
           </div>
-          <div class="panel">
-            <div class="sync-label">Cấu hình thông báo <span class="summary-text" id="nt-preset-saved"></span></div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">⚙</span>Cấu hình thông báo <span class="summary-text" id="nt-preset-saved"></span></div>
               <label>Preset</label>
               <select id="nt-preset" onchange="notifyPresetApply(this.value)">
                 <option value="balanced">Cân bằng</option>
@@ -557,19 +707,19 @@
             </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-rules">
-          <div class="panel"><div id="nt-rules"><div class="skeleton"></div></div></div>
+          <div class="panel nt-panel"><div class="nt-panel-head"><span class="nt-panel-ico">⚙</span>Quy tắc gửi theo sự kiện</div><div id="nt-rules"><div class="skeleton"></div></div></div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-reports">
-          <div class="panel">
-            <div class="sync-label">Báo cáo định kỳ</div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">◷</span>Lịch gửi tự động</div>
             <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-r-daily" style="width:auto" data-ntkey="notify_daily_enabled"> Báo cáo ngày lúc <input type="time" id="nt-r-daily-time" value="23:00" style="width:auto" data-ntkey="notify_daily_time" data-ntval="time"></label>
             <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="nt-r-weekly" style="width:auto" data-ntkey="notify_weekly_enabled"> Báo cáo tuần
               <select id="nt-r-weekly-day" style="width:auto" data-ntkey="notify_weekly_day" data-ntval="int17"><option value="1">Thứ 2</option><option value="2">Thứ 3</option><option value="3">Thứ 4</option><option value="4">Thứ 5</option><option value="5">Thứ 6</option><option value="6">Thứ 7</option><option value="7">Chủ nhật</option></select>
               lúc <input type="time" id="nt-r-weekly-time" value="08:00" style="width:auto" data-ntkey="notify_weekly_time" data-ntval="time"></label>
             <div class="hint">Tự lưu khi thay đổi. Không gửi báo cáo trống trừ khi bật "luôn gửi" ở cấu hình nâng cao.</div>
           </div>
-          <div class="panel">
-            <div class="sync-label">Tạo báo cáo tùy chọn</div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">▤</span>Tạo báo cáo tùy chọn</div>
             <div class="win-row">
               <div class="win-field"><label>Từ</label><input type="datetime-local" id="nt-range-start"></div>
               <div class="win-field"><label>Đến</label><input type="datetime-local" id="nt-range-end"></div>
@@ -580,16 +730,16 @@
             </div>
             <div id="nt-range-out" style="margin-top:8px"></div>
           </div>
-          <div class="panel">
-            <div class="sync-label">Lịch sử báo cáo</div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">▦</span>Lịch sử báo cáo</div>
             <div id="nt-reports"><div class="skeleton"></div></div>
           </div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-history">
-          <div class="panel"><div id="nt-history"><div class="skeleton"></div></div></div>
+          <div class="panel nt-panel"><div class="nt-panel-head"><span class="nt-panel-ico">◷</span>Lịch sử gửi tin</div><div id="nt-history"><div class="skeleton"></div></div></div>
         </div>
         <div class="mon-pane hidden" id="nt-pane-chat">
-          <div class="panel chat-head">
+          <div class="panel chat-head nt-panel">
             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
               <strong>Chat & Điều khiển</strong>
               <span id="nt-chat-status" class="badge badge-muted">…</span>
@@ -631,7 +781,7 @@
               <div class="win-field"><label>Chat ID</label><input type="text" id="tg-new-chat" placeholder="123456789"></div>
               <div class="win-field"><label>User ID (tùy chọn)</label><input type="text" id="tg-new-user" placeholder=""></div>
               <div class="win-field"><label>Role</label>
-                <select id="tg-new-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="ADMIN">ADMIN</option></select>
+                <select id="tg-new-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="DEVELOPER">DEVELOPER</option><option value="ADMIN">ADMIN</option></select>
               </div>
             </div>
             <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -641,7 +791,7 @@
             </div>
             <div class="win-row" style="margin-top:6px">
               <div class="win-field"><label>Role mặc định cho chat mới ghép nối</label>
-                <select id="tg-default-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="ADMIN">ADMIN</option></select>
+                <select id="tg-default-role"><option value="VIEWER">VIEWER</option><option value="OPERATOR">OPERATOR</option><option value="DEVELOPER">DEVELOPER</option><option value="ADMIN">ADMIN</option></select>
               </div>
               <div class="win-field"><label>Polling</label><div id="tg-poll-status" class="muted">—</div></div>
             </div>
@@ -1552,6 +1702,8 @@
 
 <script src="assets/js/app.js?v=20260921i"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
-<script src="assets/js/notify.js?v=20260923a"></script>
+<script src="assets/js/notify.js?v=20260924a"></script>
+<script src="assets/js/controlcenter.js?v=20260924a"></script>
+<script src="assets/js/aidev.js?v=20260924a"></script>
 </body>
 </html>

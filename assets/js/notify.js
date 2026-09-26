@@ -24,11 +24,17 @@ async function notifyBadge() {
   try {
     const r = await getJson(api + 'notify.php?action=badge');
     if (!r.ok) return;
+    const n = r.data.badge || 0;
     const el = $('nav-notify-count');
     if (el) {
-      const n = r.data.badge || 0;
       el.textContent = n;
       el.classList.toggle('hidden', !n);
+    }
+    const hero = $('nav-notify-count-hero');
+    if (hero) {
+      hero.textContent = n ? n + ' cần xử lý' : 'Ổn định';
+      hero.classList.toggle('hidden', false);
+      hero.className = 'badge ' + (n ? 'badge-danger' : 'badge-ok');
     }
   } catch (e) {}
 }
@@ -39,14 +45,26 @@ async function notifyLoadOverview() {
       getJson(api + 'activity.php?action=status').catch(() => null),
     ]);
     const cfg = (s && s.ok && s.data) || {};
-    const kv = (k, v) => `<div class="mon-kv"><span>${k}</span><strong>${v}</strong></div>`;
+    const card = (ico, cls, label, value, sub) =>
+      `<div class="nt-kpi-card"><div class="nt-kpi-ico ${cls}">${ico}</div>`
+      + `<div class="nt-kpi-body"><div class="nt-kpi-label">${label}</div>`
+      + `<div class="nt-kpi-value">${value}</div>`
+      + (sub ? `<div class="nt-kpi-sub">${sub}</div>` : '') + `</div></div>`;
+    const tgOk = !!cfg.enabled && !!cfg.has_token;
     $('nt-kpi').innerHTML =
-      kv('Telegram', cfg.enabled ? (cfg.has_token ? '● Đã kết nối' : '● Thiếu token') : '● Tắt')
-      + kv('Worker', cfg.worker_running ? '● Đang chạy' : '● Dừng')
-      + kv('Báo cáo ngày', cfg.daily_enabled ? ('Bật (' + escapeHtml(cfg.daily_time || '') + ')') : 'Tắt')
-      + kv('Báo cáo tuần', cfg.weekly_enabled ? 'Bật' : 'Tắt');
+      card('✈', tgOk ? 'is-ok' : 'is-off', 'Telegram', tgOk ? 'Đã kết nối' : (cfg.enabled ? 'Thiếu token' : 'Đang tắt'), tgOk ? 'Nhận & gửi realtime' : 'Cần cấu hình')
+      + card('⬢', cfg.worker_running ? 'is-ok' : 'is-off', 'Worker', cfg.worker_running ? 'Đang chạy' : 'Đã dừng', cfg.worker_running ? 'Queue tự gửi' : 'Tin chờ trong outbox')
+      + card('◑', cfg.daily_enabled ? 'is-info' : 'is-off', 'Báo cáo ngày', cfg.daily_enabled ? 'Đang bật' : 'Đang tắt', cfg.daily_enabled ? escapeHtml(cfg.daily_time || '') : 'Báo cáo cuối ngày')
+      + card('▤', cfg.weekly_enabled ? 'is-info' : 'is-off', 'Báo cáo tuần', cfg.weekly_enabled ? 'Đang bật' : 'Đang tắt', 'Tổng kết hàng tuần');
     const w = $('nt-worker');
-    if (w) w.textContent = cfg.worker_running ? 'Worker đang chạy — queue tự gửi.' : 'Worker dừng — notification chờ trong outbox.';
+    const dot = $('nt-worker-dot');
+    if (w) {
+      w.innerHTML = cfg.worker_running
+        ? '<strong>Worker đang chạy</strong> — queue tự gửi, không cần can thiệp.'
+        : '<strong>Worker đang dừng</strong> — notification chờ trong outbox.';
+      w.classList.toggle('nt-worker-on', !!cfg.worker_running);
+    }
+    if (dot) dot.className = 'nt-dot ' + (cfg.worker_running ? 'on' : 'off');
   } catch (e) {
     $('nt-kpi').innerHTML = '<div class="empty-state">Không tải được.</div>';
   }
@@ -84,19 +102,28 @@ async function tgSetupView() {
       const cst = conn.status || 'CONNECTED';
       const cred = conn.credential_status || 'VALID';
       const credLabel = cred === 'VALID' ? 'Token: hợp lệ' : 'Token không hợp lệ';
-      el.innerHTML = `<div class="sync-label">Kết nối Telegram <span class="badge badge-${stColor[cst] || 'ok'}">${stLabel[cst] || cst}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Bot</span><span class="meta-value">@${escapeHtml(c.bot_username || '?')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Người nhận</span><span class="meta-value">${escapeHtml(c.display_name || c.username || '?')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Quyền</span><span class="meta-value">${escapeHtml(c.role || '')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Token</span><span class="meta-value mono">${escapeHtml(conn.token_preview || '')}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Tự kết nối khi mở Tool</span><span class="meta-value"><input type="checkbox" id="tg-auto-conn" ${conn.auto_connect ? 'checked' : ''} onchange="tgBotAutoConn(${(conn.id || 0)}, this.checked)" style="width:auto"></span></div>`
-        + `<div class="meta-row"><span class="meta-label">Receiver</span><span class="meta-value">${escapeHtml(polLabel)}${polSub ? ' <small class="muted">' + escapeHtml(polSub) + '</small>' : ''}</span></div>`
-        + (hl.health ? `<div class="meta-row"><span class="meta-label">Health</span><span class="meta-value"><span class="badge badge-${hcol2[hl.health] || 'muted'}">${escapeHtml(hl.health)}</span></span></div>` : '')
-        + (hl.uptime ? `<div class="meta-row"><span class="meta-label">Receiver uptime</span><span class="meta-value">${escapeHtml(hl.uptime)}</span></div>` : '')
-        + `<div class="meta-row"><span class="meta-label">Poll cuối</span><span class="meta-value">${escapeHtml(agoUnix(pol.last_poll_completed_at))}</span></div>`
-        + `<div class="meta-row"><span class="meta-label">Tin nhận cuối</span><span class="meta-value">${escapeHtml(rel(c.last_in_at))}</span></div>`
+      const botName = c.bot_username || '?';
+      const botInitial = (botName.replace(/^@/, '').charAt(0) || 'T').toUpperCase();
+      const liveCls = cst === 'CONNECTED' ? 'live' : 'dead';
+      const tile = (label, value, sub) =>
+        `<div class="nt-tile"><div class="nt-tile-label">${label}</div>`
+        + `<div class="nt-tile-value">${value}</div>`
+        + (sub ? `<div class="nt-tile-sub">${sub}</div>` : '') + `</div>`;
+      el.innerHTML = `<div class="nt-profile">`
+        + `<div class="nt-avatar ${liveCls}">${escapeHtml(botInitial)}</div>`
+        + `<div class="nt-profile-body"><div class="nt-profile-name">@${escapeHtml(botName)}</div>`
+        + `<div class="nt-profile-sub">${escapeHtml(c.display_name || c.username || 'Chưa ghép nối')}${c.role ? ' · ' + escapeHtml(c.role) : ''}</div></div>`
+        + `<span class="badge badge-${stColor[cst] || 'ok'}">${stLabel[cst] || cst}</span></div>`
+        + `<div class="nt-tiles">`
+        + tile('Receiver', escapeHtml(polLabel), polSub ? escapeHtml(polSub) : '')
+        + (hl.health ? tile('Sức khỏe', `<span class="badge badge-${hcol2[hl.health] || 'muted'}">${escapeHtml(hl.health)}</span>`, hl.uptime ? 'uptime ' + escapeHtml(hl.uptime) : '') : '')
+        + tile('Poll cuối', escapeHtml(agoUnix(pol.last_poll_completed_at)), '')
+        + tile('Tin nhận cuối', escapeHtml(rel(c.last_in_at)), '')
+        + `</div>`
         + ((hl.reconnect_count || hl.worker_restarts)
           ? `<div class="meta-row"><span class="meta-label">Reconnect / Restart</span><span class="meta-value">${escapeHtml(String(hl.reconnect_count || 0))} / ${escapeHtml(String(hl.worker_restarts || 0))}${hl.last_restart_reason ? ' <small class="muted">(' + escapeHtml(hl.last_restart_reason) + ')</small>' : ''}</span></div>` : '')
+        + `<div class="meta-row"><span class="meta-label">Token</span><span class="meta-value mono">${escapeHtml(conn.token_preview || '')}</span></div>`
+        + `<div class="meta-row"><span class="meta-label">Tự kết nối khi mở Tool</span><span class="meta-value"><input type="checkbox" id="tg-auto-conn" ${conn.auto_connect ? 'checked' : ''} onchange="tgBotAutoConn(${(conn.id || 0)}, this.checked)"></span></div>`
         + (cred !== 'VALID' ? `<div class="eval-prev">⚠ ${escapeHtml(credLabel)} — nhập token mới hoặc kiểm tra lại.</div>` : '')
         + `<div class="meta-row"><span class="meta-label">Gửi cuối</span><span class="meta-value">${escapeHtml(rel(c.last_out_at))}</span></div>`
         + `<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center">`
@@ -927,16 +954,20 @@ async function notifySendTest() {
 const NT_MODE_VN = { OFF: 'Tắt', IMMEDIATE: 'Ngay', DIGEST: 'Gom' };
 async function notifyLoadRules() {
   const el = $('nt-rules');
+  const sevBadge = (s) => {
+    const m = { INFO: 'info', WARNING: 'warn', ERROR: 'err', CRITICAL: 'err' };
+    return `<span class="badge badge-${m[String(s || '').toUpperCase()] || 'muted'}">${escapeHtml(s)}</span>`;
+  };
   try {
     const r = await getJson(api + 'notify.php?action=rules');
     const rows = (r.ok && r.data) ? r.data : [];
-    el.innerHTML = `<table class="data-table"><thead><tr><th>Module</th><th>Event</th><th>Severity</th><th>Telegram</th><th>Mode</th></tr></thead><tbody>`
-      + rows.map(x => `<tr><td>${escapeHtml(x.module)}</td><td>${escapeHtml(x.event_type)}</td>`
-        + `<td>${escapeHtml(x.severity)}</td>`
-        + `<td><input type="checkbox" ${x.enabled ? 'checked' : ''} onchange="notifyRuleSave(${x.id}, this)"></td>`
+    el.innerHTML = `<div class="nt-table-wrap"><table class="data-table nt-table"><thead><tr><th>Module</th><th>Event</th><th>Severity</th><th>Telegram</th><th>Mode</th></tr></thead><tbody>`
+      + rows.map(x => `<tr><td><strong>${escapeHtml(x.module)}</strong></td><td class="mono">${escapeHtml(x.event_type)}</td>`
+        + `<td>${sevBadge(x.severity)}</td>`
+        + `<td><input type="checkbox" class="nt-switch" ${x.enabled ? 'checked' : ''} onchange="notifyRuleSave(${x.id}, this)"></td>`
         + `<td><select onchange="notifyRuleSave(${x.id}, null, this)">`
         + ['OFF', 'IMMEDIATE', 'DIGEST'].map(m => `<option value="${m}" ${x.mode === m ? 'selected' : ''}>${NT_MODE_VN[m]}</option>`).join('')
-        + `</select></td></tr>`).join('') + `</tbody></table>`;
+        + `</select></td></tr>`).join('') + `</tbody></table></div>`;
   } catch (e) {
     el.innerHTML = '<div class="empty-state">Lỗi tải rules.</div>';
   }
@@ -950,18 +981,22 @@ async function notifyRuleSave(id, cb, sel) {
 }
 async function notifyLoadHistory() {
   const el = $('nt-history');
+  const stBadge = (s) => {
+    const m = { SENT: 'ok', DELIVERED: 'ok', PENDING: 'warn', QUEUED: 'warn', FAILED: 'err', CANCELLED: 'muted' };
+    return `<span class="badge badge-${m[String(s || '').toUpperCase()] || 'muted'}">${escapeHtml(s)}</span>`;
+  };
   try {
     const r = await getJson(api + 'notify.php?action=history&limit=100');
     const rows = (r.ok && r.data) ? r.data : [];
     el.innerHTML = rows.length
-      ? `<table class="data-table"><thead><tr><th>Thời gian</th><th>Module</th><th>Tiêu đề</th><th>Trạng thái</th><th></th></tr></thead><tbody>`
+      ? `<div class="nt-table-wrap"><table class="data-table nt-table"><thead><tr><th>Thời gian</th><th>Module</th><th>Tiêu đề</th><th>Trạng thái</th><th></th></tr></thead><tbody>`
         + rows.map(h => `<tr><td class="mono">${escapeHtml((h.created_at || '').slice(5, 16))}</td>`
-          + `<td>${escapeHtml(h.module || '')}</td>`
+          + `<td><strong>${escapeHtml(h.module || '')}</strong></td>`
           + `<td><small>${escapeHtml((h.ev_title || h.message || '').slice(0, 80))}</small></td>`
-          + `<td>${escapeHtml(h.status)}${h.attempt_count > 1 ? ` <small class="muted">Retry ${h.attempt_count}/3</small>` : ''}`
+          + `<td>${stBadge(h.status)}${h.attempt_count > 1 ? ` <small class="muted">Retry ${h.attempt_count}/3</small>` : ''}`
           + (h.last_error ? `<br><small class="muted">${escapeHtml(h.last_error)}</small>` : '') + `</td>`
           + `<td>${h.status === 'PENDING' ? `<button class="btn btn-xs" onclick="notifyCancel('${h.notification_id}')">Hủy</button>` : ''}</td></tr>`).join('')
-        + `</tbody></table>`
+        + `</tbody></table></div>`
       : '<div class="empty-state">Chưa có notification nào.</div>';
   } catch (e) {
     el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
@@ -1017,17 +1052,21 @@ async function notifyPreviewSend() {
 async function notifyLoadReports() {
   const el = $('nt-reports');
   if (!el) return;
+  const stBadge = (s) => {
+    const m = { SENT: 'ok', DELIVERED: 'ok', PENDING: 'warn', QUEUED: 'warn', FAILED: 'err', SKIPPED: 'muted' };
+    return `<span class="badge badge-${m[String(s || '').toUpperCase()] || 'muted'}">${escapeHtml(s)}</span>`;
+  };
   try {
     const r = await getJson(api + 'notify.php?action=reports&limit=20');
     const rows = (r.ok && r.data) ? r.data : [];
     el.innerHTML = rows.length
-      ? `<table class="data-table"><thead><tr><th>Loại</th><th>Phạm vi</th><th>Tạo lúc</th><th>Gửi</th><th></th></tr></thead><tbody>`
-        + rows.map(x => `<tr><td>${escapeHtml(x.type)}</td>`
+      ? `<div class="nt-table-wrap"><table class="data-table nt-table"><thead><tr><th>Loại</th><th>Phạm vi</th><th>Tạo lúc</th><th>Gửi</th><th></th></tr></thead><tbody>`
+        + rows.map(x => `<tr><td><strong>${escapeHtml(x.type)}</strong></td>`
           + `<td class="mono"><small>${escapeHtml((x.range_start || '').slice(0, 16))} → ${(x.range_end || '').slice(0, 16)}</small></td>`
           + `<td class="mono">${escapeHtml((x.generated_at || '').slice(5, 16))}</td>`
-          + `<td>${escapeHtml(x.delivery_status)}</td>`
+          + `<td>${stBadge(x.delivery_status)}</td>`
           + `<td><button class="btn btn-xs" onclick="notifyResend('${x.report_id}')">Gửi Telegram</button></td></tr>`).join('')
-        + `</tbody></table>`
+        + `</tbody></table></div>`
       : '<div class="empty-state">Chưa có báo cáo.</div>';
   } catch (e) {
     el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
@@ -1123,7 +1162,7 @@ function ntParseTs(s) {
 function ntTypeLabel(m) {
   const t = m.msg_type || 'TEXT';
   if (t === 'TEXT') return '';
-  const vn = { COMMAND: 'COMMAND', JOB: 'JOB', ALERT: 'ALERT', REPORT: 'REPORT', SYSTEM: 'HỆ THỐNG' };
+  const vn = { COMMAND: 'COMMAND', JOB: 'JOB', ALERT: 'ALERT', REPORT: 'REPORT', SYSTEM: 'HỆ THỐNG', AI: 'AI' };
   return `<span class="chat-type chat-type-${t}">${vn[t] || t}</span>`;
 }
 function ntMsgStatus(m) {

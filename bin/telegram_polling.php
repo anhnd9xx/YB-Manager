@@ -398,6 +398,20 @@ function handle_update(array $u): void
             return;
         }
     }
+    // AI Dev Console: lenh /ai|/plan|/dev luon COMMAND mode (§39); text thuong
+    // tu user hop le -> IntentRouter (khong sua core flow).
+    if ($isCmd) {
+        $aiName = strtolower(preg_replace('/[^a-z0-9_.-].*$/', '', substr($text, 1)));
+        require_once __DIR__ . '/../sync/AIDevConsole.php';
+        if (in_array($aiName, AIDevConsole::commands(), true)) {
+            $msgType = ConversationService::T_COMMAND;
+        }
+    } elseif (!empty($chk['ok'])) {
+        require_once __DIR__ . '/../sync/AIDevConsole.php';
+        if (AIDevConsole::handleText($chatId, $userId, (string)($chk['role'] ?? 'VIEWER'), $text)) {
+            return;
+        }
+    }
     if ($msgType === ConversationService::T_TEXT && $isCmd) {
         return;
     }
@@ -461,6 +475,13 @@ function handle_callback(array $cb): void
         ConversationService::log(ConversationService::IN, $chatId, $raw, ['user_id' => $userId]);
         $reply = CommandRouter::route($raw, 'TELEGRAM', $chatId, $userId);
         send_reply($chatId, $reply, $raw);
+    } elseif (str_starts_with($data, 'aidev:') || str_starts_with($data, 'dev:')) {
+        // AI Dev Console callbacks (approval/plan/dev/progress)
+        require_once __DIR__ . '/../sync/PermissionService.php';
+        $chk = PermissionService::check($chatId, $userId);
+        if (empty($chk['ok'])) return;
+        require_once __DIR__ . '/../sync/AIDevConsole.php';
+        AIDevConsole::handleCallback($chatId, $userId, (string)($chk['role'] ?? 'VIEWER'), $data);
     }
 }
 
