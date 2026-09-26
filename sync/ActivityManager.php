@@ -23,6 +23,7 @@ class ActivityManager
     public const T_SEARCH = 'OPEN_SEARCH';
     public const T_CHECK = 'CHECK_TAB';
     public const T_CLOSE_AUTO = 'CLOSE_AUTOMATION_TAB';
+    public const T_WEBSITE = 'OPEN_RANDOM_WEBSITE';
 
     // Results / errors (§32)
     public const R_OPENED = 'OPENED';
@@ -92,6 +93,77 @@ class ActivityManager
                 detail TEXT NULL,
                 KEY idx_hist_profile (profile_id, id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            // Planner columns (migration giu config cu)
+            $cols = [];
+            foreach (db()->query('SHOW COLUMNS FROM activity_configs')->fetchAll() as $r) {
+                $cols[(string)$r['Field']] = true;
+            }
+            $add = [
+                'active_days' => "VARCHAR(20) NOT NULL DEFAULT '1,2,3,4,5,6,7'",
+                'sessions_min' => 'INT NOT NULL DEFAULT 6',
+                'sessions_max' => 'INT NOT NULL DEFAULT 10',
+                'tasks_min' => 'INT NOT NULL DEFAULT 1',
+                'tasks_max' => 'INT NOT NULL DEFAULT 3',
+                'gap_min' => 'INT NOT NULL DEFAULT 30',
+                'gap_max' => 'INT NOT NULL DEFAULT 120',
+                'limits_json' => 'TEXT NULL',
+                'template' => "VARCHAR(20) NOT NULL DEFAULT 'NORMAL'",
+                'planner_enabled' => 'TINYINT(1) NOT NULL DEFAULT 1',
+                'next_run_at' => 'DATETIME NULL',
+            ];
+            foreach ($add as $col => $def) {
+                if (empty($cols[$col])) {
+                    try {
+                        db()->exec("ALTER TABLE activity_configs ADD COLUMN $col $def");
+                    } catch (Throwable $e) {
+                    }
+                }
+            }
+            db()->exec("CREATE TABLE IF NOT EXISTS activity_websites (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(120) NOT NULL DEFAULT '',
+                url VARCHAR(500) NOT NULL DEFAULT '',
+                domain VARCHAR(190) NOT NULL DEFAULT '',
+                category VARCHAR(20) NOT NULL DEFAULT 'CUSTOM',
+                enabled TINYINT(1) NOT NULL DEFAULT 1,
+                weight INT NOT NULL DEFAULT 1,
+                last_used_at DATETIME NULL,
+                use_count INT NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_act_web_url (url(255)),
+                KEY idx_act_web (enabled, category)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            db()->exec("CREATE TABLE IF NOT EXISTS activity_search_pool (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                query VARCHAR(200) NOT NULL DEFAULT '',
+                category VARCHAR(20) NOT NULL DEFAULT 'CUSTOM',
+                enabled TINYINT(1) NOT NULL DEFAULT 1,
+                weight INT NOT NULL DEFAULT 1,
+                last_used_at DATETIME NULL,
+                use_count INT NOT NULL DEFAULT 0,
+                use_today DATE NULL,
+                use_today_count INT NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_act_search_query (query(191)),
+                KEY idx_act_search (enabled, category)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            db()->exec("CREATE TABLE IF NOT EXISTS activity_sessions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                session_key VARCHAR(80) NOT NULL DEFAULT '',
+                profile_id INT NOT NULL,
+                plan_date DATE NOT NULL,
+                run_at DATETIME NOT NULL,
+                tasks_json TEXT NOT NULL,
+                status VARCHAR(15) NOT NULL DEFAULT 'PLANNED',
+                started_at DATETIME NULL,
+                completed_at DATETIME NULL,
+                success_count INT NOT NULL DEFAULT 0,
+                failed_count INT NOT NULL DEFAULT 0,
+                error_code VARCHAR(40) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_act_session (session_key),
+                KEY idx_act_sess_profile (profile_id, plan_date, status, run_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         } catch (Throwable $e) {
         }
     }
@@ -106,7 +178,11 @@ class ActivityManager
             'required_pages' => ['gmail', 'google'], 'search_queries' => [],
             'activity_mode' => 'maintain', 'auto_start_profile' => 0,
             'maintain_always' => 0, 'store_queries' => 0,
-            'pause_until' => null, 'last_run_at' => null];
+            'pause_until' => null, 'last_run_at' => null,
+            'active_days' => '1,2,3,4,5,6,7', 'sessions_min' => 6, 'sessions_max' => 10,
+            'tasks_min' => 1, 'tasks_max' => 3, 'gap_min' => 30, 'gap_max' => 120,
+            'limits_json' => null, 'template' => 'NORMAL', 'planner_enabled' => 1,
+            'next_run_at' => null];
     }
 
     public static function getConfig(int $profileId): array
@@ -130,6 +206,16 @@ class ActivityManager
             $r['required_pages'] = is_array($rp) ? array_values($rp) : [];
             $sq = json_decode((string)($r['search_queries'] ?? ''), true);
             $r['search_queries'] = is_array($sq) ? array_values($sq) : [];
+            $r['active_days'] = (string)($r['active_days'] ?? '1,2,3,4,5,6,7');
+            $r['sessions_min'] = max(1, (int)($r['sessions_min'] ?? 6));
+            $r['sessions_max'] = max($r['sessions_min'], (int)($r['sessions_max'] ?? 10));
+            $r['tasks_min'] = max(1, (int)($r['tasks_min'] ?? 1));
+            $r['tasks_max'] = max($r['tasks_min'], (int)($r['tasks_max'] ?? 3));
+            $r['gap_min'] = max(5, (int)($r['gap_min'] ?? 30));
+            $r['gap_max'] = max($r['gap_min'], (int)($r['gap_max'] ?? 120));
+            $r['template'] = in_array(($r['template'] ?? 'NORMAL'), ['LIGHT', 'NORMAL', 'HIGH', 'CUSTOM'], true)
+                ? (string)$r['template'] : 'NORMAL';
+            $r['planner_enabled'] = (int)($r['planner_enabled'] ?? 1);
             return $r;
         } catch (Throwable $e) {
             return self::defaultConfig($profileId);
@@ -174,18 +260,37 @@ class ActivityManager
         $sq = array_values(array_unique(array_slice($sq, 0, 100)));
         // pause_until: giu nguyen neu caller khong gui (tranh save config xoa pause)
         $pauseUntil = array_key_exists('pause_until', $in) ? $in['pause_until'] : ($cur['pause_until'] ?? null);
+        // Planner fields (validate, giu cu neu khong gui)
+        $days = self::cleanDays((string)($in['active_days'] ?? $cur['active_days']));
+        $sMin = max(1, min(24, (int)($in['sessions_min'] ?? $cur['sessions_min'])));
+        $sMax = max($sMin, min(24, (int)($in['sessions_max'] ?? $cur['sessions_max'])));
+        $tMin = max(1, min(5, (int)($in['tasks_min'] ?? $cur['tasks_min'])));
+        $tMax = max($tMin, min(5, (int)($in['tasks_max'] ?? $cur['tasks_max'])));
+        $gMin = max(5, min(480, (int)($in['gap_min'] ?? $cur['gap_min'])));
+        $gMax = max($gMin, min(480, (int)($in['gap_max'] ?? $cur['gap_max'])));
+        $tpl = strtoupper((string)($in['template'] ?? $cur['template']));
+        if (!in_array($tpl, ['LIGHT', 'NORMAL', 'HIGH', 'CUSTOM'], true)) $tpl = 'NORMAL';
+        $plannerOn = array_key_exists('planner_enabled', $in) ? (!empty($in['planner_enabled']) ? 1 : 0) : (int)$cur['planner_enabled'];
+        $limits = self::cleanLimits($in['limits_json'] ?? ($cur['limits_json'] ?? null));
         try {
             db()->prepare('INSERT INTO activity_configs (profile_id, enabled, schedule_start, schedule_end,
                     interval_minutes, max_tabs, keep_required_tabs, required_pages, search_queries,
-                    activity_mode, auto_start_profile, maintain_always, store_queries, pause_until)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    activity_mode, auto_start_profile, maintain_always, store_queries, pause_until,
+                    active_days, sessions_min, sessions_max, tasks_min, tasks_max, gap_min, gap_max,
+                    limits_json, template, planner_enabled)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON DUPLICATE KEY UPDATE enabled=VALUES(enabled), schedule_start=VALUES(schedule_start),
                     schedule_end=VALUES(schedule_end), interval_minutes=VALUES(interval_minutes),
                     max_tabs=VALUES(max_tabs), keep_required_tabs=VALUES(keep_required_tabs),
                     required_pages=VALUES(required_pages), search_queries=VALUES(search_queries),
                     activity_mode=VALUES(activity_mode), auto_start_profile=VALUES(auto_start_profile),
                     maintain_always=VALUES(maintain_always), store_queries=VALUES(store_queries),
-                    pause_until=VALUES(pause_until)')
+                    pause_until=VALUES(pause_until), active_days=VALUES(active_days),
+                    sessions_min=VALUES(sessions_min), sessions_max=VALUES(sessions_max),
+                    tasks_min=VALUES(tasks_min), tasks_max=VALUES(tasks_max),
+                    gap_min=VALUES(gap_min), gap_max=VALUES(gap_max),
+                    limits_json=VALUES(limits_json), template=VALUES(template),
+                    planner_enabled=VALUES(planner_enabled)')
                 ->execute([$profileId, $enabled, $ss . ':00', $se . ':00', $iv, $mt,
                     !empty($in['keep_required_tabs']) || !array_key_exists('keep_required_tabs', $in) ? 1 : 0,
                     json_encode(array_values($rp), JSON_UNESCAPED_UNICODE),
@@ -195,11 +300,86 @@ class ActivityManager
                     !empty($in['auto_start_profile']) ? 1 : 0,
                     !empty($in['maintain_always']) ? 1 : 0,
                     !empty($in['store_queries']) ? 1 : 0,
-                    $pauseUntil]);
+                    $pauseUntil, $days, $sMin, $sMax, $tMin, $tMax, $gMin, $gMax,
+                    $limits, $tpl, $plannerOn]);
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['db_error']];
         }
         return ['ok' => true, 'errors' => $errors];
+    }
+
+    /** Templates LIGHT/NORMAL/HIGH (§44-45). Tra ve patch ap dung len config. */
+    public const TEMPLATES = [
+        'LIGHT' => ['schedule_start' => '09:00', 'schedule_end' => '21:00', 'sessions_min' => 3,
+            'sessions_max' => 5, 'tasks_min' => 1, 'tasks_max' => 2, 'gap_min' => 60, 'gap_max' => 180,
+            'limits' => ['SEARCH' => [1, 2], 'WEBSITE' => [1, 3], 'GMAIL' => [1, 2], 'DRIVE' => [0, 1], 'CALENDAR' => [0, 1]]],
+        'NORMAL' => ['schedule_start' => '08:00', 'schedule_end' => '22:00', 'sessions_min' => 6,
+            'sessions_max' => 10, 'tasks_min' => 1, 'tasks_max' => 3, 'gap_min' => 30, 'gap_max' => 120,
+            'limits' => ['SEARCH' => [2, 4], 'WEBSITE' => [2, 5], 'GMAIL' => [1, 3], 'DRIVE' => [0, 2], 'CALENDAR' => [0, 2]]],
+        'HIGH' => ['schedule_start' => '07:00', 'schedule_end' => '23:00', 'sessions_min' => 10,
+            'sessions_max' => 16, 'tasks_min' => 2, 'tasks_max' => 4, 'gap_min' => 15, 'gap_max' => 60,
+            'limits' => ['SEARCH' => [4, 8], 'WEBSITE' => [4, 8], 'GMAIL' => [2, 4], 'DRIVE' => [1, 3], 'CALENDAR' => [1, 2]]],
+    ];
+
+    /** @return array patch (template + CUSTOM giu nguyen) */
+    public static function applyTemplate(string $tpl): array
+    {
+        $tpl = strtoupper($tpl);
+        if (!isset(self::TEMPLATES[$tpl])) return ['template' => 'CUSTOM'];
+        $t = self::TEMPLATES[$tpl];
+        return ['template' => $tpl, 'schedule_start' => $t['schedule_start'], 'schedule_end' => $t['schedule_end'],
+            'sessions_min' => $t['sessions_min'], 'sessions_max' => $t['sessions_max'],
+            'tasks_min' => $t['tasks_min'], 'tasks_max' => $t['tasks_max'],
+            'gap_min' => $t['gap_min'], 'gap_max' => $t['gap_max'],
+            'limits_json' => json_encode($t['limits'], JSON_UNESCAPED_UNICODE)];
+    }
+
+    /** @return array<string,array{0:int,1:int}> min/max moi loai task/ngay */
+    public static function limitsFor(array $cfg): array
+    {
+        $def = self::TEMPLATES['NORMAL']['limits'];
+        try {
+            $j = json_decode((string)($cfg['limits_json'] ?? ''), true);
+            if (is_array($j)) {
+                foreach ($j as $k => $v) {
+                    $k = strtoupper((string)$k);
+                    if (isset($def[$k]) && is_array($v) && count($v) >= 2) {
+                        $def[$k] = [max(0, (int)$v[0]), max((int)$v[0], (int)$v[1])];
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        return $def;
+    }
+
+    private static function cleanDays(string $v): string
+    {
+        $out = [];
+        foreach (explode(',', $v) as $d) {
+            $d = (int)trim($d);
+            if ($d >= 1 && $d <= 7 && !in_array($d, $out, true)) $out[] = $d;
+        }
+        if (!$out) $out = [1, 2, 3, 4, 5, 6, 7];
+        sort($out);
+        return implode(',', $out);
+    }
+
+    /** @return string JSON limits hop le */
+    private static function cleanLimits($v): string
+    {
+        $def = self::TEMPLATES['NORMAL']['limits'];
+        if (is_string($v)) $v = json_decode($v, true);
+        if (!is_array($v)) return json_encode($def, JSON_UNESCAPED_UNICODE);
+        foreach ($v as $k => $vv) {
+            $k = strtoupper((string)$k);
+            if (!isset($def[$k]) || !is_array($vv) || count($vv) < 2) {
+                unset($v[$k]);
+                continue;
+            }
+            $v[$k] = [max(0, (int)$vv[0]), max((int)$vv[0], (int)$vv[1])];
+        }
+        return json_encode($v, JSON_UNESCAPED_UNICODE);
     }
 
     private static function cleanTime(string $v, string $fb): string
@@ -405,6 +585,8 @@ class ActivityManager
                     return self::taskOpen($profileId, $port, (string)($task['url'] ?? ''), $ms, false);
                 case self::T_SEARCH:
                     return self::taskSearch($profileId, $port, (string)($task['query'] ?? ''), $ms);
+                case self::T_WEBSITE:
+                    return self::taskWebsite($profileId, $port, (array)($task['exclude'] ?? []), $ms);
                 case self::T_CHECK:
                     return self::taskCheck($profileId, $port, $ms);
                 case self::T_CLOSE_AUTO:
@@ -603,6 +785,42 @@ class ActivityManager
         return ['ok' => true, 'result' => self::R_SUCCESS, 'ms' => $ms(), 'tab' => (string)$reuse];
     }
 
+    /** OPEN_RANDOM_WEBSITE (§7, §11): pick tu pool, mo tab automation, khong click quang cao. */
+    private static function taskWebsite(int $profileId, int $port, array $exclude, callable $ms): array
+    {
+        $pick = self::pickWebsite($exclude);
+        if (!$pick) {
+            self::record($profileId, self::T_WEBSITE, '', self::R_SKIPPED, $ms(), 'empty_pool');
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => 'empty_pool', 'ms' => $ms()];
+        }
+        $url = (string)$pick['url'];
+        $cfg = self::getConfig($profileId);
+        $live = self::liveTabs($port);
+        $st = self::stateGet($profileId);
+        $auto = self::pruneAuto((array)($st['auto_tabs'] ?? []), $live);
+        // Tab limit: reuse search tab cu nhu ensure
+        if (count($auto) >= max(1, (int)$cfg['max_tabs'])) {
+            foreach ($auto as $tid => $info) {
+                if (($info['kind'] ?? '') === 'search' && self::navigateTab($port, (string)$tid, $url)) {
+                    $auto[$tid] = ['url' => $url, 'kind' => 'page', 'at' => time()];
+                    self::stateSet($profileId, ['auto_tabs' => $auto]);
+                    self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_REUSED, $ms());
+                    return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$tid];
+                }
+            }
+            self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
+        }
+        $r = self::taskOpen($profileId, $port, $url, $ms, false);
+        if (!empty($r['ok'])) {
+            self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_OPENED, $ms());
+            $r['result'] = self::R_OPENED;
+        } else {
+            self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_SKIPPED, $ms(), $r['error'] ?? null);
+        }
+        return $r;
+    }
+
     /** CHECK_TAB: verify required hien dien (khong mo gi). */
     private static function taskCheck(int $profileId, int $port, callable $ms): array
     {
@@ -673,6 +891,296 @@ class ActivityManager
         self::stateSet($profileId, ['auto_tabs' => $auto]);
         self::record($profileId, self::T_CLOSE_AUTO, $closed . ' tabs', self::R_CLOSED, $ms());
         return ['ok' => true, 'result' => self::R_CLOSED, 'ms' => $ms(), 'closed' => $closed];
+    }
+
+    // ================= Website Pool (§5-7) =================
+
+    public const WEB_CATEGORIES = ['NEWS', 'TECH', 'WORK', 'EDUCATION', 'REFERENCE', 'TOOLS', 'CUSTOM'];
+
+    /** @return array[] */
+    public static function webList(?string $category = null, bool $enabledOnly = false): array
+    {
+        self::ensureTables();
+        try {
+            $w = [];
+            $p = [];
+            if ($category !== null && $category !== '' && $category !== 'all') {
+                $w[] = 'category=?';
+                $p[] = $category;
+            }
+            if ($enabledOnly) $w[] = 'enabled=1';
+            $where = $w ? ('WHERE ' . implode(' AND ', $w)) : '';
+            $st = db()->prepare("SELECT * FROM activity_websites $where ORDER BY enabled DESC, use_count ASC, id ASC LIMIT 500");
+            $st->execute($p);
+            return $st->fetchAll();
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+
+    /** @return array{ok, id?, error?} */
+    public static function webSave(?int $id, array $in): array
+    {
+        self::ensureTables();
+        $url = trim((string)($in['url'] ?? ''));
+        if (!self::validHttpUrl($url)) return ['ok' => false, 'error' => 'URL không hợp lệ'];
+        $cat = strtoupper((string)($in['category'] ?? 'CUSTOM'));
+        if (!in_array($cat, self::WEB_CATEGORIES, true)) $cat = 'CUSTOM';
+        $name = mb_substr(trim((string)($in['name'] ?? '')) ?: self::hostOf($url), 0, 120);
+        $weight = max(1, min(10, (int)($in['weight'] ?? 1)));
+        $enabled = array_key_exists('enabled', $in) ? (!empty($in['enabled']) ? 1 : 0) : 1;
+        try {
+            if ($id > 0) {
+                db()->prepare('UPDATE activity_websites SET name=?, url=?, domain=?, category=?, enabled=?, weight=? WHERE id=?')
+                    ->execute([$name, $url, self::normHost($url), $cat, $enabled, $weight, $id]);
+                return ['ok' => true, 'id' => $id];
+            }
+            db()->prepare('INSERT INTO activity_websites (name, url, domain, category, enabled, weight)
+                VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), domain=VALUES(domain),
+                category=VALUES(category), enabled=VALUES(enabled), weight=VALUES(weight)')
+                ->execute([$name, $url, self::normHost($url), $cat, $enabled, $weight]);
+            return ['ok' => true, 'id' => (int)db()->lastInsertId()];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'db_error'];
+        }
+    }
+
+    public static function webDelete(int $id): bool
+    {
+        self::ensureTables();
+        try {
+            $st = db()->prepare('DELETE FROM activity_websites WHERE id=?');
+            $st->execute([$id]);
+            return $st->rowCount() > 0;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Import nhieu dong URL (§5). @return array{added, skipped} */
+    public static function webImport(string $text, string $category = 'CUSTOM'): array
+    {
+        $added = 0;
+        $skipped = 0;
+        foreach (preg_split('/\r?\n/', $text) as $line) {
+            $line = trim($line);
+            if ($line === '') continue;
+            // Ho tro "Name | https://..." hoac URL tran
+            $url = $line;
+            $name = '';
+            if (str_contains($line, '|')) {
+                [$name, $url] = array_map('trim', explode('|', $line, 2));
+            }
+            $r = self::webSave(null, ['name' => $name, 'url' => $url, 'category' => $category]);
+            if (!empty($r['ok'])) $added++;
+            else $skipped++;
+        }
+        return ['added' => $added, 'skipped' => $skipped];
+    }
+
+    // ================= Search Pool (§8-9) =================
+
+    /** @return array[] */
+    public static function searchList(bool $enabledOnly = false): array
+    {
+        self::ensureTables();
+        try {
+            $w = $enabledOnly ? 'WHERE enabled=1' : '';
+            return db()->query("SELECT *, (use_today=CURDATE()) AS is_today FROM activity_search_pool $w ORDER BY enabled DESC, use_today_count ASC, use_count ASC, id ASC LIMIT 500")->fetchAll();
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+
+    /** @return array{ok, id?, error?} */
+    public static function searchSave(?int $id, array $in): array
+    {
+        self::ensureTables();
+        $q = trim((string)($in['query'] ?? ''));
+        if ($q === '' || mb_strlen($q) > 200) return ['ok' => false, 'error' => 'Query không hợp lệ'];
+        $cat = strtoupper((string)($in['category'] ?? 'CUSTOM'));
+        if (!in_array($cat, self::WEB_CATEGORIES, true)) $cat = 'CUSTOM';
+        $weight = max(1, min(10, (int)($in['weight'] ?? 1)));
+        $enabled = array_key_exists('enabled', $in) ? (!empty($in['enabled']) ? 1 : 0) : 1;
+        try {
+            if ($id > 0) {
+                db()->prepare('UPDATE activity_search_pool SET query=?, category=?, enabled=?, weight=? WHERE id=?')
+                    ->execute([$q, $cat, $enabled, $weight, $id]);
+                return ['ok' => true, 'id' => $id];
+            }
+            db()->prepare('INSERT INTO activity_search_pool (query, category, enabled, weight)
+                VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE category=VALUES(category),
+                enabled=VALUES(enabled), weight=VALUES(weight)')
+                ->execute([$q, $cat, $enabled, $weight]);
+            return ['ok' => true, 'id' => (int)db()->lastInsertId()];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'db_error'];
+        }
+    }
+
+    public static function searchDelete(int $id): bool
+    {
+        self::ensureTables();
+        try {
+            $st = db()->prepare('DELETE FROM activity_search_pool WHERE id=?');
+            $st->execute([$id]);
+            return $st->rowCount() > 0;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /** Paste nhieu query (§8). @return array{added, skipped} */
+    public static function searchImport(string $text, string $category = 'CUSTOM'): array
+    {
+        $added = 0;
+        $skipped = 0;
+        $seen = [];
+        foreach (preg_split('/\r?\n/', $text) as $line) {
+            $q = trim($line);
+            if ($q === '' || mb_strlen($q) > 200 || isset($seen[$q])) {
+                if ($q !== '') $skipped++;
+                continue;
+            }
+            $seen[$q] = true;
+            $r = self::searchSave(null, ['query' => $q, 'category' => $category]);
+            if (!empty($r['ok'])) $added++;
+            else $skipped++;
+        }
+        return ['added' => $added, 'skipped' => $skipped];
+    }
+
+    /**
+     * Migrate 1 lan: gom search_queries rieng le cac profile vao pool chung.
+     * Giu nguyen cot cu (fallback).
+     */
+    public static function seedPoolsFromConfigs(): int
+    {
+        self::ensureTables();
+        if (get_setting('act_pool_seeded', '0') === '1') return 0;
+        $n = 0;
+        try {
+            foreach (db()->query('SELECT search_queries FROM activity_configs')->fetchAll() as $r) {
+                $qs = json_decode((string)($r['search_queries'] ?? ''), true);
+                if (!is_array($qs)) continue;
+                foreach ($qs as $q) {
+                    $q = trim((string)$q);
+                    if ($q === '') continue;
+                    $s = self::searchSave(null, ['query' => $q]);
+                    if (!empty($s['ok'])) $n++;
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        set_setting('act_pool_seeded', '1');
+        return $n;
+    }
+
+    /**
+     * Weighted random pick (weight cao + it dung tertulis uu tien).
+     * @param array[] $rows (co weight, use_count, id)
+     */
+    private static function weightedPick(array $rows): ?array
+    {
+        if (!$rows) return null;
+        $total = 0;
+        $weights = [];
+        foreach ($rows as $i => $r) {
+            $w = max(1, (int)($r['weight'] ?? 1)) * 10 / (1 + (int)($r['use_count'] ?? 0));
+            $weights[$i] = $w;
+            $total += $w;
+        }
+        $roll = mt_rand() / mt_getrandmax() * $total;
+        foreach ($weights as $i => $w) {
+            $roll -= $w;
+            if ($roll <= 0) return $rows[$i];
+        }
+        return $rows[array_key_last($rows)];
+    }
+
+    /**
+     * Chon query tu pool (§9): enabled, chua dat usage_today cap, it dung nhat.
+     * Fallback: search_queries cu cua profile.
+     */
+    public static function pickSearch(int $profileId, int $dailyCap = 0): ?array
+    {
+        self::ensureTables();
+        try {
+            $rows = db()->query("SELECT * FROM activity_search_pool WHERE enabled=1
+                AND (use_today IS NULL OR use_today<>CURDATE() OR use_today_count<8)
+                ORDER BY use_today_count ASC, use_count ASC LIMIT 50")->fetchAll();
+            if ($dailyCap > 0) {
+                $rows = array_values(array_filter($rows, fn($r) =>
+                    (int)($r['use_today'] === date('Y-m-d') ? $r['use_today_count'] : 0) < $dailyCap));
+            }
+            $pick = self::weightedPick($rows);
+            if ($pick) {
+                $today = date('Y-m-d');
+                db()->prepare('UPDATE activity_search_pool SET last_used_at=NOW(), use_count=use_count+1,
+                        use_today_count=CASE WHEN use_today=? THEN use_today_count+1 ELSE 1 END,
+                        use_today=? WHERE id=?')
+                    ->execute([$today, $today, (int)$pick['id']]);
+                return $pick;
+            }
+        } catch (Throwable $e) {
+        }
+        // Fallback: queries cu (random, khong tuan tu)
+        $cfg = self::getConfig($profileId);
+        $qs = (array)($cfg['search_queries'] ?? []);
+        if ($qs) return ['query' => $qs[array_rand($qs)], 'id' => 0];
+        return null;
+    }
+
+    /**
+     * Chon website tu pool (§7): enabled, tranh domain vua dung gan + trong session.
+     * @param string[] $excludeDomains
+     */
+    public static function pickWebsite(array $excludeDomains = []): ?array
+    {
+        self::ensureTables();
+        try {
+            $rows = self::webList(null, true);
+            if ($excludeDomains) {
+                $ex = array_map('strtolower', $excludeDomains);
+                $rows = array_values(array_filter($rows, fn($r) => !in_array(strtolower((string)$r['domain']), $ex, true)));
+                if (!$rows) $rows = self::webList(null, true); // het thi tha long
+            }
+            $pick = self::weightedPick($rows);
+            if ($pick) {
+                db()->prepare('UPDATE activity_websites SET last_used_at=NOW(), use_count=use_count+1 WHERE id=?')
+                    ->execute([(int)$pick['id']]);
+                return $pick;
+            }
+        } catch (Throwable $e) {
+        }
+        return null;
+    }
+
+    /** Dem tasks hom nay theo nhom (§14). @return array<string,int> */
+    public static function countToday(int $profileId): array
+    {
+        self::ensureTables();
+        $out = ['SEARCH' => 0, 'WEBSITE' => 0, 'GMAIL' => 0, 'DRIVE' => 0, 'CALENDAR' => 0, 'OTHER' => 0];
+        try {
+            $rows = db()->prepare("SELECT task_type, domain, COUNT(*) c FROM activity_history
+                WHERE profile_id=? AND created_at>=CURDATE() AND result NOT IN ('SKIPPED')
+                GROUP BY task_type, domain");
+            $rows->execute([$profileId]);
+            foreach ($rows->fetchAll() as $r) {
+                $k = 'OTHER';
+                if (($r['task_type'] ?? '') === 'OPEN_SEARCH') $k = 'SEARCH';
+                elseif (($r['task_type'] ?? '') === 'OPEN_RANDOM_WEBSITE') $k = 'WEBSITE';
+                else {
+                    $d = strtolower((string)($r['domain'] ?? ''));
+                    if (str_contains($d, 'mail.google')) $k = 'GMAIL';
+                    elseif (str_contains($d, 'drive.google')) $k = 'DRIVE';
+                    elseif (str_contains($d, 'calendar.google')) $k = 'CALENDAR';
+                }
+                $out[$k] += (int)$r['c'];
+            }
+        } catch (Throwable $e) {
+        }
+        return $out;
     }
 
     // ================= Cycle (scheduler goi) =================

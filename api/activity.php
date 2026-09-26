@@ -126,6 +126,10 @@ try {
             $ids = array_values(array_unique(array_filter(array_map('intval', (array)($b['ids'] ?? [])))));
             if (!$ids) json_out(['ok' => false, 'message' => 'Chua chon kenh nao'], 400);
             $patch = is_array($b['patch'] ?? null) ? $b['patch'] : [];
+            // Template: bung preset thanh gia tri cu the (§43-45)
+            if (!empty($patch['template']) && in_array(strtoupper((string)$patch['template']), ['LIGHT', 'NORMAL', 'HIGH'], true)) {
+                $patch = array_merge($patch, ActivityManager::applyTemplate((string)$patch['template']));
+            }
             $done = 0;
             $errors = [];
             foreach ($ids as $pid) {
@@ -168,6 +172,140 @@ try {
             }
             SyncLogger::info('activity', '[Scheduler] stopped via API');
             json_out(['ok' => true, 'data' => ['running' => false]]);
+            break;
+        }
+
+        case 'concurrency': {
+            // Global concurrency §20 (2/4/6/8)
+            $b = $method === 'GET' ? $_GET : json_body();
+            if (array_key_exists('value', $b)) {
+                $v = (int)$b['value'];
+                if (!in_array($v, ActivityScheduler::CONCURRENCY_OPTS, true)) {
+                    json_out(['ok' => false, 'message' => 'Chỉ hỗ trợ 2/4/6/8'], 400);
+                }
+                set_setting('act_concurrency', (string)$v);
+            }
+            json_out(['ok' => true, 'data' => ['value' => ActivityScheduler::concurrency()]]);
+            break;
+        }
+
+        case 'websites': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => true, 'data' => ActivityManager::webList(
+                $b['category'] ?? null, !empty($b['enabled_only']))]);
+            break;
+        }
+
+        case 'website_save': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = ActivityManager::webSave(isset($b['id']) ? (int)$b['id'] : null, $b);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['id' => $r['id']]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi'], $r['ok'] ? 200 : 400);
+            break;
+        }
+
+        case 'website_delete': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => ActivityManager::webDelete((int)($b['id'] ?? 0))]);
+            break;
+        }
+
+        case 'website_import': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => true, 'data' => ActivityManager::webImport(
+                (string)($b['text'] ?? ''), (string)($b['category'] ?? 'CUSTOM'))]);
+            break;
+        }
+
+        case 'searchpool': {
+            json_out(['ok' => true, 'data' => ActivityManager::searchList(false)]);
+            break;
+        }
+
+        case 'search_save': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = ActivityManager::searchSave(isset($b['id']) ? (int)$b['id'] : null, $b);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['id' => $r['id']]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi'], $r['ok'] ? 200 : 400);
+            break;
+        }
+
+        case 'search_delete': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => ActivityManager::searchDelete((int)($b['id'] ?? 0))]);
+            break;
+        }
+
+        case 'search_import': {
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => true, 'data' => ActivityManager::searchImport(
+                (string)($b['text'] ?? ''), (string)($b['category'] ?? 'CUSTOM'))]);
+            break;
+        }
+
+        case 'plan': {
+            // Today's Plan + summary 1 profile (§17, §41)
+            require_once __DIR__ . '/../sync/ActivityPlanner.php';
+            $id = (int)($_GET['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            ActivityPlanner::ensureTodayPlan($id);
+            json_out(['ok' => true, 'data' => [
+                'sessions' => ActivityPlanner::todayPlan($id),
+                'summary' => ActivityPlanner::summary($id)]]);
+            break;
+        }
+
+        case 'regenerate': {
+            require_once __DIR__ . '/../sync/ActivityPlanner.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            $r = ActivityPlanner::regenerate($id);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['sessions' => $r['sessions']]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi'], $r['ok'] ? 200 : 500);
+            break;
+        }
+
+        case 'run_session': {
+            // Chay ngay session due (toi da 1) — nut "Chay ngay" §47
+            require_once __DIR__ . '/../sync/ActivityPlanner.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            @set_time_limit(180);
+            $n = ActivityPlanner::runDueSessions($id, 1);
+            if ($n === 0) {
+                // Khong co session due (plan future) -> chay 1 session PLANNED som nhat ngay
+                $rows = ActivityPlanner::todayPlan($id);
+                $next = null;
+                foreach ($rows as $s) {
+                    if (($s['status'] ?? '') === 'PLANNED') {
+                        $next = $s;
+                        break;
+                    }
+                }
+                if ($next) {
+                    try {
+                        db()->prepare('UPDATE activity_sessions SET run_at=NOW() WHERE id=?')
+                            ->execute([(int)$next['id']]);
+                    } catch (Throwable $e) {
+                    }
+                    $n = ActivityPlanner::runDueSessions($id, 1);
+                }
+            }
+            json_out(['ok' => true, 'data' => ['ran' => $n, 'summary' => ActivityPlanner::summary($id)]]);
+            break;
+        }
+
+        case 'templates': {
+            json_out(['ok' => true, 'data' => ActivityManager::TEMPLATES]);
+            break;
+        }
+
+        case 'daily_summary': {
+            // Bao cao ngay hom nay (UI + Telegram dung chung) §59
+            require_once __DIR__ . '/../sync/ActivityPlanner.php';
+            json_out(['ok' => true, 'data' => ActivityPlanner::dailySummary()]);
             break;
         }
 

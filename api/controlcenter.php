@@ -75,6 +75,24 @@ try {
                     ORDER BY created_at DESC LIMIT 8')->fetchAll();
             } catch (Throwable $e) {
             }
+            // Auto Activity widget (§61): running/waiting/today/errors
+            $actWidget = ['running' => 0, 'waiting' => 0, 'today' => '0/0', 'errors' => 0, 'scheduler' => false];
+            try {
+                require_once __DIR__ . '/../sync/ActivityScheduler.php';
+                $ast = ActivityScheduler::status();
+                $actWidget['running'] = $ast['running'] ?? 0;
+                $actWidget['waiting'] = $ast['waiting'] ?? 0;
+                $actWidget['errors'] = $ast['errors'] ?? 0;
+                $td = db()->query("SELECT SUM(status IN ('DONE','FAILED','SKIPPED')) d, COUNT(*) t
+                    FROM activity_sessions WHERE plan_date=CURDATE()")->fetch();
+                if ($td) $actWidget['today'] = ((int)($td['d'] ?? 0)) . '/' . ((int)($td['t'] ?? 0));
+                $pf = __DIR__ . '/../bin/.activity_scheduler.pid';
+                if (is_file($pf)) {
+                    $pid = (int)trim((string)@file_get_contents($pf));
+                    $actWidget['scheduler'] = $pid > 0;
+                }
+            } catch (Throwable $e) {
+            }
             json_out(['ok' => true, 'data' => [
                 'kpi' => ['channels_total' => $chTotal, 'chrome_running' => $chRunning,
                     'proxy_healthy' => $pxHealthy, 'proxy_total' => $pxTotal,
@@ -87,6 +105,7 @@ try {
                 'upcoming' => SchedulerService::upcoming(5),
                 'resources' => ResourceMonitor::snapshot(),
                 'activity' => $activity,
+                'auto_activity' => $actWidget,
             ]]);
             break;
         }

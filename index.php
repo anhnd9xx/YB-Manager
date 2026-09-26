@@ -1314,6 +1314,14 @@
                 <option value="full">Đầy đủ</option>
               </select>
             </div>
+            <div class="win-field"><label>Mẫu (template)</label>
+              <select id="act-template" onchange="actTemplateApply()">
+                <option value="LIGHT">LIGHT — nhẹ</option>
+                <option value="NORMAL" selected>NORMAL — cân bằng</option>
+                <option value="HIGH">HIGH — dày</option>
+                <option value="CUSTOM">CUSTOM — tự chỉnh</option>
+              </select>
+            </div>
             <div class="win-field"><label>Tạm dừng</label>
               <select id="act-pause">
                 <option value="off">Không</option>
@@ -1321,6 +1329,48 @@
                 <option value="today">Pause hôm nay</option>
               </select>
             </div>
+          </div>
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Sessions/ngày</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="number" id="act-sess-min" value="6" min="1" max="24" style="width:100%">
+                <span class="muted">–</span>
+                <input type="number" id="act-sess-max" value="10" min="1" max="24" style="width:100%">
+              </div>
+            </div>
+            <div class="win-field"><label>Ngày hoạt động</label>
+              <div id="act-days" style="display:flex;gap:6px;flex-wrap:wrap">
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="1" style="width:auto" checked>2</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="2" style="width:auto" checked>3</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="3" style="width:auto" checked>4</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="4" style="width:auto" checked>5</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="5" style="width:auto" checked>6</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="6" style="width:auto" checked>7</label>
+                <label style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-day="7" style="width:auto" checked>CN</label>
+              </div>
+            </div>
+          </div>
+          <div class="form-group-title" style="margin-top:10px">Lịch hôm nay</div>
+          <div id="act-plan"><div class="skeleton"></div></div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <button type="button" class="btn btn-sm" onclick="actRunSession()">▶ Chạy session ngay</button>
+            <button type="button" class="btn btn-sm" onclick="actRegen()">↻ Tạo lại lịch còn lại</button>
+          </div>
+          <div class="form-group-title" style="margin-top:10px">Pool chung (mọi kênh)</div>
+          <div class="hint">Website Pool + Search Pool dùng chung cho OPEN_RANDOM_WEBSITE và GOOGLE_SEARCH.</div>
+          <div id="act-pool-web"><div class="skeleton"></div></div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <input type="text" id="act-web-url" placeholder="https://..." style="flex:1">
+            <button type="button" class="btn btn-sm" onclick="actWebAdd()">+ Thêm</button>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <textarea id="act-web-import" rows="2" style="flex:1" placeholder="Import nhiều URL (mỗi dòng 1 URL, hoặc Tên | URL)"></textarea>
+            <button type="button" class="btn btn-sm" onclick="actWebImport()">Nhập</button>
+          </div>
+          <div id="act-pool-search" style="margin-top:8px"><div class="skeleton"></div></div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <textarea id="act-search-import" rows="2" style="flex:1" placeholder="Import nhiều query (mỗi dòng 1 query)"></textarea>
+            <button type="button" class="btn btn-sm" onclick="actSearchImport()">Nhập</button>
           </div>
           <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="act-maintain" style="width:auto"> Luôn duy trì tab (tạo lại sau debounce)</label>
           <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="act-autostart" style="width:auto"> Cho phép tự mở profile tới lịch</label>
@@ -1507,6 +1557,14 @@
     <div class="modal-body">
       <div class="hint" id="bulk-act-count" style="margin-top:0"></div>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bact-enabled" style="width:auto" checked> Bật Auto Activity</label>
+      <div class="win-field" style="margin-top:6px"><label>Mẫu (template)</label>
+        <select id="bact-template">
+          <option value="">Giữ nguyên</option>
+          <option value="LIGHT">LIGHT — nhẹ</option>
+          <option value="NORMAL">NORMAL — cân bằng</option>
+          <option value="HIGH">HIGH — dày</option>
+        </select>
+      </div>
       <div class="win-row">
         <div class="win-field"><label>Hoạt động trong: từ</label><input type="time" id="bact-start" value="08:00"></div>
         <div class="win-field"><label>đến</label><input type="time" id="bact-end" value="22:00"></div>

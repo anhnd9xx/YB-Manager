@@ -149,8 +149,27 @@ try {
                 foreach (db()->query('SELECT profile_id FROM activity_configs WHERE enabled=1')->fetchAll() as $er) {
                     $enMap[(int)$er['profile_id']] = true;
                 }
+                // Mini stats hom nay (§46): sessions done/total + next (2 queries)
+                $todayMap = [];
+                $nextMap = [];
+                try {
+                    foreach (db()->query("SELECT profile_id,
+                            SUM(status IN ('DONE','FAILED','SKIPPED')) AS done, COUNT(*) AS total
+                        FROM activity_sessions WHERE plan_date=CURDATE() GROUP BY profile_id")->fetchAll() as $sr) {
+                        $todayMap[(int)$sr['profile_id']] = [(int)$sr['done'], (int)$sr['total']];
+                    }
+                    foreach (db()->query("SELECT profile_id, MIN(run_at) AS nxt FROM activity_sessions
+                        WHERE plan_date=CURDATE() AND status='PLANNED' AND run_at>NOW() GROUP BY profile_id")->fetchAll() as $nr) {
+                        $sec = max(0, strtotime((string)$nr['nxt']) - time());
+                        $nextMap[(int)$nr['profile_id']] = $sec < 3600 ? ((int)ceil($sec / 60) . 'm') : (round($sec / 3600, 1) . 'h');
+                    }
+                } catch (Throwable $e2) {
+                }
                 foreach ($profiles as &$row2) {
-                    if (!empty($enMap[(int)$row2['id']])) $row2['act_enabled'] = 1;
+                    $pid2 = (int)$row2['id'];
+                    if (!empty($enMap[$pid2])) $row2['act_enabled'] = 1;
+                    if (isset($todayMap[$pid2])) $row2['act_today'] = $todayMap[$pid2][0] . '/' . $todayMap[$pid2][1];
+                    if (isset($nextMap[$pid2])) $row2['act_next'] = $nextMap[$pid2];
                 }
                 unset($row2);
             } catch (Throwable $e) {

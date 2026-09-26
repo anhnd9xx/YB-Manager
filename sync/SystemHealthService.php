@@ -39,6 +39,8 @@ class SystemHealthService
         self::register('chrome', 'Chrome Manager', [self::class, 'probeChrome']);
         self::register('opencode', 'OpenCode Service', [self::class, 'probeOpenCode'],
             [self::class, 'recoverOpenCode']);
+        self::register('activity', 'Auto Activity', [self::class, 'probeActivity'],
+            [self::class, 'recoverActivity']);
     }
 
     /** @return array<string,array> name => probe result */
@@ -229,6 +231,52 @@ class SystemHealthService
         require_once __DIR__ . '/OpenCodeService.php';
         $r = OpenCodeService::restart();
         return !empty($r['ok']);
+    }
+
+    public static function probeActivity(): array
+    {
+        try {
+            require_once __DIR__ . '/ActivityScheduler.php';
+            $st = ActivityScheduler::status();
+            $alive = self::procAlive(__DIR__ . '/../bin/.activity_scheduler.pid');
+            $metrics = ['scheduler_alive' => $alive, 'enabled' => $st['enabled'] ?? 0,
+                'running' => $st['running'] ?? 0, 'waiting' => $st['waiting'] ?? 0,
+                'errors' => $st['errors'] ?? 0];
+            if (empty($st['enabled'])) {
+                return ['status' => self::HEALTHY, 'detail' => 'Chưa bật kênh nào', 'metrics' => $metrics];
+            }
+            if (!$alive) {
+                return ['status' => self::DEGRADED, 'detail' => 'Scheduler chưa chạy (bật ở Auto Activity)', 'metrics' => $metrics];
+            }
+            if (($st['errors'] ?? 0) > 0) {
+                return ['status' => self::DEGRADED, 'detail' => ($st['errors'] ?? 0) . ' kênh lỗi 24h', 'metrics' => $metrics];
+            }
+            return ['status' => self::HEALTHY,
+                'detail' => ($st['enabled'] ?? 0) . ' kênh · ' . ($st['running'] ?? 0) . ' đang chạy',
+                'metrics' => $metrics];
+        } catch (Throwable $e) {
+            return ['status' => self::UNKNOWN, 'detail' => mb_substr($e->getMessage(), 0, 150)];
+        }
+    }
+
+    public static function recoverActivity(): bool
+    {
+        // Start scheduler daemon (giong monitor_start)
+        try {
+            if (self::procAlive(__DIR__ . '/../bin/.activity_scheduler.pid')) return true;
+            $php = php_cli_binary();
+            if ($php === '') return false;
+            $script = __DIR__ . '/../bin/activity_scheduler.php';
+            pclose(popen('start "" /B "' . $php . '" -f "' . $script . '" >> "'
+                . __DIR__ . '/../bin/activity_scheduler.log" 2>&1', 'r'));
+            for ($i = 0; $i < 10; $i++) {
+                usleep(500000);
+                if (self::procAlive(__DIR__ . '/../bin/.activity_scheduler.pid')) return true;
+            }
+            return false;
+        } catch (Throwable $e) {
+            return false;
+        }
     }
 
     // ---------------- Recovery (co policy, khong loop vo han) ----------------

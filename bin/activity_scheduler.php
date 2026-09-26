@@ -21,7 +21,8 @@ try {
 }
 while (true) {
     try {
-        $r = ActivityScheduler::tick(ActivityScheduler::CONCURRENCY);
+        // Concurrency tu settings (§20), khong one thread/profile
+        $r = ActivityScheduler::tick(ActivityScheduler::concurrency());
         $msg = date('H:i:s') . ' tick ran=' . $r['ran'];
         if (!empty($r['results'])) {
             foreach ($r['results'] as $one) {

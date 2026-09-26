@@ -38,6 +38,7 @@ async function ccRefresh(force) {
     ccRenderAlerts(d.alerts || [], d.alert_counts || {});
     ccRenderSched(d.upcoming || []);
     ccRenderRes(d.resources || {});
+    ccRenderActWidget(d.auto_activity || null);
     ccRenderActivity(d.activity || []);
     const ov = d.overall || {};
     const el = $('cc-overall');
@@ -412,6 +413,15 @@ function ccRenderRes(rs) {
     + `<div class="meta-row"><span class="meta-label">RAM</span><span class="meta-value">${(rs.mem_used_gb !== null && rs.mem_total_gb !== null) ? v(rs.mem_used_gb) + ' / ' + v(rs.mem_total_gb) + ' GB (' + v(rs.mem_percent, '%') + ')' : '—'}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Chrome processes</span><span class="meta-value">${v(rs.chrome_processes)}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Kênh đang chạy</span><span class="meta-value">${v(rs.managed_running)}</span></div>`;
+}
+function ccRenderActWidget(a) {
+  const el = $('cc-res');
+  if (!el || !a) return;
+  el.innerHTML += `<div class="cc-dsec">Auto Activity</div>`
+    + `<div class="meta-row"><span class="meta-label">Running</span><span class="meta-value">${escapeHtml(String(a.running || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Waiting</span><span class="meta-value">${escapeHtml(String(a.waiting || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Today</span><span class="meta-value">${escapeHtml(a.today || '0/0')}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Errors</span><span class="meta-value">${escapeHtml(String(a.errors || 0))}</span></div>`;
 }
 function ccRenderActivity(rows) {
   const el = $('cc-activity');

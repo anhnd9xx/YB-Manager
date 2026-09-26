@@ -1563,6 +1563,7 @@ async function actBulkSave() {
     interval_minutes: Number($('bact-interval').value),
     required_pages: pages,
     activity_mode: $('bact-mode').value,
+    ...($('bact-template').value ? { template: $('bact-template').value } : {}),
   }});
   if (r.ok) {
     closeModal('bulk-act-modal');
@@ -1872,7 +1873,10 @@ function autoBadge(p) {
     return `<div class="meta-row"><span class="meta-label">Auto</span><span class="meta-value">◌ ${escapeHtml(String(p.act_running).replace(/_/g, ' '))}</span></div>`;
   }
   if (p.act_enabled) {
-    return `<div class="meta-row"><span class="meta-label">Auto</span><span class="meta-value"><span class="st-healthy">●</span> Đang hoạt động</span></div>`;
+    let extra = '';
+    if (p.act_today) extra += `<div class="meta-row"><span class="meta-label">Hôm nay</span><span class="meta-value">${escapeHtml(p.act_today)}</span></div>`;
+    if (p.act_next) extra += `<div class="meta-row"><span class="meta-label">Tiếp theo</span><span class="meta-value">${escapeHtml(p.act_next)}</span></div>`;
+    return `<div class="meta-row"><span class="meta-label">Auto</span><span class="meta-value"><span class="st-healthy">●</span> Bật</span></div>` + extra;
   }
   return '';
 }
@@ -1905,7 +1909,16 @@ async function actLoad(id) {
       if (item && typeof item === 'object' && item.url) actCustomUrls.push(item);
     }
     $('act-queries').value = (c.search_queries || []).join('\n');
+    $('act-template').value = c.template || 'NORMAL';
+    $('act-sess-min').value = c.sessions_min || 6;
+    $('act-sess-max').value = c.sessions_max || 10;
+    const days = String(c.active_days || '1,2,3,4,5,6,7').split(',');
+    document.querySelectorAll('#act-days input[data-day]').forEach(cb => {
+      cb.checked = days.includes(cb.dataset.day);
+    });
     actRenderCustom();
+    actPlanLoad(id);
+    actPoolLoad();
     const note = $('act-save-note');
     if (note) note.textContent = c.last_run_at ? `Chạy lần cuối: ${c.last_run_at}` : '';
   } catch (e) {}
@@ -1936,6 +1949,8 @@ function actCollect() {
   const pages = [];
   document.querySelectorAll('#act-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
   for (const u of actCustomUrls) pages.push(u);
+  const days = [];
+  document.querySelectorAll('#act-days input[data-day]:checked').forEach(cb => days.push(cb.dataset.day));
   return {
     id: Number($('pf-id').value),
     enabled: $('act-enabled').checked ? 1 : 0,
@@ -1947,10 +1962,123 @@ function actCollect() {
     required_pages: pages,
     search_queries: $('act-queries').value.split('\n').map(s => s.trim()).filter(Boolean),
     activity_mode: $('act-mode').value,
+    template: $('act-template').value,
+    sessions_min: Number($('act-sess-min').value) || 6,
+    sessions_max: Number($('act-sess-max').value) || 10,
+    active_days: days.join(',') || '1,2,3,4,5,6,7',
     maintain_always: $('act-maintain').checked ? 1 : 0,
     auto_start_profile: $('act-autostart').checked ? 1 : 0,
     pause_mode: $('act-pause').value,
   };
+}
+async function actTemplateApply() {
+  const t = $('act-template').value;
+  if (t === 'CUSTOM') return;
+  try {
+    const r = await getJson(api + 'activity.php?action=templates');
+    const p = r.ok && r.data && r.data[t];
+    if (!p) return;
+    $('act-start').value = p.schedule_start;
+    $('act-end').value = p.schedule_end;
+    $('act-sess-min').value = p.sessions_min;
+    $('act-sess-max').value = p.sessions_max;
+    toast(`Đã áp mẫu ${t} (nhớ bấm Lưu)`, 'success');
+  } catch (e) {}
+}
+// ---- Lich hom nay (§17, §47) ----
+async function actPlanLoad(id) {
+  const el = $('act-plan');
+  if (!el || !id) { if (el) el.innerHTML = ''; return; }
+  try {
+    const r = await getJson(api + `activity.php?action=plan&id=${id}`);
+    if (!r.ok) { el.innerHTML = '<p class="muted">Lỗi tải lịch.</p>'; return; }
+    const rows = r.data.sessions || [];
+    const sm = r.data.summary || {};
+    const stBadge = { PLANNED: 'muted', RUNNING: 'info', DONE: 'ok', SKIPPED: 'muted', FAILED: 'err' };
+    const stIco = { PLANNED: '○', RUNNING: '◌', DONE: '✓', SKIPPED: '—', FAILED: '✕' };
+    el.innerHTML = `<div class="hint" style="margin:0 0 6px">Hôm nay: ${sm.sessions_done || 0}/${sm.sessions_total || 0} sessions · tiếp theo: ${sm.next_in ? 'sau ' + escapeHtml(sm.next_in) : '—'}</div>`
+      + (rows.length ? rows.map(s => {
+        const tk = (s.tasks || []).map(t => escapeHtml(t.kind || '')).join(' + ');
+        let tm = String(s.run_at || '');
+        try { tm = tm.slice(11, 16); } catch (e) {}
+        return `<div class="meta-row"><span class="meta-label">${tm} ${stIco[s.status] || '○'}</span>`
+          + `<span class="meta-value"><span class="badge badge-${stBadge[s.status] || 'muted'}">${tk}</span></span></div>`;
+      }).join('') : '<p class="muted">Chưa có lịch (bật Auto để sinh lịch).</p>');
+  } catch (e) {
+    el.innerHTML = '<p class="muted">Lỗi tải lịch.</p>';
+  }
+}
+async function actRunSession() {
+  const id = Number($('pf-id').value);
+  if (!id) return;
+  toast('Đang chạy session...', '');
+  const r = await sendJson(api + 'activity.php?action=run_session', { id });
+  toast(r.ok ? (r.data.ran ? `Chạy xong ${r.data.ran} session.` : 'Chưa tới giờ session nào.') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actPlanLoad(id);
+}
+async function actRegen() {
+  const id = Number($('pf-id').value);
+  if (!id) return;
+  const r = await sendJson(api + 'activity.php?action=regenerate', { id });
+  toast(r.ok ? 'Đã tạo lại lịch còn lại hôm nay.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  actPlanLoad(id);
+}
+// ---- Pool chung (§51-52) ----
+async function actPoolLoad() {
+  try {
+    const [w, s] = await Promise.all([
+      getJson(api + 'activity.php?action=websites').catch(() => null),
+      getJson(api + 'activity.php?action=searchpool').catch(() => null),
+    ]);
+    const wel = $('act-pool-web');
+    if (wel) {
+      const rows = (w && w.ok && w.data) ? w.data : [];
+      wel.innerHTML = rows.length ? rows.slice(0, 30).map(x =>
+        `<div class="meta-row"><span class="meta-label">${escapeHtml(x.name || x.domain)} <small class="muted">${escapeHtml(x.category || '')} · w${x.weight} · dùng ${x.use_count || 0}</small></span>`
+        + `<span class="meta-value"><button type="button" class="btn btn-xs" onclick="actWebDel(${x.id})">✕</button></span></div>`).join('')
+        + (rows.length > 30 ? `<p class="muted">…và ${rows.length - 30} URL nữa</p>` : '')
+        : '<p class="muted">Pool trống — thêm URL để dùng OPEN_RANDOM_WEBSITE.</p>';
+    }
+    const sel = $('act-pool-search');
+    if (sel) {
+      const rows = (s && s.ok && s.data) ? s.data : [];
+      sel.innerHTML = rows.length ? `<div class="hint" style="margin:0 0 4px">${rows.length} query · hôm nay đã dùng: ${rows.reduce((a, x) => a + (Number(x.use_today_count) || 0), 0)}</div>`
+        + rows.slice(0, 20).map(x =>
+        `<div class="meta-row"><span class="meta-label">${escapeHtml((x.query || '').slice(0, 60))} <small class="muted">· w${x.weight}</small></span>`
+        + `<span class="meta-value"><button type="button" class="btn btn-xs" onclick="actSearchDel(${x.id})">✕</button></span></div>`).join('')
+        + (rows.length > 20 ? `<p class="muted">…và ${rows.length - 20} query nữa</p>` : '')
+        : '<p class="muted">Pool trống — import query để dùng GOOGLE_SEARCH.</p>';
+    }
+  } catch (e) {}
+}
+async function actWebAdd() {
+  const url = ($('act-web-url').value || '').trim();
+  if (!url) return;
+  const r = await sendJson(api + 'activity.php?action=website_save', { url });
+  toast(r.ok ? 'Đã thêm URL.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  if (r.ok) { $('act-web-url').value = ''; actPoolLoad(); }
+}
+async function actWebImport() {
+  const t = ($('act-web-import').value || '').trim();
+  if (!t) return;
+  const r = await sendJson(api + 'activity.php?action=website_import', { text: t });
+  toast(r.ok ? `Đã thêm ${r.data.added}, bỏ qua ${r.data.skipped}.` : 'Lỗi', r.ok ? 'success' : 'error');
+  if (r.ok) { $('act-web-import').value = ''; actPoolLoad(); }
+}
+async function actWebDel(id) {
+  await sendJson(api + 'activity.php?action=website_delete', { id });
+  actPoolLoad();
+}
+async function actSearchImport() {
+  const t = ($('act-search-import').value || '').trim();
+  if (!t) return;
+  const r = await sendJson(api + 'activity.php?action=search_import', { text: t });
+  toast(r.ok ? `Đã thêm ${r.data.added}, bỏ qua ${r.data.skipped}.` : 'Lỗi', r.ok ? 'success' : 'error');
+  if (r.ok) { $('act-search-import').value = ''; actPoolLoad(); }
+}
+async function actSearchDel(id) {
+  await sendJson(api + 'activity.php?action=search_delete', { id });
+  actPoolLoad();
 }
 async function actSave() {
   const body = actCollect();

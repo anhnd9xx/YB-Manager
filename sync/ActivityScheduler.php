@@ -21,6 +21,14 @@ class ActivityScheduler
 {
     public const CONCURRENCY = 4;
     public const MAX_ACTIVE_TASK = 1;
+    public const CONCURRENCY_OPTS = [2, 4, 6, 8];
+
+    /** Global concurrency (§20): setting act_concurrency, default 4. */
+    public static function concurrency(): int
+    {
+        $c = (int)get_setting('act_concurrency', '4');
+        return in_array($c, self::CONCURRENCY_OPTS, true) ? $c : 4;
+    }
 
     /** Eval dang chay? (stage file tuoi + chua DONE). */
     public static function evalRunning(int $profileId): bool
@@ -125,10 +133,22 @@ class ActivityScheduler
             }
             $t0 = microtime(true);
             try {
-                $res = ActivityManager::runCycle($id);
-                $ran++;
-                $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
-                    'tasks' => array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? [])];
+                if (!empty($cfg['planner_enabled'])) {
+                    // Planner mode: chay sessions due (toi da 2/tick/profile)
+                    require_once __DIR__ . '/ActivityPlanner.php';
+                    $n = ActivityPlanner::runDueSessions($id, 2);
+                    if ($n > 0) {
+                        $ran++;
+                        $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
+                            'tasks' => ['sessions:' . $n]];
+                    }
+                } else {
+                    // Legacy interval mode (giu tuong thich config cu)
+                    $res = ActivityManager::runCycle($id);
+                    $ran++;
+                    $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
+                        'tasks' => array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? [])];
+                }
             } catch (Throwable $e) {
                 $skipped[] = ['id' => $id, 'reason' => 'exception'];
             }
@@ -148,6 +168,10 @@ class ActivityScheduler
                 foreach ($results as $one) {
                     foreach ((array)($one['tasks'] ?? []) as $t) {
                         $tasks++;
+                        if (str_starts_with((string)$t, 'sessions:')) {
+                            $ok += (int)substr((string)$t, 9);
+                            continue;
+                        }
                         if (in_array($t, ['OPENED', 'REUSED', 'SUCCESS', 'CHECKED', 'CLOSED'], true)) $ok++;
                         elseif (in_array($t, ['BLOCKED', 'MISSING'], true)) $warn++;
                         else $fail++;
@@ -161,6 +185,22 @@ class ActivityScheduler
                             'failed' => $fail, 'tasks' => $tasks]]);
             } catch (Throwable $e) {
             }
+        }
+        // Daily summary 1 lan/ngay (§59): sau 22:00, qua Notification rules (khong spam)
+        try {
+            if (date('H:i') >= '22:00' && get_setting('act_summary_date', '') !== date('Y-m-d')) {
+                require_once __DIR__ . '/ActivityPlanner.php';
+                $s = ActivityPlanner::dailySummary();
+                require_once __DIR__ . '/EventBus.php';
+                EventBus::emit(AppEvent::DAILY_SUMMARY, AppEvent::MOD_AUTO_ACTIVITY, AppEvent::SEV_SUCCESS,
+                    'AUTO ACTIVITY — BÁO CÁO NGÀY',
+                    "Profiles enabled: {$s['profiles']}\nSessions: {$s['sessions_done']}/{$s['sessions']}\n"
+                    . "Success: {$s['success']}\nFailed: {$s['failed']}\nSearch: {$s['search']}\n"
+                    . "Web: {$s['web']}\nGmail: {$s['gmail']}\nNeed attention: {$s['need_attention']}",
+                    ['status' => 'SUCCESS', 'data' => $s]);
+                set_setting('act_summary_date', date('Y-m-d'));
+            }
+        } catch (Throwable $e) {
         }
         return ['ran' => $ran, 'skipped' => $skipped, 'results' => $results];
     }
@@ -179,8 +219,8 @@ class ActivityScheduler
         }
     }
 
-    /** Auto-start 1 profile qua batch engine + doi CDP (toi da ~30s). */
-    private static function autoStart(int $id): bool
+    /** Auto-start 1 profile qua batch engine + doi CDP (toi da ~30s). Public de Planner dung chung. */
+    public static function autoStart(int $id): bool
     {
         try {
             $prep = ChromeBatchManager::startPrepare([$id]);

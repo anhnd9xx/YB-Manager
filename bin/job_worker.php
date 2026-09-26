@@ -277,6 +277,7 @@ function run_activity_job(array $job): void
 {
     $jid = (string)$job['job_id'];
     require_once __DIR__ . '/../sync/ActivityManager.php';
+    require_once __DIR__ . '/../sync/ActivityPlanner.php';
     $ids = job_targets($job);
     $ok = 0;
     $fail = 0;
@@ -296,6 +297,28 @@ function run_activity_job(array $job): void
             return;
         }
         JobManager::setItem($jid, 'profile:' . $id, 'RUNNING');
+        // Planner mode: chay sessions due; legacy: runCycle cu
+        $cfg = ActivityManager::getConfig($id);
+        if (!empty($cfg['planner_enabled'])) {
+            $before = ActivityPlanner::summary($id);
+            $n = ActivityPlanner::runDueSessions($id, 3);
+            $after = ActivityPlanner::summary($id);
+            $newOk = max(0, $after['success'] - $before['success']);
+            $newFail = max(0, $after['failed'] - $before['failed']);
+            if ($n > 0 && $newFail === 0) {
+                $ok++;
+                JobManager::setItem($jid, 'profile:' . $id, 'SUCCESS');
+            } elseif ($n > 0) {
+                $fail++;
+                JobManager::setItem($jid, 'profile:' . $id, 'FAILED', null, "$newFail session lỗi");
+            } else {
+                $ok++;
+                JobManager::setItem($jid, 'profile:' . $id, 'SUCCESS');
+            }
+            $done++;
+            JobManager::update($jid, ['progress_done' => $done, 'success_count' => $ok, 'failed_count' => $fail]);
+            continue;
+        }
         try {
             $r = ActivityManager::runCycle($id);
             $bad = 0;
