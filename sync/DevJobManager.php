@@ -345,7 +345,9 @@ class DevJobManager
                 . ($plan !== '' ? "PHƯƠNG ÁN ĐÃ DUYỆT:\n$plan\n" : "")
                 . "CONTEXT:\n" . ($cx['context'] ?? '') . "\n"
                 . "RULES BẮT BUỘC:\n$rules\n"
-                . "RÀNG BUỘC: chỉ sửa file trong worktree này; không chạy lệnh destructive/migration/dependency install "
+                . "RÀNG BUỘC: working directory của bạn là worktree này — TẤT CẢ file tạo/sửa phải là "
+                . "relative path trong worktree; TUYỆT ĐỐI KHÔNG dùng absolute path ra ngoài worktree "
+                . "(kể cả khi thấy project root trong context); không chạy lệnh destructive/migration/dependency install "
                 . "nếu chưa được yêu cầu rõ; sau khi code xong chạy test allowlisted và báo cáo structured "
                 . "(tests passed/failed, lint, files changed). Không commit.";
             $c = OpenCodeGateway::createSession($code . ': ' . mb_substr((string)$job['request'], 0, 60),
@@ -679,6 +681,14 @@ class DevJobManager
                 self::set($code, ['status' => self::ST_APPROVED, 'error' => 'Không stage được worktree']);
                 return ['ok' => false, 'error' => 'Không stage được worktree'];
             }
+            // Stray untracked trong main trung file branch them (AI viet nham absolute path):
+            // giong hệt -> don, khac -> abort ro rang
+            $stray = self::clearStrayUntracked($root, (string)$job['work_branch'], (string)$job['base_branch']);
+            if (!empty($stray['conflict'])) {
+                self::set($code, ['status' => self::ST_APPROVED,
+                    'error' => 'Main có file trùng tên nhưng khác nội dung: ' . implode(',', array_slice($stray['conflict'], 0, 5))]);
+                return ['ok' => false, 'error' => 'Main có file lạ trùng tên — kiểm tra thủ công'];
+            }
             // Merge
             $r = self::git($root, ['merge', '--no-ff', '-m', 'AI ' . $code . ': ' . mb_substr((string)$job['request'], 0, 80),
                 (string)$job['work_branch']], 120);
@@ -797,6 +807,59 @@ class DevJobManager
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => mb_substr($e->getMessage(), 0, 150)];
         }
+    }
+
+    /**
+     * Stray files: AI viet nham absolute path sang main thay vi worktree.
+     * File branch-them + main untracked + giong heet noi dung -> xoa stray.
+     * Khac noi dung/tracked -> conflict (abort ro).
+     * @return array{cleaned:string[], conflict:string[]}
+     */
+    public static function clearStrayUntracked(string $root, string $branch, string $base): array
+    {
+        $out = ['cleaned' => [], 'conflict' => []];
+        try {
+            $d = self::git($root, ['diff', '--diff-filter=A', '--name-only', $base . '...' . $branch]);
+            if (empty($d['ok'])) return $out;
+            $st = self::git($root, ['status', '--porcelain']);
+            $porc = (string)($st['out'] ?? '');
+            foreach (explode("\n", trim((string)$d['out'])) as $line) {
+                $rel = trim($line);
+                if ($rel === '') continue;
+                $full = rtrim($root, '/\\') . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $rel);
+                if (!is_file($full)) continue;
+                $tracked = false;
+                foreach (explode("\n", $porc) as $pl) {
+                    $pl = trim($pl);
+                    if ($pl !== '' && substr($pl, 0, 1) !== '?' && str_ends_with($pl, $rel)) {
+                        $tracked = true;
+                        break;
+                    }
+                }
+                if ($tracked) {
+                    $out['conflict'][] = $rel;
+                    continue;
+                }
+                $show = self::git($root, ['show', $branch . ':' . str_replace(DIRECTORY_SEPARATOR, '/', $rel)]);
+                if (empty($show['ok'])) {
+                    $out['conflict'][] = $rel;
+                    continue;
+                }
+                if (sha1((string)$show['out']) === sha1_file($full)) {
+                    @unlink($full);
+                    $dir = dirname($full);
+                    if ($dir !== $root && is_dir($dir) && count(scandir($dir)) <= 2) @rmdir($dir);
+                    $out['cleaned'][] = $rel;
+                } else {
+                    $out['conflict'][] = $rel;
+                }
+            }
+            if ($out['cleaned']) {
+                self::audit('STRAY_CLEAN', '', '', implode(',', $out['cleaned']));
+            }
+        } catch (Throwable $e) {
+        }
+        return $out;
     }
 
     /** Don worktree + branch (giuu lai sau APPLY? mac dinh don de gon). */
