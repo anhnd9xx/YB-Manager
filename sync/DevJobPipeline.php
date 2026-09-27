@@ -284,10 +284,12 @@ class DevJobPipeline
             $diff = self::worktreeDiff($job, true);
             $changed = [];
             $added = [];
+            $modified = [];
             foreach (explode("\n", $diff) as $line) {
                 if (preg_match('/^([AMD])\s+(.+)$/', trim($line), $m)) {
                     $changed[] = trim($m[2]);
                     if ($m[1] === 'A') $added[] = trim($m[2]);
+                    else $modified[] = trim($m[2]);
                 }
             }
             $extra = [];
@@ -299,8 +301,8 @@ class DevJobPipeline
                         break;
                     }
                 }
-                // Task tao file moi (expected rong): file ADDED la hop le
-                if (!$ok && empty($expected) && in_array($f, $added, true)) $ok = true;
+                // File MOI them: hop le neu it (<=3) — task tao file khong co expected
+                if (!$ok && in_array($f, $added, true) && count($added) <= 3) $ok = true;
                 if (!$ok && preg_match('/(test|spec|types?\.php|migration|\.sql|import)/i', $f)) $ok = true;
                 if (!$ok) $extra[] = $f;
             }
