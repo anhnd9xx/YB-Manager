@@ -398,25 +398,10 @@ function handle_update(array $u): void
             return;
         }
     }
-    // AI Dev Console: lenh /ai|/plan|/dev luon COMMAND mode (§39); text thuong
-    // tu user hop le -> IntentRouter (khong sua core flow).
-    if ($isCmd) {
-        $aiName = strtolower(preg_replace('/[^a-z0-9_.-].*$/', '', substr($text, 1)));
-        require_once __DIR__ . '/../sync/AIDevConsole.php';
-        if (in_array($aiName, AIDevConsole::commands(), true)) {
-            $msgType = ConversationService::T_COMMAND;
-        }
-    } elseif (!empty($chk['ok'])) {
-        require_once __DIR__ . '/../sync/AIDevConsole.php';
-        if (AIDevConsole::handleText($chatId, $userId, (string)($chk['role'] ?? 'VIEWER'), $text)) {
-            return;
-        }
-    }
-    if ($msgType === ConversationService::T_TEXT && $isCmd) {
-        return;
-    }
+    // AI Control routing (§1.3): slash -> CommandRouter; plain text KHONG BAO
+    // GIO di CommandRouter (truong hop unauthorized giu audit cu ben duoi).
     // Stale command safety (§57): command cu hon max_age -> EXPIRED, khong execute
-    if ($isCmd && $msgType === ConversationService::T_COMMAND && $msgDate > 0) {
+    if ($isCmd && $msgDate > 0) {
         $maxAge = max(60, (int)get_setting('tg_command_max_age', '180'));
         if ((time() - $msgDate) > $maxAge) {
             ConversationService::log(ConversationService::OUT, $chatId, '⌛ Lệnh đã hết hạn, vui lòng gửi lại.',
@@ -433,6 +418,19 @@ function handle_update(array $u): void
             return;
         }
     }
+    if ($isCmd) {
+        require_once __DIR__ . '/../sync/AIControlOrchestrator.php';
+        $reply = AIControlOrchestrator::handle_command($text, $chatId, $userId);
+        send_reply($chatId, $reply, $text);
+        return;
+    }
+    if (!empty($chk['ok'])) {
+        require_once __DIR__ . '/../sync/AIControlOrchestrator.php';
+        $r = AIControlOrchestrator::handle_plain_text($chatId, $userId,
+            (string)($chk['role'] ?? 'VIEWER'), $text);
+        if (!empty($r['reply'])) send_reply($chatId, $r['reply'], $text);
+        return;
+    }
     $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
     send_reply($chatId, $reply, $text);
 }
@@ -448,6 +446,18 @@ function handle_callback(array $cb): void
         return;
     }
     TelegramGateway::answerCallback($cbId);
+    // AI Control: callbacks AI truoc, con lai giu flow cu
+    require_once __DIR__ . '/../sync/PermissionService.php';
+    $chk = PermissionService::check($chatId, $userId);
+    if (!empty($chk['ok'])) {
+        require_once __DIR__ . '/../sync/AIControlOrchestrator.php';
+        if (AIControlOrchestrator::handle_callback($chatId, $userId,
+            (string)($chk['role'] ?? 'VIEWER'), $data)) {
+            return;
+        }
+    } elseif (str_starts_with($data, 'aidev:') || str_starts_with($data, 'dev:')) {
+        return; // callback AI tu user la: bo qua
+    }
     if (str_starts_with($data, 'setup:confirm:')) {
         $sid = substr($data, 15);
         $r = TelegramSetup::confirm($sid, $chatId, $userId);
@@ -475,14 +485,8 @@ function handle_callback(array $cb): void
         ConversationService::log(ConversationService::IN, $chatId, $raw, ['user_id' => $userId]);
         $reply = CommandRouter::route($raw, 'TELEGRAM', $chatId, $userId);
         send_reply($chatId, $reply, $raw);
-    } elseif (str_starts_with($data, 'aidev:') || str_starts_with($data, 'dev:')) {
-        // AI Dev Console callbacks (approval/plan/dev/progress)
-        require_once __DIR__ . '/../sync/PermissionService.php';
-        $chk = PermissionService::check($chatId, $userId);
-        if (empty($chk['ok'])) return;
-        require_once __DIR__ . '/../sync/AIDevConsole.php';
-        AIDevConsole::handleCallback($chatId, $userId, (string)($chk['role'] ?? 'VIEWER'), $data);
     }
+    // aidev:/dev: da xu ly o AIControlOrchestrator phia tren
 }
 
 function send_reply(string $chatId, array $reply, string $inboundText): void

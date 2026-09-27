@@ -14,14 +14,26 @@ class AIIntentRouter
     public const PLAN_REQUEST = 'PLAN_REQUEST';
     public const DEV_REQUEST = 'DEV_REQUEST';
     public const RUNTIME_QUESTION = 'RUNTIME_QUESTION';
+    public const RUNTIME_QUERY = 'RUNTIME_QUERY'; // alias chinh thuc (AI Control)
     public const HYBRID_DIAGNOSIS = 'HYBRID_DIAGNOSIS';
     public const PROJECT_QUESTION = 'PROJECT_QUESTION';
     public const ARCHITECTURE_QUESTION = 'ARCHITECTURE_QUESTION';
     public const BUG_ANALYSIS = 'BUG_ANALYSIS';
     public const CODE_REVIEW = 'CODE_REVIEW';
     public const TEST_REQUEST = 'TEST_REQUEST';
+    public const GENERAL_CHAT = 'GENERAL_CHAT';
+    public const TOOL_ACTION = 'TOOL_ACTION';
+    public const JOB_QUERY = 'JOB_QUERY';
+    public const HELP = 'HELP';
     public const CHAT = 'CHAT';
     public const CLARIFY = 'CLARIFY';
+
+    /** Intents runtime (khong can OpenCode). */
+    public static function isRuntime(string $intent): bool
+    {
+        return in_array($intent, [self::RUNTIME_QUESTION, self::RUNTIME_QUERY,
+            self::TOOL_ACTION, self::JOB_QUERY, self::HELP, self::GENERAL_CHAT], true);
+    }
 
     /**
      * @return array{intent, confidence:low|medium|high, command?, dev_job?, text?}
@@ -30,7 +42,22 @@ class AIIntentRouter
     {
         $t = trim($text);
         $low = mb_strtolower($t);
-        // 1. TOOL_COMMAND: /lenh dang ky
+        // 0. HELP: help / giup do / huong dan
+        if (preg_match('/^\s*(help|giúp( đỡ)?|giup( do)?|trợ giúp|tro giup|hướng dẫn|huong dan|lenh|danh sách lệnh)\s*[?!.\s]*$/iu', $t)) {
+            return ['intent' => self::HELP, 'confidence' => 'high'];
+        }
+        // 0b. GENERAL_CHAT: chao hoi / cam on / tam biet (khong can OpenCode)
+        if (preg_match('/^\s*(xin chào|xin chao|chào|chao|hi|hello|hey|alo|yo|hế lô|chào bạn|hi bạn|good morning|chào buổi)\b/iu', $t)
+            || preg_match('/^\s*(cảm ơn|cam on|thanks?|thank you|tạm biệt|tam biet|bye|tạm biệt nhé|bạn là ai|ban la ai|mày là ai)\s*[?!.\s]*$/iu', $t)) {
+            return ['intent' => self::GENERAL_CHAT, 'confidence' => 'high'];
+        }
+        // 0c. JOB_QUERY: job vua roi / ma job / cong viec
+        if (self::hasAny($low, ['job vừa rồi', 'job vua roi', 'job lúc nãy', 'job luc nay', 'job của tôi',
+            'công việc vừa', 'cong viec vua', 'tiến độ job', 'tien do job', 'job sao rồi', 'job thế nào'])
+            || preg_match('/\b(job|eva|brw|act|prx|sys)-[a-z0-9-]{3,}/i', $t)
+            || preg_match('/^\s*(jobs|công việc|cong viec|danh sách job)\s*[?!.\s]*$/iu', $t)) {
+            return ['intent' => self::JOB_QUERY, 'confidence' => 'medium'];
+        }
         if (str_starts_with($t, '/')) {
             $cmd = strtolower(preg_replace('/[^a-z0-9_.-].*$/', '', substr($t, 1)));
             try {
@@ -106,7 +133,9 @@ class AIIntentRouter
         }
         // 4d. BUG_ANALYSIS (phan tich bug, chua chac doi fix ngay)
         if (self::hasAny($low, ['phân tích lỗi', 'phan tich loi', 'phân tích bug', 'phan tich bug',
-            'bug này', 'bug nay', 'lỗi này', 'loi nay'])) {
+            'bug này', 'bug nay', 'lỗi này', 'loi nay', 'bị lỗi', 'bi loi', 'báo lỗi', 'bao loi',
+            'gặp lỗi', 'gap loi', 'lỗi khi', 'loi khi', 'bị sao', 'bi sao', 'bị gì', 'bi gi',
+            'sao vậy', 'sao vay', 'có vấn đề', 'co van de'])) {
             return ['intent' => self::BUG_ANALYSIS, 'confidence' => 'medium'];
         }
         // 5. HYBRID_DIAGNOSIS (tai sao + su co runtime)
@@ -116,18 +145,26 @@ class AIIntentRouter
                 'proxy', 'tool', 'hệ thống', 'he thong', 'job', 'đánh giá', 'danh gia'])) {
             return ['intent' => self::HYBRID_DIAGNOSIS, 'confidence' => 'medium'];
         }
-        // 6. RUNTIME_QUESTION
-        if (self::hasAny($low, ['đang chạy không', 'dang chay khong', 'có chạy không', 'co chay khong',
-            'trạng thái hiện tại', 'trang thai hien tai', 'bao nhiêu', 'bao nhieu', 'mấy ', 'mấy kênh',
-            'có online', 'co online', 'health', 'tình hình', 'tinh hinh'])) {
-            return ['intent' => self::RUNTIME_QUESTION, 'confidence' => 'medium'];
+        // 5b. TOOL_ACTION: dong tu hanh dong + doi tuong cu the
+        // (mở/đóng/đánh giá/kiểm tra proxy/jobs/receiver...). Chay qua CommandRouter.
+        if (preg_match('/(mở|mo|mở giúp|đóng|dong|tắt|tat|đánh giá|danh gia|evaluate|kiểm tra|kiem tra|check|khởi động lại|khoi dong lai|restart|pause|tạm dừng|tam dung|tiếp tục|tiep tuc|chạy|chay)\b.*(kênh|kenh|channel|profile|proxy|proxies|job|receiver|telegram|auto|activity|tool|tất cả|tat ca|all)/u', $low)
+            || preg_match('/^(mở|mo|đóng|dong|đánh giá|danh gia|kiểm tra|kiem tra|khởi động lại|restart)\b/u', $low)) {
+            return ['intent' => self::TOOL_ACTION, 'confidence' => 'medium'];
         }
-        // 7. PROJECT_QUESTION (source/architecture)
-        if (self::hasAny($low, ['nằm ở đâu', 'nam o dau', 'file nào', 'file nao', 'class nào', 'class nao',
+        // 6. PROJECT_QUESTION (source/architecture) — truoc RUNTIME de cau
+        // "X hoat dong the nao" ve source thang, con "tool/kênh the nao" roi xuong RUNTIME
+        if (self::hasAny($low, ['nằm ở đâu', 'nam o dau', 'nằm đâu', 'nam dau', 'file nào', 'file nao', 'class nào', 'class nao',
             'hoạt động thế nào', 'hoat dong the nao', 'kiến trúc', 'kien truc', 'module nào', 'module nao',
             'code ở đâu', 'code o dau', 'hàm nào', 'ham nao', 'lưu ở đâu', 'luu o dau', 'database', 'bảng nào',
             'bang nao', 'giải thích', 'giai thich'])) {
             return ['intent' => self::PROJECT_QUESTION, 'confidence' => 'medium'];
+        }
+        // 7. RUNTIME_QUESTION -> chuan hoa thanh RUNTIME_QUERY
+        if (self::hasAny($low, ['đang chạy không', 'dang chay khong', 'có chạy không', 'co chay khong',
+            'trạng thái hiện tại', 'trang thai hien tai', 'hiện thế nào', 'hien the nao',
+            'hiện sao', 'ra sao', 'thế nào?', 'the nao', 'bao nhiêu', 'bao nhieu', 'mấy ', 'mấy kênh',
+            'có online', 'co online', 'health', 'tình hình', 'tinh hinh', 'ổn không', 'on khong'])) {
+            return ['intent' => self::RUNTIME_QUESTION, 'confidence' => 'medium'];
         }
         // 8. CHAT mac dinh (confidence thap neu dai/mo ho giua Q&A va dev)
         if (mb_strlen($t) > 200) {

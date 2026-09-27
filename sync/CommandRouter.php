@@ -57,6 +57,12 @@ class BasicNlParser implements IntentParser
         if (preg_match('/trạng thái|trang thai/u', $t)) {
             return ['command' => 'status', 'args' => ''];
         }
+        if (preg_match('/kiểm tra proxy|kiem tra proxy|proxy (nào lỗi|nao loi)/u', $t)) {
+            return ['command' => 'proxy.status', 'args' => ''];
+        }
+        if (preg_match('/\b(jobs|danh sách job|công việc đang|cong viec dang|job đang chạy|job dang chay)\b/u', $t)) {
+            return ['command' => 'jobs', 'args' => ''];
+        }
         return null;
     }
 }
