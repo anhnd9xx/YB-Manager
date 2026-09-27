@@ -126,7 +126,9 @@ class DevJobPipeline
         $sid = (string)($job['opencode_session_id'] ?? '');
         if ($sid === '') return ['ok' => false, 'error' => 'no_session'];
         $w = OpenCodeGateway::waitIdle($sid, 60);
-        if (empty($w['idle'])) return ['ok' => true, 'advanced' => false, 'state' => 'CODING'];
+        if (empty($w['idle']) && !OpenCodeGateway::idleEnough($sid, 120)) {
+            return ['ok' => true, 'advanced' => false, 'state' => 'CODING'];
+        }
         DevJobManager::setFields($code, ['status' => DevJobManager::ST_TESTING]);
         return ['ok' => true, 'advanced' => true, 'state' => DevJobManager::ST_TESTING];
     }

@@ -63,11 +63,26 @@ function aiRenderOc(d) {
     + (oc.pid ? kv('PID', escapeHtml(String(oc.pid))) : '')
     + kv('Dev Jobs', escapeHtml(String(d.active_jobs || 0)) + ' active · ' + escapeHtml(String(d.pending_reviews || 0)) + ' chờ duyệt')
     + kv('Sessions', escapeHtml(String(d.active_sessions || 0)) + ' active')
+    + `<div class="meta-row"><span class="meta-label">Pipeline runner</span><span class="meta-value" id="ai-runner-st">…</span></div>`
     + kv('Git', escapeHtml((d.git && d.git.branch) || '?') + ' · ' + ((d.git && d.git.clean) ? 'sạch' : 'đang có thay đổi'))
     + `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">`
     + `<button type="button" class="btn btn-sm" onclick="aiOc('oc_restart')">Restart OpenCode</button>`
     + (st === 'STOPPED' || st === 'ERROR' ? `<button type="button" class="btn btn-sm btn-primary" onclick="aiOc('oc_start')">Khởi động</button>` : '')
+    + `<button type="button" class="btn btn-sm" onclick="aiRunnerStart()">Chạy pipeline runner</button>`
     + `</div>`;
+  aiRunnerStatus();
+}
+async function aiRunnerStatus() {
+  try {
+    const r = await getJson(api + 'aidev.php?action=runner_status');
+    const el = $('ai-runner-st');
+    if (el) el.textContent = r.ok && r.data.running ? '● Đang chạy (pid ' + r.data.pid + ')' : '○ Đang dừng';
+  } catch (e) {}
+}
+async function aiRunnerStart() {
+  const r = await sendJson(api + 'aidev.php?action=runner_start', {});
+  toast(r.ok ? 'Runner đã khởi động.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  aiRunnerStatus();
 }
 async function aiOc(action) {
   toast('Đang xử lý...', '');
@@ -294,6 +309,7 @@ async function aiDrawerLoad(quiet) {
       + kv('Thay đổi', escapeHtml(`${j.files_changed || 0} files · +${j.lines_added || 0} −${j.lines_removed || 0}`))
       + kv('Tests', escapeHtml(j.test_status || '—'))
       + (j.risk_level ? kv('Risk', escapeHtml(j.risk_level)) : '')
+      + (j.fix_iterations ? kv('Fix loops', escapeHtml(String(j.fix_iterations))) : '')
       + (j.review_result ? (() => { try {
         const rr = JSON.parse(j.review_result);
         return kv('Review', escapeHtml((rr.verdict || '?') + (rr.scope ? ' · ' + rr.scope : '')));

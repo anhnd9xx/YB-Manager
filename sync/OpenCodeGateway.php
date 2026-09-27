@@ -97,7 +97,6 @@ class OpenCodeGateway
 
     /** Cho den idle: 204=idle, 503=busy. @return array{idle} */
     public static function waitIdle(string $sessionId, int $timeoutSec = 120): array
-    {
         $t0 = microtime(true);
         while ((microtime(true) - $t0) < $timeoutSec) {
             $r = self::post('/api/session/' . $sessionId . '/wait', (object)[], 30);
@@ -107,6 +106,29 @@ class OpenCodeGateway
             sleep(5); // busy/timeout -> cho, khong hammer server
         }
         return ['idle' => false];
+    }
+
+    /**
+     * Heuristic khi /wait ket busy: neu message moi nhat da completed
+     * qua $quietSec ma khong co gi moi -> coi nhu idle (tiep pipeline).
+     */
+    public static function idleEnough(string $sessionId, int $quietSec = 120): bool
+    {
+        try {
+            $msgs = self::messages($sessionId, 3);
+            if (!$msgs) return false;
+            $now = microtime(true);
+            foreach ($msgs as $m) {
+                $created = (float)(($m['time']['created'] ?? 0) / 1000);
+                $completed = (float)(($m['time']['completed'] ?? 0) / 1000);
+                // Message chua completed -> dang chay
+                if ($created > 0 && $completed <= 0) return false;
+                if ($completed > 0 && ($now - $completed) < $quietSec) return false;
+            }
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
     }
 
     /** @return array[] pending permission requests cua session */
