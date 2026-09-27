@@ -97,6 +97,7 @@ class OpenCodeGateway
 
     /** Cho den idle: 204=idle, 503=busy. @return array{idle} */
     public static function waitIdle(string $sessionId, int $timeoutSec = 120): array
+    {
         $t0 = microtime(true);
         while ((microtime(true) - $t0) < $timeoutSec) {
             $r = self::post('/api/session/' . $sessionId . '/wait', (object)[], 30);
