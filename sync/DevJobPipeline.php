@@ -21,6 +21,14 @@ class DevJobPipeline
             $job = DevJobManager::get($code);
             if (!$job) return ['ok' => false, 'error' => 'Không thấy job'];
             $st = (string)$job['status'];
+            // Throttle buoc ton tien (plan): khong spam session moi
+            if (in_array($st, ['ANALYZING'], true)) {
+                $last = (int)get_setting('ai_adv_at_' . $code, '0');
+                if ((time() - $last) < 600) {
+                    return ['ok' => true, 'advanced' => false, 'state' => $st, 'throttled' => true];
+                }
+                set_setting('ai_adv_at_' . $code, (string)time());
+            }
             switch ($st) {
                 case DevJobManager::ST_QUEUED:
                     return self::stepPrepare($job);

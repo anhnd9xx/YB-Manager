@@ -34,10 +34,10 @@ try {
             $brain = [];
             try {
                 require_once __DIR__ . '/../sync/ProjectBrainService.php';
-                $st = ProjectBrainService::state(1);
-                $brain = ['symbols' => (int)($st['symbols_count'] ?? 0),
-                    'files' => (int)($st['files_indexed'] ?? 0),
-                    'indexed' => !empty($st['symbols_count'])];
+                $bst = ProjectBrainService::state(1);
+                $brain = ['symbols' => (int)($bst['symbols_count'] ?? 0),
+                    'files' => (int)($bst['files_indexed'] ?? 0),
+                    'indexed' => !empty($bst['symbols_count'])];
             } catch (Throwable $e) {
             }
             // Git workspace

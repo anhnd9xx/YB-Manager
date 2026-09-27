@@ -118,7 +118,7 @@ class DevPlanningEngine
             $ens = OpenCodeService::ensureRunning();
             if (empty($ens['ok'])) return ['ok' => false, 'error' => 'opencode_offline', 'size' => $size, 'impact' => $impact];
             $r = OpenCodeGateway::ask($prompt, ['title' => 'Plan ' . $size,
-                'directory' => $p ? (string)$p['root_path'] : '', 'timeout' => 300]);
+                'directory' => $p ? (string)$p['root_path'] : '', 'timeout' => 600]);
             if (empty($r['ok'])) return ['ok' => false, 'error' => $r['error'] ?? 'oc_error', 'size' => $size, 'impact' => $impact];
             return ['ok' => true, 'plan' => trim((string)$r['text']), 'size' => $size,
                 'impact' => $impact, 'session_id' => $r['session_id'] ?? '',
