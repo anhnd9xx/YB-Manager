@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>YT Manager - Quản lý kênh đa proxy</title>
 <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="assets/css/style.css?v=20260924a">
+  <link rel="stylesheet" href="assets/css/style.css?v=<?= filemtime(__DIR__ . '/assets/css/style.css') ?>">
 </head>
 <body>
 
@@ -1906,10 +1906,10 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260928a"></script>
-<script src="assets/js/monitoring.js?v=20260921a"></script>
-<script src="assets/js/notify.js?v=20260924a"></script>
-<script src="assets/js/controlcenter.js?v=20260924a"></script>
-<script src="assets/js/aidev.js?v=20260924a"></script>
+<script src="assets/js/app.js?v=<?= filemtime(__DIR__ . '/assets/js/app.js') ?>"></script>
+<script src="assets/js/monitoring.js?v=<?= filemtime(__DIR__ . '/assets/js/monitoring.js') ?>"></script>
+<script src="assets/js/notify.js?v=<?= filemtime(__DIR__ . '/assets/js/notify.js') ?>"></script>
+<script src="assets/js/controlcenter.js?v=<?= filemtime(__DIR__ . '/assets/js/controlcenter.js') ?>"></script>
+<script src="assets/js/aidev.js?v=<?= filemtime(__DIR__ . '/assets/js/aidev.js') ?>"></script>
 </body>
 </html>
