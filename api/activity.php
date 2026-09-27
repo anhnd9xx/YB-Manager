@@ -17,6 +17,29 @@ require_once __DIR__ . '/../sync/ActivityScheduler.php';
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? 'config';
 
+// Boot ensure (§47, DoD #10): co config enabled ma daemon chet -> tu spawn.
+// Cheap (pid check), khong can mo UI. Throttle 5 phut.
+if (in_array($action, ['status', 'config', 'plan'], true)) {
+    try {
+        $lastEnsure = (int)get_setting('act_ensure_at', '0');
+        if ((time() - $lastEnsure) > 300 && act_monitor_pid() === null) {
+            $n = 0;
+            try {
+                $n = (int)db()->query('SELECT COUNT(*) FROM activity_configs WHERE enabled=1')->fetchColumn();
+            } catch (Throwable $e) {
+            }
+            if ($n > 0 && act_spawn()) {
+                try {
+                    SyncLogger::info('activity', '[Scheduler] auto-started on boot (enabled=' . $n . ')');
+                } catch (Throwable $e) {
+                }
+            }
+            set_setting('act_ensure_at', (string)time());
+        }
+    } catch (Throwable $e) {
+    }
+}
+
 function act_pid_file(): string
 {
     return __DIR__ . '/../bin/.activity_scheduler.pid';
@@ -130,17 +153,81 @@ try {
             if (!empty($patch['template']) && in_array(strtoupper((string)$patch['template']), ['LIGHT', 'NORMAL', 'HIGH'], true)) {
                 $patch = array_merge($patch, ActivityManager::applyTemplate((string)$patch['template']));
             }
-            $done = 0;
-            $errors = [];
+            $res = ['ok' => [], 'failed' => []];
+            $created = 0;
+            $updated = 0;
+            $skipped = 0;
             foreach ($ids as $pid) {
-                $cur = ActivityManager::getConfig($pid);
-                $merged = array_merge($cur, $patch);
-                // required_pages/search_queries tu patch thay the han (khong merge)
-                $r = ActivityManager::saveConfig($pid, $merged);
-                if ($r['ok']) $done++;
-                else $errors[] = $pid;
+                try {
+                    $exists = db()->prepare('SELECT id FROM profiles WHERE id=?');
+                    $exists->execute([$pid]);
+                    if (!$exists->fetchColumn()) {
+                        $res['failed'][] = ['id' => $pid, 'error' => 'PROFILE_NOT_FOUND'];
+                        continue;
+                    }
+                    $had = db()->prepare('SELECT profile_id FROM activity_configs WHERE profile_id=?');
+                    $had->execute([$pid]);
+                    $isUpdate = (bool)$had->fetchColumn();
+                    $cur = ActivityManager::getConfig($pid);
+                    $merged = array_merge($cur, $patch);
+                    // required_pages/search_queries tu patch thay the han (khong merge)
+                    $r = ActivityManager::saveConfig($pid, $merged);
+                    if (!$r['ok']) {
+                        $res['failed'][] = ['id' => $pid, 'error' => 'SAVE_FAILED'];
+                        continue;
+                    }
+                    if ($isUpdate) $updated++;
+                    else $created++;
+                    $res['ok'][] = $pid;
+                    // Len lich ngay cho kenh duoc bat (UI hien "Tiep theo" lap tuc §29)
+                    if (!empty($merged['enabled'])) {
+                        try {
+                            require_once __DIR__ . '/../sync/ActivityPlanner.php';
+                            ActivityPlanner::ensureTodayPlan($pid);
+                            ActivityPlanner::updateNextRun($pid);
+                        } catch (Throwable $e) {
+                        }
+                    } else {
+                        // Tat: xoa next_run cu (§39, khong xoa config)
+                        try {
+                            db()->prepare('UPDATE activity_configs SET next_run_at=NULL WHERE profile_id=?')
+                                ->execute([$pid]);
+                        } catch (Throwable $e) {
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $res['failed'][] = ['id' => $pid, 'error' => 'EXCEPTION'];
+                }
             }
-            json_out(['ok' => true, 'data' => ['updated' => $done, 'total' => count($ids), 'errors' => $errors]]);
+            $assigned = $created + $updated;
+            try {
+                SyncLogger::info('activity', '[BULK] requested=' . count($ids) . " assigned=$assigned created=$created updated=$updated failed=" . count($res['failed']));
+            } catch (Throwable $e) {
+            }
+            json_out(['ok' => true, 'data' => [
+                'requested' => count($ids), 'assigned' => $assigned,
+                'updated' => $updated, 'created' => $created,
+                'skipped' => $skipped, 'failed' => count($res['failed']),
+                'total' => count($ids), 'results' => $res]]);
+            break;
+        }
+
+        case 'bulk_existing': {
+            // Dem kenh da co lich (modal warning §37)
+            $b = $method === 'GET' ? $_GET : json_body();
+            $raw = (string)($b['ids'] ?? '');
+            $ids = array_values(array_filter(array_map('intval', explode(',', $raw))));
+            $n = 0;
+            try {
+                if ($ids) {
+                    $in = implode(',', array_fill(0, count($ids), '?'));
+                    $st = db()->prepare("SELECT COUNT(*) FROM activity_configs WHERE profile_id IN ($in)");
+                    $st->execute($ids);
+                    $n = (int)$st->fetchColumn();
+                }
+            } catch (Throwable $e) {
+            }
+            json_out(['ok' => true, 'data' => ['existing' => $n, 'total' => count($ids)]]);
             break;
         }
 

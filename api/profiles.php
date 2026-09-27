@@ -158,8 +158,9 @@ try {
                         FROM activity_sessions WHERE plan_date=CURDATE() GROUP BY profile_id")->fetchAll() as $sr) {
                         $todayMap[(int)$sr['profile_id']] = [(int)$sr['done'], (int)$sr['total']];
                     }
-                    foreach (db()->query("SELECT profile_id, MIN(run_at) AS nxt FROM activity_sessions
-                        WHERE plan_date=CURDATE() AND status='PLANNED' AND run_at>NOW() GROUP BY profile_id")->fetchAll() as $nr) {
+                    foreach (db()->query("SELECT s.profile_id, MIN(s.run_at) AS nxt FROM activity_sessions s
+                        JOIN activity_configs c ON c.profile_id=s.profile_id AND c.enabled=1
+                        WHERE s.plan_date=CURDATE() AND s.status='PLANNED' AND s.run_at>NOW() GROUP BY s.profile_id")->fetchAll() as $nr) {
                         $sec = max(0, strtotime((string)$nr['nxt']) - time());
                         $nextMap[(int)$nr['profile_id']] = $sec < 3600 ? ((int)ceil($sec / 60) . 'm') : (round($sec / 3600, 1) . 'h');
                     }

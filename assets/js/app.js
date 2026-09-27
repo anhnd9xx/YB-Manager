@@ -444,10 +444,8 @@ function toggleSelectAll(checked) {
   renderProfiles();
 }
 function getSelectedIds() {
-  const ids = Array.from(selectedProfileIds);
-  selectedProfileIds.clear();
-  renderProfiles();
-  return ids;
+  // PURE READ: khong clear, khong render (clear chi sau action success).
+  return Array.from(selectedProfileIds);
 }
 function updateSelectedCount() {
   const ids = $('selected-count');
@@ -933,6 +931,7 @@ async function openSelected() {
   const r = await batchOpenIds(ids, null, 'Đang mở');
   if (r.cancelled) { toast('Đã hủy mở hàng loạt', 'error'); refreshAll(); return; }
   toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+  clearProfileSelection();
   refreshAll();
   await autoArrangeAfterLaunch(ids);
 }
@@ -989,6 +988,7 @@ async function closeSelected() {
   const ids = getSelectedIds();
   const r = await batchCloseIds(ids, null, 'Đang đóng');
   toast(`Đã đóng ${r.closed || 0}/${ids.length} kênh`, (r.closed || 0) < ids.length ? 'error' : 'success');
+  clearProfileSelection();
   refreshAll();
 }
 // Pool dispatch song song co gioi han (B1-B3): toi da 5 request dong thoi,
@@ -1039,6 +1039,7 @@ async function deleteSelected() {
     }
     markProfileChanged();
     toast(`Đã xóa ${ids.length} kênh`, 'success');
+    clearProfileSelection();
     refreshAll();
   });
 }
@@ -1554,34 +1555,95 @@ async function actDrawerRun(id) {
   toast(r.ok ? `Xong: ${tasks}` : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   actDrawerHistory(id);
 }
-// Bulk gan Auto Activity (§30)
+// Bulk gan Auto Activity (§30): snapshot immutable khi mo modal.
+let actBulkIds = [];
+let actBulkBusy = false;
 function actBulkOpen() {
-  const ids = getSelectedIds();
+  const ids = getSelectedIds().map(Number).filter(x => x > 0);
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
-  $('bulk-act-count').textContent = `Áp dụng cho ${ids.length} kênh đã chọn`;
+  actBulkIds = [...new Set(ids)]; // snapshot: modal chi dung ban nay
+  actBulkBusy = false;
+  actBulkRender();
   showModal('bulk-act-modal');
 }
-async function actBulkSave() {
-  const ids = getSelectedIds();
-  if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
+function actBulkProfiles() {
+  const byId = {};
+  (profiles || []).forEach(p => { byId[Number(p.id)] = p; });
+  return actBulkIds.map(id => byId[id] || { id, name: 'Kênh #' + id });
+}
+function actBulkRender() {
+  const n = actBulkIds.length;
+  const list = actBulkProfiles();
+  $('bulk-act-count').innerHTML = `<strong>${n} KÊNH ĐÃ CHỌN</strong> <button type="button" class="btn btn-xs" onclick="actBulkListToggle()">Xem</button>`
+    + `<div id="bulk-act-list" class="hidden" style="margin-top:6px;max-height:120px;overflow-y:auto">`
+    + list.map(p => `<div><small>✓ ${escapeHtml(p.name || ('Kênh #' + p.id))}</small></div>`).join('') + `</div>`
+    + `<div class="hint" id="bulk-act-exist" style="margin-top:4px">Đang kiểm tra lịch hiện có...</div>`;
+  const btn = $('bulk-act-save-btn');
+  if (btn) {
+    btn.textContent = n ? `Gán ${n} kênh` : 'Gán cho đã chọn';
+    btn.disabled = !n;
+  }
+  // Dem kenh da co lich (upsert warning §37)
+  getJson(api + 'activity.php?action=bulk_existing&ids=' + encodeURIComponent(actBulkIds.join(',')))
+    .then(r => {
+      const el = $('bulk-act-exist');
+      if (!el) return;
+      const ex = (r.ok && r.data) ? r.data.existing : 0;
+      el.textContent = ex ? `${ex}/${n} kênh đã có lịch — cấu hình sẽ được cập nhật (không tạo trùng).`
+        : 'Chưa kênh nào có lịch.';
+    }).catch(() => {});
+  actBulkPreview();
+}
+function actBulkListToggle() {
+  const el = $('bulk-act-list');
+  if (el) el.classList.toggle('hidden');
+}
+function actBulkPreview() {
+  const el = $('bulk-act-preview');
+  if (!el) return;
   const pages = [];
   document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
-  const r = await sendJson(api + 'activity.php?action=bulk', { ids, patch: {
-    enabled: $('bact-enabled').checked ? 1 : 0,
-    schedule_start: $('bact-start').value,
-    schedule_end: $('bact-end').value,
-    interval_minutes: Number($('bact-interval').value),
-    required_pages: pages,
-    activity_mode: $('bact-mode').value,
-    ...($('bact-template').value ? { template: $('bact-template').value } : {}),
-  }});
-  if (r.ok) {
-    closeModal('bulk-act-modal');
-    toast(`Đã gán Auto Activity cho ${r.data.updated}/${r.data.total} kênh`, 'success');
-    markProfileChanged();
-    refreshAll();
-  } else {
-    toast(r.message || 'Lỗi', 'error');
+  el.innerHTML = `${escapeHtml($('bact-start').value)} → ${escapeHtml($('bact-end').value)} · mỗi ${escapeHtml($('bact-interval').value)} phút<br>`
+    + `${pages.length} tab · ${actBulkIds.length} profiles`;
+}
+async function actBulkSave() {
+  const ids = actBulkIds; // SNAPSHOT — khong query lai store
+  if (!ids || !ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
+  if (actBulkBusy) return; // chong double-click
+  actBulkBusy = true;
+  const btn = $('bulk-act-save-btn');
+  const orig = btn ? btn.textContent : '';
+  try {
+    const pages = [];
+    document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
+    if (btn) { btn.disabled = true; btn.textContent = `Đang lưu lịch... 0/${ids.length}`; }
+    const r = await sendJson(api + 'activity.php?action=bulk', { ids, patch: {
+      enabled: $('bact-enabled').checked ? 1 : 0,
+      schedule_start: $('bact-start').value,
+      schedule_end: $('bact-end').value,
+      interval_minutes: Number($('bact-interval').value),
+      required_pages: pages,
+      activity_mode: $('bact-mode').value,
+      ...($('bact-template').value ? { template: $('bact-template').value } : {}),
+    }});
+    if (r.ok) {
+      const d = r.data || {};
+      closeModal('bulk-act-modal');
+      toast(`✓ Đã gán Auto Activity cho ${d.assigned || ids.length} kênh — Tạo mới: ${d.created || 0}, Cập nhật: ${d.updated || 0}. Lần chạy tiếp theo đã được lên lịch.`,
+        (d.failed ? 'error' : 'success'));
+      if (d.results && d.results.failed && d.results.failed.length) {
+        toast(`⚠ Lỗi ${d.results.failed.length} kênh: ` + d.results.failed.slice(0, 3).map(f => `#${f.id} ${f.error}`).join('; '), 'error');
+      }
+      actBulkIds = [];
+      clearProfileSelection(); // chi clear SAU SUCCESS
+      markProfileChanged();
+      refreshAll();
+    } else {
+      toast(r.message || 'Lỗi', 'error');
+    }
+  } finally {
+    actBulkBusy = false;
+    if (btn) { btn.disabled = !actBulkIds.length; btn.textContent = orig; }
   }
 }
 // Poll stage khi panel dang CHECKING (1s/lan, dung khi DONE/dong panel)
@@ -1720,6 +1782,7 @@ function assignProxySelected() {
   const ids = getSelectedIds();
   if (!ids.length) { toast('Chưa chọn kênh nào, bấm lại "Gán proxy" sau khi chọn', 'error'); return; }
   pendingProxyAssignProfileIds = ids;
+  clearProfileSelection();
   populateBulkProxySelect();
   setBulkProxyMode('single');
   // Che do THAY THE: kenh da co proxy se bi ghi de -> bao ro truoc khi gán
