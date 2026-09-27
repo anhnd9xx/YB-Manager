@@ -49,6 +49,11 @@ class AIControlOrchestrator
             ]);
             $intent = $cl['intent'];
             $entity = EntityResolver::resolve($text, $ctx);
+            try {
+                require_once __DIR__ . '/TelegramMessageRouter.php';
+                TelegramMessageRouter::trace(0, 'AI_CONTROL', $intent . ' conf=' . ($cl['confidence'] ?? '?'));
+            } catch (Throwable $e) {
+            }
             // Priority 4: DEV_FOLLOWUP truoc FAQ
             if ($intent === AIIntentRouter::DEV_FOLLOWUP) {
                 $r = AIDevConsole::handleTextWithIntent($chatId, $userId, $role, $text, $intent, $cl, $entity);

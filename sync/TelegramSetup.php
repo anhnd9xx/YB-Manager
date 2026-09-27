@@ -229,7 +229,14 @@ class TelegramSetup
             $d['uptime'] = $h['uptime'] ?? null;
             $d['last_poll_success'] = $h['last_poll_success_at'] ?? null;
             $d['reconnect_count'] = $h['reconnect_count'] ?? 0;
-            $d['worker_alive'] = !empty($h['worker_alive']);
+            $d['last_route'] = [];
+            $d['unknown_count'] = 0;
+            try {
+                require_once __DIR__ . '/TelegramMessageRouter.php';
+                $d['last_route'] = TelegramMessageRouter::lastDecision();
+                $d['unknown_count'] = (int)get_setting('tg_unknown_count', '0');
+            } catch (Throwable $e) {
+            }
             $d['worker_restarts'] = $h['worker_restarts'] ?? 0;
             $d['last_restart_reason'] = $h['last_restart_reason'] ?? null;
             $d['last_restart_at'] = $h['last_restart_at'] ?? null;
