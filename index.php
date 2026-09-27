@@ -211,6 +211,14 @@
             <button type="button" class="btn btn-sm" onclick="aiRefresh(true)">↻ Làm mới</button>
           </div>
         </div>
+        <div class="mon-tabs nt-tabs" style="margin-bottom:14px">
+          <button class="mon-tab active" data-aitab="overview" onclick="aiTab('overview')"><span class="nt-tab-ico">◈</span>Tổng quan</button>
+          <button class="mon-tab" data-aitab="brain" onclick="aiTab('brain')"><span class="nt-tab-ico">🧠</span>Project Brain</button>
+          <button class="mon-tab" data-aitab="diag" onclick="aiTab('diag')"><span class="nt-tab-ico">🔎</span>Chẩn đoán</button>
+          <button class="mon-tab" data-aitab="know" onclick="aiTab('know')"><span class="nt-tab-ico">📚</span>Kiến thức</button>
+          <button class="mon-tab" data-aitab="settings" onclick="aiTab('settings')"><span class="nt-tab-ico">⚙</span>Cài đặt</button>
+        </div>
+        <div id="ai-pane-overview">
         <div class="cc-grid">
           <div class="cc-col">
             <div class="panel nt-panel">
@@ -224,13 +232,69 @@
           </div>
           <div class="cc-col">
             <div class="panel nt-panel">
-              <div class="nt-panel-head"><span class="nt-panel-ico">⚙</span>Cấu hình AI</div>
-              <div id="ai-config"><div class="skeleton"></div></div>
+              <div class="nt-panel-head"><span class="nt-panel-ico">🧠</span>Project Brain</div>
+              <div id="ai-brain-mini"><div class="skeleton"></div></div>
             </div>
             <div class="panel nt-panel">
               <div class="nt-panel-head"><span class="nt-panel-ico">▦</span>Project</div>
               <div id="ai-project"><div class="skeleton"></div></div>
             </div>
+          </div>
+        </div>
+        </div>
+        <div id="ai-pane-brain" class="hidden">
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">🧠</span>Tra cứu symbol</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <input type="text" id="ai-brain-q" placeholder="VD: TelegramSupervisor" style="flex:1" onkeydown="if(event.key==='Enter')aiBrainSearch()">
+              <button type="button" class="btn btn-sm btn-primary" onclick="aiBrainSearch()">Tìm</button>
+              <button type="button" class="btn btn-sm" onclick="aiBrainIndex(false)">Index thay đổi</button>
+              <button type="button" class="btn btn-sm" onclick="aiBrainIndex(true)">Index lại</button>
+            </div>
+            <div id="ai-brain-out" style="margin-top:10px"><div class="hint">Nhập tên class/function để xem file, callers, dependencies.</div></div>
+          </div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">▦</span>Module Map</div>
+            <div id="ai-modules"><div class="skeleton"></div></div>
+          </div>
+        </div>
+        <div id="ai-pane-diag" class="hidden">
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">🔎</span>Chẩn đoán mới</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <input type="text" id="ai-diag-q" placeholder="VD: tại sao Telegram polling lại chết" style="flex:1" onkeydown="if(event.key==='Enter')aiDiagCreate()">
+              <button type="button" class="btn btn-sm btn-primary" onclick="aiDiagCreate()">Chẩn đoán</button>
+            </div>
+            <div id="ai-diag-out" style="margin-top:10px"></div>
+          </div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">◷</span>Chẩn đoán gần đây</div>
+            <div id="ai-diags"><div class="skeleton"></div></div>
+          </div>
+        </div>
+        <div id="ai-pane-know" class="hidden">
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">📚</span>Kiến thức &amp; Known issues</div>
+            <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+              <select id="ai-know-filter" onchange="aiKnowLoad()">
+                <option value="">Tất cả loại</option>
+                <option>INVARIANT</option><option>PROJECT_RULE</option><option>ARCHITECTURE_DECISION</option>
+                <option>KNOWN_BUG</option><option>BUG_FIX</option><option>LESSON_LEARNED</option>
+                <option>TECH_DEBT</option><option>TEST_REQUIREMENT</option><option>MODULE_DESCRIPTION</option>
+              </select>
+              <button type="button" class="btn btn-sm" onclick="aiKnowAdd()">+ Thêm</button>
+            </div>
+            <div id="ai-knows"><div class="skeleton"></div></div>
+          </div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">⚠</span>Bug signatures</div>
+            <div id="ai-issues"><div class="skeleton"></div></div>
+          </div>
+        </div>
+        <div id="ai-pane-settings" class="hidden">
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">⚙</span>Cấu hình AI</div>
+            <div id="ai-config"><div class="skeleton"></div></div>
           </div>
         </div>
         <div id="ai-drawer" class="cc-drawer hidden">

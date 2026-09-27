@@ -27,8 +27,9 @@ try {
             else AIDevConsole::reply($chatId, $r['text']);
             break;
         }
-        case 'hybrid': {
-            $r = AIDevConsole::hybridDiagnosis($chatId, $userId, $role, $text);
+        case 'hybrid':
+        case 'diag': {
+            $r = AIDevConsole::runDiagnosis($chatId, $userId, $text);
             if (($r['__buttons'] ?? null)) AIDevConsole::sendWithButtons($chatId, $r['text'], $r['__buttons']);
             else AIDevConsole::reply($chatId, $r['text']);
             break;

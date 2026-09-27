@@ -15,6 +15,16 @@ function aiInit() {
     aiRefresh();
   }, 15000);
 }
+function aiTab(name) {
+  document.querySelectorAll('[data-aitab]').forEach(b => b.classList.toggle('active', b.dataset.aitab === name));
+  ['overview', 'brain', 'diag', 'know', 'settings'].forEach(t => {
+    const el = $('ai-pane-' + t);
+    if (el) el.classList.toggle('hidden', t !== name);
+  });
+  if (name === 'brain') { aiModulesLoad(); }
+  if (name === 'diag') { aiDiagsLoad(); }
+  if (name === 'know') { aiKnowLoad(); aiIssuesLoad(); }
+}
 
 async function aiRefresh(force) {
   try {
@@ -25,6 +35,7 @@ async function aiRefresh(force) {
     aiRenderJobs();
     aiRenderConfig(d.config || {});
     aiRenderProject(d);
+    aiRenderBrainMini(d.brain || {});
     const nav = $('nav-ai-count');
     if (nav) {
       const n = d.pending_reviews || 0;
@@ -114,6 +125,139 @@ function aiRenderProject(d) {
       + `<div class="meta-row"><span class="meta-label">Rules</span><span class="meta-value">DEV_RULES.md</span></div>`
     : '<div class="empty-state">Chưa có project.</div>';
 }
+function aiRenderBrainMini(b) {
+  const el = $('ai-brain-mini');
+  if (!el) return;
+  el.innerHTML = b.indexed
+    ? `<div class="meta-row"><span class="meta-label">Symbols</span><span class="meta-value">${escapeHtml(String(b.symbols || 0))}</span></div>`
+      + `<div class="meta-row"><span class="meta-label">Files</span><span class="meta-value">${escapeHtml(String(b.files || 0))}</span></div>`
+      + `<div class="hint" style="margin:4px 0 0">✓ Đã index — sang tab Project Brain để tra cứu.</div>`
+    : `<div class="hint" style="margin:0">Chưa index. Vào tab Project Brain → Index thay đổi.</div>`;
+}
+// ---- Brain ----
+async function aiBrainIndex(full) {
+  toast('Đang index...', '');
+  const r = await sendJson(api + 'aidev.php?action=brain_index', { full: full ? 1 : 0 });
+  toast(r.ok ? `Index xong: ${r.data.symbols} symbols.` : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  aiModulesLoad();
+  aiRefresh();
+}
+async function aiModulesLoad() {
+  const el = $('ai-modules');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'aidev.php?action=brain_modules');
+    const mods = (r.ok && r.data.modules) ? r.data.modules : [];
+    el.innerHTML = mods.length
+      ? `<div class="nt-table-wrap"><table class="data-table nt-table"><thead><tr><th>Module</th><th>Files</th><th>Services</th><th>Symbols</th></tr></thead><tbody>`
+        + mods.map(m => `<tr><td><strong>${escapeHtml(m.module)}</strong></td><td>${m.files}</td><td>${m.services}</td><td>${m.symbols}</td></tr>`).join('')
+        + `</tbody></table></div>`
+      : '<div class="empty-state">Chưa index. Bấm Index thay đổi.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+async function aiBrainSearch() {
+  const q = ($('ai-brain-q').value || '').trim();
+  if (!q) return;
+  const el = $('ai-brain-out');
+  el.innerHTML = '<div class="skeleton"></div>';
+  try {
+    const r = await getJson(api + 'aidev.php?action=brain_search&q=' + encodeURIComponent(q));
+    const hits = (r.ok && r.data.hits) ? r.data.hits : [];
+    const rel = (r.ok && r.data.related) ? r.data.related : {};
+    let h = hits.length
+      ? hits.map(s => `<div class="meta-row"><span class="meta-label">${escapeHtml(s.symbol_type)}</span>`
+        + `<span class="meta-value">${escapeHtml(s.symbol_name)} <small class="muted">${escapeHtml(s.file_path)}${s.start_line ? ':' + s.start_line : ''}</small></span></div>`).join('')
+      : '<div class="empty-state">Không tìm thấy symbol.</div>';
+    if (rel.callers && rel.callers.length) {
+      h += `<div class="cc-dsec">Được dùng bởi</div><div><small class="mono">${rel.callers.slice(0, 8).map(escapeHtml).join('<br>')}</small></div>`;
+    }
+    if (rel.callees && rel.callees.length) {
+      h += `<div class="cc-dsec">Sử dụng</div><div><small>${rel.callees.slice(0, 8).map(escapeHtml).join(', ')}</small></div>`;
+    }
+    el.innerHTML = h;
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tìm.</div>';
+  }
+}
+// ---- Diagnosis ----
+async function aiDiagCreate() {
+  const q = ($('ai-diag-q').value || '').trim();
+  if (!q) { toast('Nhập mô tả sự cố', 'error'); return; }
+  const out = $('ai-diag-out');
+  out.innerHTML = '<p class="muted">🔎 Đang chẩn đoán (runtime + source + logs)...</p>';
+  try {
+    const r = await sendJson(api + 'aidev.php?action=diag_create', { problem: q });
+    if (!r.ok) { out.innerHTML = '<div class="empty-state">' + escapeHtml(r.message || 'Lỗi') + '</div>'; return; }
+    const d = r.data;
+    out.innerHTML = `<div class="meta-row"><span class="meta-label">Mã</span><span class="meta-value"><strong>${escapeHtml(d.diag_code)}</strong> <span class="badge badge-${d.confidence === 'HIGH' ? 'ok' : (d.confidence === 'MEDIUM' ? 'warn' : 'err')}">${escapeHtml(d.confidence)}</span></span></div>`
+      + `<div class="meta-row"><span class="meta-label">Kết luận</span><span class="meta-value"><small>${escapeHtml((d.cause || '').slice(0, 400))}</small></span></div>`;
+    $('ai-diag-q').value = '';
+    aiDiagsLoad();
+  } catch (e) {
+    out.innerHTML = '<div class="empty-state">Lỗi.</div>';
+  }
+}
+async function aiDiagsLoad() {
+  const el = $('ai-diags');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'aidev.php?action=diag_list');
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? rows.map(d => `<div class="meta-row"><span class="meta-label"><strong>${escapeHtml(d.diag_code)}</strong> <span class="badge badge-${d.confidence === 'HIGH' ? 'ok' : (d.confidence === 'MEDIUM' ? 'warn' : 'muted')}">${escapeHtml(d.confidence || '')}</span></span>`
+        + `<span class="meta-value"><small>${escapeHtml((d.problem || '').slice(0, 80))}</small>${d.dev_job_code ? `<br><small class="muted">→ ${escapeHtml(d.dev_job_code)}</small>` : ''}</span></div>`).join('')
+      : '<div class="empty-state">Chưa có chẩn đoán.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+// ---- Knowledge ----
+async function aiKnowLoad() {
+  const el = $('ai-knows');
+  if (!el) return;
+  try {
+    const t = $('ai-know-filter').value || '';
+    const r = await getJson(api + 'aidev.php?action=knowledge' + (t ? '&type=' + t : ''));
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? rows.map(k => `<div class="meta-row"><span class="meta-label"><span class="badge badge-info">${escapeHtml(k.ktype)}</span><br><strong>${escapeHtml(k.title)}</strong></span>`
+        + `<span class="meta-value"><small>${escapeHtml((k.body || '').slice(0, 160))}</small> <button type="button" class="btn btn-xs" onclick="aiKnowDel(${k.id})">✕</button></span></div>`).join('')
+      : '<div class="empty-state">Chưa có kiến thức.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+async function aiKnowAdd() {
+  const title = prompt('Tiêu đề kiến thức:');
+  if (!title) return;
+  const body = prompt('Nội dung:');
+  if (!body) return;
+  const type = ($('ai-know-filter').value || 'LESSON_LEARNED');
+  const r = await sendJson(api + 'aidev.php?action=knowledge_add', { type, title, body });
+  toast(r.ok ? 'Đã thêm.' : 'Lỗi', r.ok ? 'success' : 'error');
+  aiKnowLoad();
+}
+async function aiKnowDel(id) {
+  if (!confirm('Xóa kiến thức này?')) return;
+  await sendJson(api + 'aidev.php?action=knowledge_delete', { id });
+  aiKnowLoad();
+}
+async function aiIssuesLoad() {
+  const el = $('ai-issues');
+  if (!el) return;
+  try {
+    const r = await getJson(api + 'aidev.php?action=issues');
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? rows.map(k => `<div class="meta-row"><span class="meta-label"><strong>${escapeHtml(k.signature)}</strong><br><small class="muted">${escapeHtml(k.module || '')}</small></span>`
+        + `<span class="meta-value"><small>${escapeHtml((k.root_cause || '').slice(0, 140))}</small>${k.fix_dev_job ? `<br><small class="muted">fix: ${escapeHtml(k.fix_dev_job)}</small>` : ''}</span></div>`).join('')
+      : '<div class="empty-state">Chưa có bug signature.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
 
 // ---- Drawer ----
 function aiDrawerOpen(code) {
@@ -149,6 +293,12 @@ async function aiDrawerLoad(quiet) {
       + kv('Session', `<span class="mono"><small>${escapeHtml(j.opencode_session_id || '—')}</small></span>`)
       + kv('Thay đổi', escapeHtml(`${j.files_changed || 0} files · +${j.lines_added || 0} −${j.lines_removed || 0}`))
       + kv('Tests', escapeHtml(j.test_status || '—'))
+      + (j.risk_level ? kv('Risk', escapeHtml(j.risk_level)) : '')
+      + (j.review_result ? (() => { try {
+        const rr = JSON.parse(j.review_result);
+        return kv('Review', escapeHtml((rr.verdict || '?') + (rr.scope ? ' · ' + rr.scope : '')));
+      } catch (e) { return ''; } })() : '')
+      + (j.verification_result ? kv('Verify', `<small>${escapeHtml(j.verification_result.slice(0, 300))}</small>`) : '')
       + (j.ai_session ? kv('Model/Cost', escapeHtml((j.ai_session.model || '?')
         + ' · tok ' + (j.ai_session.tokens_input || 0) + '/' + (j.ai_session.tokens_output || 0)
         + ' · $' + (j.ai_session.cost || 0))) : '')
@@ -158,6 +308,7 @@ async function aiDrawerLoad(quiet) {
       + (j.summary ? `<div class="cc-dsec">Tóm tắt AI</div><div><small>${escapeHtml(j.summary.slice(0, 800))}</small></div>` : '')
       + (j.error ? `<div class="eval-prev">⚠ ${escapeHtml(j.error)}</div>` : '')
       + `<div class="cc-drawer-act">`
+      + (['QUEUED', 'ANALYZING', 'CODING', 'TESTING'].includes(j.status) ? `<button type="button" class="btn btn-sm" onclick="aiAdvance('${escapeHtml(j.job_code)}')">Chạy pipeline bước tiếp</button>` : '')
       + (['CODING', 'TESTING', 'ANALYZING'].includes(j.status) ? `<button type="button" class="btn btn-sm" onclick="aiDrawerLoad()">Cập nhật tiến độ</button>` : '')
       + (j.status === 'REVIEW_READY' ? `<button type="button" class="btn btn-sm btn-primary" onclick="aiApprove('${escapeHtml(j.job_code)}',false)">Duyệt</button>` : '')
       + (j.status === 'APPROVED' ? `<button type="button" class="btn btn-sm btn-primary" onclick="aiApply('${escapeHtml(j.job_code)}')">Áp dụng</button>` : '')
@@ -202,8 +353,14 @@ async function aiRollback(code, confirmed) {
   aiDrawerLoad();
   aiRefresh();
 }
-async function aiTests(code) {
-  toast('Đang chạy tests...', '');
+async function aiAdvance(code) {
+  toast('Pipeline đang chạy bước tiếp...', '');
+  const r = await sendJson(api + 'aidev.php?action=job_advance', { code });
+  toast(r.ok ? 'Xong bước: ' + (r.data.state || '?') : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  aiDrawerLoad();
+  aiRefresh();
+}
+async function aiTests(code) {  toast('Đang chạy tests...', '');
   const r = await sendJson(api + 'aidev.php?action=job_tests', { code });
   const rep = r.data && r.data.report;
   toast(r.ok ? 'Tests PASS.' : ('Tests FAIL' + (rep && rep.details ? ': ' + rep.details.slice(0, 3).join(', ') : '')), r.ok ? 'success' : 'error');

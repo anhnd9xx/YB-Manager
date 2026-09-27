@@ -166,8 +166,18 @@ class AIDevConsole
                 self::reply($chatId, '⏳ Quá nhiều yêu cầu, thử lại sau 1 phút.');
                 return true;
             }
-            $cl = AIIntentRouter::classify($text, ['active_dev_job' => $active]);
+            $lastDiag = (string)get_setting('ai_last_diag_' . md5($chatId), '');
+            $cl = AIIntentRouter::classify($text, ['active_dev_job' => $active, 'last_diag' => $lastDiag]);
             $intent = $cl['intent'];
+            // DEV_REQUEST tu DIAG ref: tao job kem diagnosis context
+            if ($intent === AIIntentRouter::DEV_REQUEST && !empty($cl['diag'])) {
+                if (!PermissionService::canDev($role)) {
+                    self::reply($chatId, '⛔ Cần quyền DEVELOPER.');
+                    return true;
+                }
+                self::devFromDiag($chatId, $userId, (string)$cl['diag'], $text);
+                return true;
+            }
             switch ($intent) {
                 case AIIntentRouter::DEV_FOLLOWUP: {
                     if (!PermissionService::canDev($role)) {
@@ -208,9 +218,31 @@ class AIDevConsole
                 case AIIntentRouter::RUNTIME_QUESTION:
                     self::reply($chatId, self::answerRuntime($text));
                     return true;
-                case AIIntentRouter::HYBRID_DIAGNOSIS: {
-                    self::reply($chatId, '🔎 Đang phân tích project + runtime...');
-                    self::spawnAnswer($chatId, $userId, $role, 'hybrid', $text);
+                case AIIntentRouter::HYBRID_DIAGNOSIS:
+                case AIIntentRouter::BUG_ANALYSIS: {
+                    self::reply($chatId, '🔎 Đang chẩn đoán (runtime + source + logs)...');
+                    self::spawnAnswer($chatId, $userId, $role, 'diag', $text);
+                    return true;
+                }
+                case AIIntentRouter::ARCHITECTURE_QUESTION: {
+                    self::reply($chatId, '📚 Đang hỏi OpenCode, chờ chút...');
+                    self::spawnAnswer($chatId, $userId, $role, 'qa', $text);
+                    return true;
+                }
+                case AIIntentRouter::CODE_REVIEW: {
+                    if (!PermissionService::canDev($role)) {
+                        self::reply($chatId, '⛔ Cần quyền DEVELOPER.');
+                        return true;
+                    }
+                    self::reply($chatId, self::reviewActiveJob($chatId, $active));
+                    return true;
+                }
+                case AIIntentRouter::TEST_REQUEST: {
+                    if (!PermissionService::canDev($role)) {
+                        self::reply($chatId, '⛔ Cần quyền DEVELOPER.');
+                        return true;
+                    }
+                    self::reply($chatId, self::testActiveJob($chatId, $active));
                     return true;
                 }
                 case AIIntentRouter::PROJECT_QUESTION: {
@@ -357,38 +389,123 @@ class AIDevConsole
     /** @return array{text, __buttons?} */
     public static function hybridDiagnosis(string $chatId, string $userId, string $role, string $text): array
     {
-        $runtime = self::answerRuntime($text);
-        // Can OpenCode?
-        $needOc = PermissionService::canDev($role) || true; // Q&A cho moi role
-        $oc = self::ensureOC($chatId, true);
-        if ($oc !== '') {
-            return ['text' => "🔎 Runtime hiện tại:\n$runtime\n\n($oc)"];
-        }
-        self::reply($chatId, '🔎 Đang phân tích project + runtime...');
+        return self::runDiagnosis($chatId, $userId, $text);
+    }
+
+    /**
+     * Diagnosis co cau truc + luu DIAG. Tra format ngan (§29).
+     * @return array{text, __buttons?}
+     */
+    public static function runDiagnosis(string $chatId, string $userId, string $text): array
+    {
         try {
-            require_once __DIR__ . '/ProjectContextService.php';
-            require_once __DIR__ . '/OpenCodeGateway.php';
-            $cx = ProjectContextService::build(null, 4000);
-            if (empty($cx['ok'])) return ['text' => "🔎 Runtime:\n$runtime"];
-            $prompt = "Chẩn đoán sự cố (CHỈ ĐỌC/phân tích, không sửa file):\nVẤN ĐỀ USER BÁO: $text\n"
-                . "RUNTIME THỰC TẾ:\n$runtime\nCONTEXT:\n" . $cx['context']
-                . "\nTrả lời: Root cause likely + files liên quan + bước kiểm tra tiếp.";
-            $r = OpenCodeGateway::ask($prompt, ['title' => 'Diagnosis', 'directory' => (string)$cx['root'], 'timeout' => 300]);
-            if (empty($r['ok'])) return ['text' => "🔎 Runtime:\n$runtime\n\n(OpenCode: " . ($r['error'] ?? 'lỗi') . ')'];
-            $diag = mb_substr(trim((string)$r['text']), 0, 3000);
-            set_setting('ai_plan_text_' . md5($chatId), $diag);
-            set_setting('ai_plan_req_' . md5($chatId), 'Sửa lỗi: ' . mb_substr($text, 0, 500));
-            self::logAi($chatId, $diag);
-            $buttons = null;
-            if (PermissionService::canDev($role)) {
-                $buttons = [['🛠 Sửa lỗi', 'aidev:startcode:'], ['📄 Chi tiết đủ', 'aidev:cancel:']];
+            require_once __DIR__ . '/DevProjectRegistry.php';
+            require_once __DIR__ . '/AIDiagnosisEngine.php';
+            require_once __DIR__ . '/AIIntentRouter.php';
+            $p = DevProjectRegistry::primary();
+            if (!$p) return ['text' => '❌ Chưa có project.'];
+            $ent = AIIntentRouter::extractEntities($text);
+            $r = AIDiagnosisEngine::diagnose((int)$p['id'], $text, 'TELEGRAM', $userId, $ent);
+            if (empty($r['ok'])) {
+                if (($r['error'] ?? '') === 'opencode_offline') {
+                    return ['text' => '⚠ OpenCode hiện không hoạt động.',
+                        '__buttons' => [['Khởi động OpenCode', 'aidev:ocstart:'], ['Chỉ xem Runtime', 'aidev:cancel:']]];
+                }
+                return ['text' => '❌ ' . ($r['error'] ?? 'Lỗi chẩn đoán')];
             }
-            return ['text' => "🔎 Chẩn đoán:\n\n$diag", '__buttons' => $buttons];
+            $d = $r['diag'];
+            $code = (string)$d['diag_code'];
+            set_setting('ai_last_diag_' . md5($chatId), $code);
+            self::logAi($chatId, "[$code] " . mb_substr((string)($d['cause'] ?? ''), 0, 500));
+            $txt = "🔎 $code\n\nKết luận:\n" . mb_substr((string)($d['cause'] ?? '—'), 0, 400)
+                . "\n\nConfidence: " . $d['confidence'];
+            return ['text' => $txt,
+                '__buttons' => [['📄 Chi tiết', 'aidev:diagdetail:' . $code],
+                    ['🛠 Sửa lỗi', 'aidev:diagfix:' . $code]]];
         } catch (Throwable $e) {
-            return ['text' => "🔎 Runtime:\n$runtime"];
+            return ['text' => '❌ Lỗi: ' . mb_substr($e->getMessage(), 0, 150)];
         }
     }
 
+    /** Tao DevJob tu DIAG (§26): khong bat user giai thich lai. */
+    public static function devFromDiag(string $chatId, string $userId, string $diagCode, string $extra = ''): void
+    {
+        try {
+            require_once __DIR__ . '/AIDiagnosisEngine.php';
+            require_once __DIR__ . '/DevJobManager.php';
+            require_once __DIR__ . '/DevProjectRegistry.php';
+            $d = AIDiagnosisEngine::get($diagCode);
+            if (!$d) {
+                self::reply($chatId, 'Không thấy ' . $diagCode);
+                return;
+            }
+            if (strtoupper((string)($d['confidence'] ?? 'LOW')) === 'LOW') {
+                self::reply($chatId, "⚠ $diagCode confidence LOW — cần thêm evidence trước khi code.\n"
+                    . 'Gợi ý: ' . mb_substr((string)($d['evidence'] ?? ''), 0, 300));
+                return;
+            }
+            $p = DevProjectRegistry::primary();
+            $req = 'Sửa theo ' . $diagCode . ': ' . mb_substr((string)($d['problem'] ?? ''), 0, 300)
+                . "\nRoot cause: " . mb_substr((string)($d['root_cause'] ?? ''), 0, 300)
+                . "\nFix đề xuất: " . mb_substr((string)($d['recommended_fix'] ?? ''), 0, 500)
+                . ($extra !== '' ? "\nBổ sung user: " . mb_substr($extra, 0, 300) : '');
+            $job = DevJobManager::create((int)$p['id'], $req, 'TELEGRAM', $userId);
+            if (!$job) {
+                self::reply($chatId, '❌ Không tạo được Dev Job.');
+                return;
+            }
+            AIDiagnosisEngine::linkJob($diagCode, (string)$job['job_code']);
+            DevJobManager::setActiveForChat($chatId, (string)$job['job_code']);
+            set_setting('ai_dev_chat_' . $job['job_code'], $chatId);
+            self::reply($chatId, "🛠 " . $job['job_code'] . " đã tạo từ $diagCode. Pipeline tự chạy: plan → impact → code → test → review.");
+        } catch (Throwable $e) {
+            self::reply($chatId, '❌ Lỗi: ' . mb_substr($e->getMessage(), 0, 150));
+        }
+    }
+
+    private static function reviewActiveJob(string $chatId, string $active): string
+    {
+        try {
+            require_once __DIR__ . '/DevJobManager.php';
+            $job = $active !== '' ? DevJobManager::get($active) : null;
+            if (!$job || empty($job['worktree_path']) || !is_dir((string)$job['worktree_path'])) {
+                return 'Chưa có Dev Job đang code. Vào tab AI Dev để xem danh sách.';
+            }
+            require_once __DIR__ . '/AICodeReviewer.php';
+            $wt = (string)$job['worktree_path'];
+            DevJobManager::stageWorktree($job);
+            $d = DevJobManager::git($wt, ['diff', '--name-status',
+                (string)$job['base_branch'] . '...' . (string)$job['work_branch']]);
+            if (trim((string)($d['out'] ?? '')) === '') return 'Chưa có diff nào để review.';
+            $rev = AICodeReviewer::review((int)$job['project_id'], (string)$job['request'],
+                (string)($job['planning_summary'] ?? ''), (string)$d['out'],
+                (string)($job['test_report'] ?? ''));
+            if (empty($rev['ok'])) return '❌ ' . ($rev['error'] ?? 'Lỗi review');
+            $t = '🔎 Review ' . $job['job_code'] . ': ' . $rev['verdict'];
+            foreach (array_slice($rev['issues'] ?? [], 0, 5) as $is) {
+                $t .= "\n- [" . ($is['severity'] ?? '') . '] ' . mb_substr((string)($is['text'] ?? ''), 0, 150);
+            }
+            return $t;
+        } catch (Throwable $e) {
+            return '❌ Lỗi: ' . mb_substr($e->getMessage(), 0, 150);
+        }
+    }
+
+    private static function testActiveJob(string $chatId, string $active): string
+    {
+        try {
+            require_once __DIR__ . '/DevJobManager.php';
+            $job = $active !== '' ? DevJobManager::get($active) : null;
+            if (!$job) return 'Chưa có Dev Job đang hoạt động.';
+            $r = DevJobManager::runTests((string)$job['job_code'], 'telegram:' . $chatId);
+            $rep = $r['report'] ?? [];
+            return !empty($r['ok'])
+                ? '✅ Tests PASS (lint ' . ($rep['lint'] ?? '?') . ').'
+                : '❌ Tests FAIL: ' . mb_substr(json_encode($rep), 0, 400);
+        } catch (Throwable $e) {
+            return '❌ Lỗi: ' . mb_substr($e->getMessage(), 0, 150);
+        }
+    }
     // ================= Callbacks (dev:*) =================
 
     public static function handleCallback(string $chatId, string $userId, string $role, string $data): bool
@@ -413,8 +530,29 @@ class AIDevConsole
                     self::clearPending($chatId);
                     self::reply($chatId, 'Đã hủy.');
                     return true;
-                case 'aidev:ocstart': {
-                    try {
+                case 'aidev:diagdetail': {
+                    require_once __DIR__ . '/AIDiagnosisEngine.php';
+                    $d = AIDiagnosisEngine::get($arg);
+                    if (!$d) {
+                        self::reply($chatId, 'Không thấy ' . $arg);
+                        return true;
+                    }
+                    self::reply($chatId, "📄 $arg\n\nVẤN ĐỀ: " . mb_substr((string)$d['problem'], 0, 400)
+                        . "\n\nEVIDENCE: " . mb_substr((string)$d['evidence'], 0, 600)
+                        . "\n\nAFFECTED: " . mb_substr((string)$d['affected'], 0, 300)
+                        . "\n\nFIX: " . mb_substr((string)$d['recommended_fix'], 0, 600)
+                        . "\n\nTEST: " . mb_substr((string)$d['test_plan'], 0, 400));
+                    return true;
+                }
+                case 'aidev:diagfix': {
+                    if (!PermissionService::canDev($role)) {
+                        self::reply($chatId, '⛔ Cần quyền DEVELOPER.');
+                        return true;
+                    }
+                    self::devFromDiag($chatId, $userId, $arg);
+                    return true;
+                }
+                case 'aidev:ocstart': {    try {
                         require_once __DIR__ . '/OpenCodeService.php';
                         $r = OpenCodeService::start();
                         self::reply($chatId, !empty($r['ok'])
@@ -596,8 +734,18 @@ class AIDevConsole
                     require_once __DIR__ . '/DevJobManager.php';
                     $job = DevJobManager::get($arg);
                     if ($job) {
-                        DevJobManager::pollProgress($arg);
-                        $job = DevJobManager::get($arg);
+                        // Day pipeline neu job dang tu chay
+                        if (in_array($job['status'] ?? '', ['QUEUED', 'ANALYZING', 'CODING', 'TESTING'], true)) {
+                            try {
+                                require_once __DIR__ . '/DevJobPipeline.php';
+                                DevJobPipeline::advance($arg);
+                            } catch (Throwable $e) {
+                            }
+                            $job = DevJobManager::get($arg);
+                        } else {
+                            DevJobManager::pollProgress($arg);
+                            $job = DevJobManager::get($arg);
+                        }
                         self::reply($chatId, self::progressText($job));
                     }
                     return true;
@@ -622,7 +770,7 @@ class AIDevConsole
                 return;
             }
             $job = DevJobManager::create((int)$p['id'], $request, 'TELEGRAM', $userId,
-                $plan !== '' ? ['plan_text' => $plan] : []);
+                $plan !== '' ? ['plan_text' => mb_substr($plan, 0, 4000)] : []);
             if (!$job) {
                 self::reply($chatId, '❌ Không tạo được Dev Job.');
                 return;
@@ -630,22 +778,21 @@ class AIDevConsole
             $code = (string)$job['job_code'];
             DevJobManager::setActiveForChat($chatId, $code);
             set_setting('ai_dev_chat_' . $code, $chatId); // milestone notify (§21-23)
-            self::reply($chatId, "🛠 $code đã tạo. Đang chuẩn bị worktree cách ly...");
-            $pr = DevJobManager::prepare($code, 'telegram:' . $userId);
-            if (empty($pr['ok'])) {
-                $msg = ($pr['need'] ?? '') === 'DIRTY'
-                    ? '⚠ ' . ($pr['message'] ?? 'Main tree dirty')
-                    : '❌ ' . ($pr['error'] ?? 'Lỗi prepare');
-                self::reply($chatId, $msg . "\nJob: $code");
-                return;
-            }
-            $st = DevJobManager::startCoding($code, 'telegram:' . $userId, $plan);
-            if (empty($st['ok'])) {
-                self::reply($chatId, '❌ ' . ($st['error'] ?? 'Lỗi') . "\nJob: $code");
+            self::reply($chatId, "🛠 $code đã tạo. Pipeline: prepare → plan → impact → code → test → review...");
+            try {
+                require_once __DIR__ . '/DevJobPipeline.php';
+                $adv = DevJobPipeline::advance($code); // QUEUED -> ANALYZING (prepare)
+                if (empty($adv['ok'])) {
+                    $job2 = DevJobManager::get($code);
+                    self::reply($chatId, '⚠ ' . (($job2['error'] ?? null) ?: ($adv['error'] ?? 'Lỗi prepare')) . "\nJob: $code");
+                    return;
+                }
+            } catch (Throwable $e) {
+                self::reply($chatId, '❌ Lỗi pipeline: ' . mb_substr($e->getMessage(), 0, 120));
                 return;
             }
             self::sendWithButtons($chatId,
-                "🛠 $code đang code trong worktree cách ly.\nMain project không đổi. Tôi báo khi xong.",
+                "🛠 $code đang chạy pipeline tự động.\nMain project không đổi. Tôi báo từng milestone.",
                 [['Xem tiến độ', 'dev:status:' . $code]]);
         } catch (Throwable $e) {
             self::reply($chatId, '❌ Lỗi: ' . mb_substr($e->getMessage(), 0, 150));

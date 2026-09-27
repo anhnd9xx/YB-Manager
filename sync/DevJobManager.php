@@ -167,13 +167,15 @@ class DevJobManager
         }
     }
 
-    private static function set(string $code, array $patch): void
+    /** Public wrapper cho pipeline/UI (allowlist mo rong V2). */
+    public static function setFields(string $code, array $patch): void
     {
         $allow = ['status', 'opencode_session_id', 'base_branch', 'base_commit', 'work_branch',
             'worktree_path', 'plan_text', 'started_at', 'completed_at', 'summary', 'files_changed',
             'lines_added', 'lines_removed', 'test_status', 'test_report', 'review_status', 'reviewed_by',
             'apply_status', 'applied_commit', 'snapshot_id', 'has_db_migration', 'has_dependency_change',
-            'high_risk_flags', 'error'];
+            'high_risk_flags', 'error', 'planning_summary', 'impact_report', 'acceptance_criteria',
+            'risk_level', 'review_result', 'verification_result', 'expected_files', 'fix_iterations'];
         $sets = [];
         $params = [];
         foreach ($allow as $k) {
@@ -184,10 +186,16 @@ class DevJobManager
         }
         if (!$sets) return;
         try {
+            self::ensureTables();
             $params[] = $code;
             db()->prepare('UPDATE dev_jobs SET ' . implode(',', $sets) . ' WHERE job_code=?')->execute($params);
         } catch (Throwable $e) {
         }
+    }
+
+    private static function set(string $code, array $patch): void
+    {
+        self::setFields($code, $patch);
     }
 
     public static function audit(string $action, string $code, string $by, string $detail = ''): void
@@ -683,6 +691,12 @@ class DevJobManager
             self::cleanupWorktree($job, true);
             self::audit('APPLY', $code, $by, "commit=$commit snapshot=$snap");
             self::notifyMilestone($code, 'APPLIED', 0, 0, 0, $commit);
+            // Hoc tu job thanh cong (structured, khong raw conversation)
+            try {
+                require_once __DIR__ . '/ProjectKnowledgeService.php';
+                ProjectKnowledgeService::learnFromJob((array)(self::get($code) ?: $job));
+            } catch (Throwable $e) {
+            }
             return ['ok' => true, 'commit' => $commit, 'snapshot' => $snap];
         } catch (Throwable $e) {
             self::set($code, ['status' => self::ST_APPROVED, 'error' => mb_substr($e->getMessage(), 0, 200)]);

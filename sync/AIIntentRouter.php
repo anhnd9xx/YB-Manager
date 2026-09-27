@@ -16,6 +16,10 @@ class AIIntentRouter
     public const RUNTIME_QUESTION = 'RUNTIME_QUESTION';
     public const HYBRID_DIAGNOSIS = 'HYBRID_DIAGNOSIS';
     public const PROJECT_QUESTION = 'PROJECT_QUESTION';
+    public const ARCHITECTURE_QUESTION = 'ARCHITECTURE_QUESTION';
+    public const BUG_ANALYSIS = 'BUG_ANALYSIS';
+    public const CODE_REVIEW = 'CODE_REVIEW';
+    public const TEST_REQUEST = 'TEST_REQUEST';
     public const CHAT = 'CHAT';
     public const CLARIFY = 'CLARIFY';
 
@@ -44,9 +48,29 @@ class AIIntentRouter
         if ($activeJob !== '' && !self::looksLikeNewRequest($low)) {
             return ['intent' => self::DEV_FOLLOWUP, 'confidence' => 'medium', 'dev_job' => $activeJob];
         }
-        // Mention DEV-xxx cu the
+        // Mention DEV-xxx / DIAG-xxx cu the
         if (preg_match('/dev-(\d{1,6})/i', $t, $m)) {
+            // "fix DEV-204" -> DEV_REQUEST voi context; "DEV-204 sao roi" -> followup
+            if (self::hasAny($low, ['sửa', 'sua', 'fix', 'code', 'triển khai', 'trien khai'])) {
+                return ['intent' => self::DEV_REQUEST, 'confidence' => 'high', 'dev_job' => 'DEV-' . $m[1],
+                    'from_ref' => true];
+            }
             return ['intent' => self::DEV_FOLLOWUP, 'confidence' => 'medium', 'dev_job' => 'DEV-' . $m[1]];
+        }
+        if (preg_match('/diag-(\d{1,6})/i', $t, $m)) {
+            if (self::hasAny($low, ['sửa', 'sua', 'fix', 'code'])) {
+                return ['intent' => self::DEV_REQUEST, 'confidence' => 'high', 'diag' => 'DIAG-' . $m[1],
+                    'from_ref' => true];
+            }
+            return ['intent' => self::BUG_ANALYSIS, 'confidence' => 'medium', 'diag' => 'DIAG-' . $m[1]];
+        }
+        // "fix loi do" (coi DIAG vua tao gan nhat cua chat)
+        if (preg_match('/fix (lỗi|lỗi đó|loi|bug).{0,10}(đó|do|nay|này)?/i', $t)
+            || str_contains($low, 'sửa lỗi đó') || str_contains($low, 'sua loi do')) {
+            if (!empty($ctx['last_diag'])) {
+                return ['intent' => self::DEV_REQUEST, 'confidence' => 'medium',
+                    'diag' => $ctx['last_diag'], 'from_ref' => true];
+            }
         }
         // 3. DEV_REQUEST truoc PLAN — tru khi cau mo dau bang dong tu LAP PLAN
         // ("len phuong an code module X" = PLAN; "bat dau code theo phuong an" = DEV).
@@ -66,6 +90,24 @@ class AIIntentRouter
         if (self::hasAny($low, ['lập kế hoạch', 'lap ke hoach', 'lên phương án', 'len phuong an', 'phương án',
             'phuong an', 'lên plan', 'len plan', 'thiết kế giải pháp', 'thiet ke giai phap', 'đề xuất kiến trúc'])) {
             return ['intent' => self::PLAN_REQUEST, 'confidence' => 'high'];
+        }
+        // 4b. CODE_REVIEW / TEST_REQUEST
+        if (self::hasAny($low, ['review code', 'review giúp', 'review giup', 'kiểm tra code', 'kiem tra code',
+            'đánh giá code', 'danh gia code'])) {
+            return ['intent' => self::CODE_REVIEW, 'confidence' => 'medium'];
+        }
+        if (self::hasAny($low, ['chạy test', 'chay test', 'test thử', 'test thu', 'kiểm thử', 'kiem thu'])) {
+            return ['intent' => self::TEST_REQUEST, 'confidence' => 'medium'];
+        }
+        // 4c. ARCHITECTURE_QUESTION (kien truc tong the)
+        if (self::hasAny($low, ['kiến trúc tổng', 'kien truc tong', 'architecture', 'toàn bộ hệ thống',
+            'toan bo he thong', 'luồng hoạt động', 'luong hoat dong', 'thiết kế tổng', 'thiet ke tong'])) {
+            return ['intent' => self::ARCHITECTURE_QUESTION, 'confidence' => 'medium'];
+        }
+        // 4d. BUG_ANALYSIS (phan tich bug, chua chac doi fix ngay)
+        if (self::hasAny($low, ['phân tích lỗi', 'phan tich loi', 'phân tích bug', 'phan tich bug',
+            'bug này', 'bug nay', 'lỗi này', 'loi nay'])) {
+            return ['intent' => self::BUG_ANALYSIS, 'confidence' => 'medium'];
         }
         // 5. HYBRID_DIAGNOSIS (tai sao + su co runtime)
         if (self::hasAny($low, ['tại sao', 'tai sao', 'vì sao', 'vi sao', 'lỗi gì', 'loi gi', 'bị gì', 'bi gi',
@@ -114,9 +156,44 @@ class AIIntentRouter
     public static function requiredRole(string $intent): string
     {
         return match ($intent) {
-            self::PLAN_REQUEST, self::DEV_REQUEST, self::DEV_FOLLOWUP => 'DEVELOPER',
+            self::PLAN_REQUEST, self::DEV_REQUEST, self::DEV_FOLLOWUP,
+            self::CODE_REVIEW, self::TEST_REQUEST, self::BUG_ANALYSIS => 'DEVELOPER',
             self::TOOL_COMMAND => 'COMMAND',
             default => 'VIEWER',
         };
+    }
+
+    /**
+     * Entity extraction: channel id, module, problem, refs.
+     * @return array{channel_id?, module?, problem?, diag?, dev_job?}
+     */
+    public static function extractEntities(string $text): array
+    {
+        $out = [];
+        $low = mb_strtolower($text);
+        if (preg_match('/k[eê]nh\s+(\d{1,5})/u', $low, $m)) $out['channel_id'] = (int)$m[1];
+        if (preg_match('/profile\s+(\d{1,5})/i', $text, $m)) $out['channel_id'] = (int)$m[1];
+        if (preg_match('/\b(DEV-\d{1,6})\b/i', $text, $m)) $out['dev_job'] = strtoupper($m[1]);
+        if (preg_match('/\b(DIAG-\d{1,6})\b/i', $text, $m)) $out['diag'] = strtoupper($m[1]);
+        $modMap = ['telegram' => 'TELEGRAM', 'receiver' => 'TELEGRAM', 'polling' => 'TELEGRAM',
+            'chrome' => 'CHROME', 'kênh' => 'CHANNEL', 'kenh' => 'CHANNEL',
+            'đánh giá' => 'EVALUATION', 'danh gia' => 'EVALUATION', 'evaluation' => 'EVALUATION',
+            'proxy' => 'PROXY', 'activity' => 'AUTO_ACTIVITY', 'nuôi mail' => 'AUTO_ACTIVITY',
+            'job' => 'JOBS', 'thông báo' => 'NOTIFICATION', 'report' => 'NOTIFICATION',
+            'sức khỏe' => 'HEALTH', 'lịch' => 'SCHEDULER', 'sync' => 'SYNCHRONIZE'];
+        foreach ($modMap as $k => $v) {
+            if (str_contains($low, $k)) {
+                $out['module'] = $v;
+                break;
+            }
+        }
+        foreach (['login', 'auth', 'timeout', 'offline', 'chết', 'chet', 'treo', 'lỗi', 'loi', 'bug',
+            'chậm', 'cham', 'sai', 'thiếu', 'thieu'] as $p) {
+            if (str_contains($low, $p)) {
+                $out['problem'] = $p;
+                break;
+            }
+        }
+        return $out;
     }
 }
