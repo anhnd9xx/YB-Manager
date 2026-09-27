@@ -13,7 +13,7 @@ class AICodeReviewer
      * @return array{ok, verdict?, issues?, raw?, error?}
      */
     public static function review(int $projectId, string $request, string $plan,
-        string $diff, string $testReport, int $timeoutSec = 300): array
+        string $diff, string $testReport, int $timeoutSec = 600): array
     {
         try {
             require_once __DIR__ . '/SmartContextBuilder.php';
