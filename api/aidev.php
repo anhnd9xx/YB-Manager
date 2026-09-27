@@ -216,6 +216,7 @@ try {
 
         case 'job_advance': {
             // Day pipeline 1 buoc (QUEUED/ANALYZING/CODING/TESTING)
+            @set_time_limit(600);
             $b = $method === 'GET' ? $_GET : json_body();
             require_once __DIR__ . '/../sync/DevJobPipeline.php';
             $r = DevJobPipeline::advance((string)($b['code'] ?? ''));

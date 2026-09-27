@@ -136,7 +136,8 @@ class DevJobPipeline
     private static function stepTest(array $job): array
     {
         $code = (string)$job['job_code'];
-        $r = DevJobManager::runTests($code, (string)($job['requested_by'] ?? ''));
+        // autoReview=false: pipeline chay AI review rieng, khong finishReview som
+        $r = DevJobManager::runTests($code, (string)($job['requested_by'] ?? ''), false);
         if (empty($r['ok'])) {
             // Self-fix loop (toi da 3)
             $iters = (int)($job['fix_iterations'] ?? 0);

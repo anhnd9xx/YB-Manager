@@ -434,9 +434,11 @@ class DevJobManager
 
     /**
      * Chay tests allowlisted (§29-§30). Hien tai: php_lint tren changed files.
+     * $autoReview=true (manual) thi finishReview ngay; pipeline truyen false
+     * de chay AI review truoc.
      * @return array{ok, report}
      */
-    public static function runTests(string $code, string $by = ''): array
+    public static function runTests(string $code, string $by = '', bool $autoReview = true): array
     {
         $job = self::get($code);
         if (!$job) return ['ok' => false, 'error' => 'Không thấy job'];
@@ -492,8 +494,8 @@ class DevJobManager
             $ok = $fail === 0;
             self::set($code, ['test_status' => $ok ? 'PASS' : 'FAIL',
                 'test_report' => json_encode($report, JSON_UNESCAPED_UNICODE)]);
-            if ($ok) self::finishReview($code, $by);
-            else {
+            if ($ok && $autoReview) self::finishReview($code, $by);
+            elseif (!$ok) {
                 self::set($code, ['error' => 'Lint fail: ' . implode(',', array_slice($failList, 0, 5))]);
                 self::notifyMilestone($code, 'TEST_FAILED', 0, 0, 0,
                     'Lint: ' . count($failList) . ' file lỗi');
