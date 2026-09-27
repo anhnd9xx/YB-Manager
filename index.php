@@ -835,6 +835,24 @@
             </div>
           </div>
           <div class="panel"><div id="nt-chat-metrics" class="mon-kpi-grid"><div class="skeleton"></div></div></div>
+          <div class="panel nt-panel">
+            <div class="nt-panel-head"><span class="nt-panel-ico">?</span>Câu hỏi thường gặp</div>
+            <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+              <select id="nt-faq-cat" style="width:auto" onchange="ntFaqLoad()">
+                <option value="all">Mọi nhóm</option><option>GENERAL</option><option>SYSTEM</option>
+                <option>CHANNEL</option><option>PROXY</option><option>TELEGRAM</option><option>JOB</option>
+                <option>AUTO</option><option>AI DEV</option><option>PROJECT</option><option>DEVELOPMENT</option>
+              </select>
+              <button type="button" class="btn btn-sm btn-primary" onclick="ntFaqOpen()">+ Thêm FAQ</button>
+            </div>
+            <div id="nt-faq-list"><div class="skeleton"></div></div>
+            <div class="nt-panel-head" style="margin-top:12px"><span class="nt-panel-ico">▶</span>Chạy thử FAQ</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <input type="text" id="nt-faq-test" placeholder='VD: proxy nào lỗi?' style="flex:1" onkeydown="if(event.key==='Enter')ntFaqPreview()">
+              <button type="button" class="btn btn-sm" onclick="ntFaqPreview()">Chạy thử</button>
+            </div>
+            <div id="nt-faq-preview" style="margin-top:8px"></div>
+          </div>
           <div class="panel">
             <div class="sync-label">Điều khiển từ xa (inbound)</div>
             <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="tg-inbound" style="width:auto"> Cho phép điều khiển Tool từ Telegram</label>
@@ -1580,22 +1598,41 @@
   </div>
 </div>
 
-<!-- ===== MODAL: Import Pool (Auto Activity) ===== -->
-<div id="act-import-modal" class="modal-overlay hidden">
+<!-- ===== MODAL: FAQ (Telegram) ===== -->
+<div id="nt-faq-modal" class="modal-overlay hidden">
   <div class="modal">
     <div class="modal-header">
-      <h2 id="act-import-title">Nhập danh sách</h2>
-      <button class="modal-close" onclick="closeModal('act-import-modal')">&times;</button>
+      <h2 id="nt-faq-title">Thêm FAQ</h2>
+      <button class="modal-close" onclick="closeModal('nt-faq-modal')">&times;</button>
     </div>
     <div class="modal-body">
-      <label>Dán danh sách (mỗi dòng 1 mục, paste 1000 dòng vẫn được)</label>
-      <textarea id="act-import-text" rows="10" style="width:100%" placeholder="Mỗi dòng một từ khóa..."></textarea>
-      <div id="act-import-preview" style="margin-top:8px"><p class="muted">Paste danh sách rồi bấm Kiểm tra.</p></div>
+      <input type="hidden" id="nt-faq-id" value="">
+      <label>Câu hỏi</label>
+      <input type="text" id="nt-faq-q" placeholder="VD: giờ làm việc của tool?">
+      <div class="win-row" style="margin-top:6px">
+        <div class="win-field"><label>Danh mục</label>
+          <select id="nt-faq-category"><option>GENERAL</option><option>SYSTEM</option><option>CHANNEL</option><option>PROXY</option><option>TELEGRAM</option><option>JOB</option><option>AUTO</option><option>AI DEV</option><option>PROJECT</option><option>DEVELOPMENT</option></select>
+        </div>
+        <div class="win-field"><label>Kiểu</label>
+          <select id="nt-faq-kind" onchange="ntFaqKindUI()"><option value="STATIC">Tĩnh (text cố định)</option><option value="ACTION">Runtime/Action</option></select>
+        </div>
+      </div>
+      <div id="nt-faq-answer-wrap" style="margin-top:6px"><label>Câu trả lời</label>
+        <textarea id="nt-faq-answer" rows="3" style="width:100%"></textarea>
+      </div>
+      <div id="nt-faq-action-wrap" class="hidden" style="margin-top:6px"><label>Action</label>
+        <select id="nt-faq-action"><option value="system.status">system.status</option><option value="channel.summary">channel.summary</option><option value="channel.status">channel.status</option><option value="proxy.status_summary">proxy.status_summary</option><option value="telegram.status">telegram.status</option><option value="job.summary">job.summary</option><option value="auto_activity.status">auto_activity.status</option></select>
+      </div>
+      <label style="margin-top:6px">Keywords (mỗi dòng 1 cụm để khớp)</label>
+      <textarea id="nt-faq-kw" rows="3" style="width:100%" placeholder="giờ làm việc&#10;tool mở cửa"></textarea>
+      <div class="win-row" style="margin-top:6px">
+        <div class="win-field"><label>Ưu tiên</label><input type="number" id="nt-faq-pri" value="0"></div>
+        <div class="win-field"><label>Bật</label><select id="nt-faq-on"><option value="1">Bật</option><option value="0">Tắt</option></select></div>
+      </div>
     </div>
     <div class="modal-footer">
-      <button class="btn" onclick="closeModal('act-import-modal')">Hủy</button>
-      <button class="btn" onclick="actImportCheck()">Kiểm tra</button>
-      <button class="btn btn-primary" onclick="actImportAdd()">Thêm danh sách</button>
+      <button class="btn" onclick="closeModal('nt-faq-modal')">Hủy</button>
+      <button class="btn btn-primary" onclick="ntFaqSave()">Lưu</button>
     </div>
   </div>
 </div>

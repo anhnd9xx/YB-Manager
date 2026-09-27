@@ -9,7 +9,7 @@ function notifyTab(name) {
   if (name === 'history') notifyLoadHistory();
   if (name === 'reports') notifyLoadReports();
   if (name === 'overview') notifyLoadOverview();
-  if (name === 'chat') ntChatRefresh();
+  if (name === 'chat') { ntChatRefresh(); ntFaqLoad(); }
   if (name === 'telegram') ntTestStart();
   if (name === 'telegram' || name === 'reports') {
     if (typeof ntBindAutosave === 'function') ntBindAutosave();
@@ -301,6 +301,106 @@ async function tgReceiverRestart() {
   const r = await sendJson(api + 'notify.php?action=supervisor_restart', {});
   toast(r.ok ? 'Receiver đã restart.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   tgDiagLoad();
+}
+// ============ FAQ (§18-20) ============
+async function ntFaqLoad() {
+  const el = $('nt-faq-list');
+  if (!el) return;
+  try {
+    const cat = ($('nt-faq-cat') || {}).value || 'all';
+    const r = await getJson(api + 'telegram.php?action=faq_list&category=' + encodeURIComponent(cat));
+    const rows = (r.ok && r.data) ? r.data : [];
+    el.innerHTML = rows.length
+      ? `<div class="nt-table-wrap"><table class="data-table nt-table"><thead><tr><th>Câu hỏi</th><th>Nhóm</th><th>Kiểu</th><th>Action</th><th></th></tr></thead><tbody>`
+        + rows.map(x => `<tr><td><strong>${escapeHtml(x.question)}</strong>${x.enabled ? '' : ' <span class="badge badge-muted">Tắt</span>'}</td>`
+          + `<td><small>${escapeHtml(x.category || '')}</small></td>`
+          + `<td><small>${escapeHtml(x.match_type || '')}</small></td>`
+          + `<td class="mono"><small>${escapeHtml(x.action_id || '—')}</small></td>`
+          + `<td style="white-space:nowrap"><button type="button" class="btn btn-xs" onclick="ntFaqEdit(${x.id})">Sửa</button> `
+          + `<button type="button" class="btn btn-xs" onclick="ntFaqToggle(${x.id},${x.enabled ? 0 : 1})">${x.enabled ? 'Tắt' : 'Bật'}</button> `
+          + `<button type="button" class="btn btn-xs" onclick="ntFaqDel(${x.id})">✕</button></td></tr>`).join('')
+        + `</tbody></table></div>`
+      : '<div class="empty-state">Chưa có FAQ.</div>';
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi tải.</div>';
+  }
+}
+function ntFaqKindUI() {
+  const k = $('nt-faq-kind').value;
+  $('nt-faq-answer-wrap').classList.toggle('hidden', k !== 'STATIC');
+  $('nt-faq-action-wrap').classList.toggle('hidden', k === 'STATIC');
+}
+function ntFaqOpen() {
+  $('nt-faq-title').textContent = 'Thêm FAQ';
+  $('nt-faq-id').value = '';
+  $('nt-faq-q').value = '';
+  $('nt-faq-answer').value = '';
+  $('nt-faq-kw').value = '';
+  $('nt-faq-pri').value = '0';
+  $('nt-faq-on').value = '1';
+  $('nt-faq-kind').value = 'STATIC';
+  ntFaqKindUI();
+  showModal('nt-faq-modal');
+}
+async function ntFaqEdit(id) {
+  const r = await getJson(api + 'telegram.php?action=faq_list&category=all').catch(() => null);
+  const row = r && r.ok && (r.data || []).find(x => Number(x.id) === Number(id));
+  if (!row) { toast('Không thấy', 'error'); return; }
+  $('nt-faq-title').textContent = 'Sửa FAQ';
+  $('nt-faq-id').value = row.id;
+  $('nt-faq-q').value = row.question || '';
+  $('nt-faq-category').value = row.category || 'GENERAL';
+  $('nt-faq-kind').value = row.action_id ? 'ACTION' : 'STATIC';
+  $('nt-faq-answer').value = row.answer_template || '';
+  if (row.action_id) $('nt-faq-action').value = row.action_id;
+  $('nt-faq-kw').value = (row.keywords || []).join('\n');
+  $('nt-faq-pri').value = row.priority || 0;
+  $('nt-faq-on').value = row.enabled ? '1' : '0';
+  ntFaqKindUI();
+  showModal('nt-faq-modal');
+}
+async function ntFaqSave() {
+  const kind = $('nt-faq-kind').value;
+  const body = {
+    id: $('nt-faq-id').value ? Number($('nt-faq-id').value) : null,
+    question: $('nt-faq-q').value,
+    category: $('nt-faq-category').value,
+    kind,
+    answer: $('nt-faq-answer').value,
+    action_id: $('nt-faq-action').value,
+    keywords: $('nt-faq-kw').value,
+    priority: Number($('nt-faq-pri').value) || 0,
+    enabled: $('nt-faq-on').value === '1' ? 1 : 0,
+  };
+  const r = await sendJson(api + 'telegram.php?action=faq_save', body);
+  toast(r.ok ? 'Đã lưu FAQ.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  if (r.ok) { closeModal('nt-faq-modal'); ntFaqLoad(); }
+}
+async function ntFaqToggle(id, on) {
+  await sendJson(api + 'telegram.php?action=faq_toggle', { id, enabled: on });
+  ntFaqLoad();
+}
+async function ntFaqDel(id) {
+  if (!confirm('Xóa FAQ này?')) return;
+  await sendJson(api + 'telegram.php?action=faq_delete', { id });
+  ntFaqLoad();
+}
+async function ntFaqPreview() {
+  const t = ($('nt-faq-test').value || '').trim();
+  if (!t) return;
+  const el = $('nt-faq-preview');
+  el.innerHTML = '<p class="muted">Đang chạy thử...</p>';
+  try {
+    const r = await sendJson(api + 'telegram.php?action=faq_preview', { text: t });
+    if (!r.ok) { el.innerHTML = '<div class="empty-state">' + escapeHtml(r.message || 'Lỗi') + '</div>'; return; }
+    const d = r.data;
+    el.innerHTML = !d.matched
+      ? '<div class="empty-state">Không khớp FAQ nào → sẽ đi tiếp AI Intent.</div>'
+      : `<div class="meta-row"><span class="meta-label">Matched</span><span class="meta-value">${escapeHtml(d.matched.question)} <small class="muted">[${escapeHtml(d.matched.category)}${d.matched.action ? ' · ' + escapeHtml(d.matched.action) : ''}]</small></span></div>`
+      + `<div style="margin-top:6px"><small>${escapeHtml((d.result || '').slice(0, 600))}</small></div>`;
+  } catch (e) {
+    el.innerHTML = '<div class="empty-state">Lỗi.</div>';
+  }
 }
 // §35 Kiem tra nhan: KHONG tao poller moi, chi theo doi last_inbound_at 30s.
 async function tgRecvTest() {

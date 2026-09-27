@@ -17,13 +17,26 @@ class TelegramCommands
     public static function help(array $ctx): array
     {
         $cmds = CommandRegistry::forRole($ctx['role'] ?? PermissionService::VIEWER);
-        $lines = ["🤖 <b>Lệnh khả dụng:</b>"];
+        $lines = ["🤖 <b>YT MANAGER AI</b>", "", "Bạn không cần nhớ command. Có thể nhắn tự nhiên:",
+            "", '"tool hiện thế nào?"', '"kênh 5 đang sao?"', '"proxy nào lỗi?"',
+            '"Telegram receiver nằm đâu?"', '"tại sao phần đánh giá lỗi?"',
+            '"fix lỗi đó"', '"tool còn thiếu gì?"', "", "<b>Command nhanh:</b>"];
         foreach ($cmds as $name => $c) {
             if ($name === 'pair') continue;
             $lines[] = '/' . $name . ($c['args_hint'] ? ' ' . $c['args_hint'] : '')
                 . ' — ' . $c['description'];
         }
         return ['text' => implode("\n", $lines)];
+    }
+
+    public static function faq(array $ctx): array
+    {
+        $text = "❓ <b>Câu hỏi gợi ý:</b>\n\n📊 <b>Hệ thống</b>\n• tool hiện thế nào?\n• có lỗi gì không?\n\n"
+            . "🖥 <b>Kênh</b>\n• kênh 5 thế nào?\n• có bao nhiêu kênh đang chạy?\n\n"
+            . "🌐 <b>Proxy</b>\n• proxy nào lỗi?\n\n🤖 <b>AI Dev</b>\n• AI Dev làm được gì?\n• project còn thiếu gì?";
+        $cats = [[['Hệ thống', 'faq:cat:SYSTEM'], ['Kênh', 'faq:cat:CHANNEL']],
+            [['Proxy', 'faq:cat:PROXY'], ['AI Dev', 'faq:cat:AIDEV']]];
+        return ['text' => $text, 'buttons' => $cats];
     }
 
     public static function status(array $ctx): array

@@ -168,10 +168,13 @@ class CommandRouter
 
     /**
      * Route 1 raw text tu source. Tra ve reply {text, buttons?, command_id, job_id?}.
+     * Rule (AI Control): chi message "/" moi la command. Plain text khong parse
+     * duoc -> NOT_A_COMMAND (khong "Khong hieu lenh"); slash la moi bao unknown.
      */
     public static function route(string $rawText, string $source, string $chatId, string $userId = ''): array
     {
         self::ensureTable();
+        $isSlash = str_starts_with(trim($rawText), '/');
         // Parser: slash truoc, NL sau (§35)
         $parsed = (new SlashCommandParser())->parse($rawText);
         $usedNl = false;
@@ -186,11 +189,17 @@ class CommandRouter
             $usedNl = $parsed !== null;
         }
         if ($parsed === null) {
-            return ['text' => "❓ Không hiểu lệnh. Gõ /help để xem danh sách.", 'command_id' => null];
+            if ($isSlash) {
+                return ['text' => "❓ Không có lệnh " . trim($rawText) . ". Gõ /help.", 'command_id' => null];
+            }
+            return ['not_a_command' => true, 'text' => '', 'command_id' => null];
         }
         $cmd = CommandRegistry::find($parsed['command']);
         if ($cmd === null || empty($cmd['enabled'])) {
-            return ['text' => "❓ Không có lệnh /" . $parsed['command'] . ". Gõ /help.", 'command_id' => null];
+            if ($isSlash) {
+                return ['text' => "❓ Không có lệnh /" . $parsed['command'] . ". Gõ /help.", 'command_id' => null];
+            }
+            return ['not_a_command' => true, 'text' => '', 'command_id' => null];
         }
         // Permission (Telegram source; UI source = ADMIN local) (§6-§7)
         $role = PermissionService::ADMIN;

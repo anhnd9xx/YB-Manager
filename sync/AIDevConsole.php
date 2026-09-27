@@ -36,8 +36,11 @@ class AIDevConsole
                 ['name' => 'devclose', 'module' => 'AIDEV', 'required_role' => 'DEVELOPER',
                     'description' => 'Káº¿t thÃºc phiÃªn Dev', 'handler' => [self::class, 'cmdDevClose']],
                 ['name' => 'aiapprove', 'module' => 'AIDEV', 'required_role' => 'ADMIN',
-                    'description' => 'Duyá»‡t Dev Job', 'args_hint' => '<DEV-id>',
+                    'description' => 'Duyệt Dev Job', 'args_hint' => '<DEV-id>',
                     'handler' => [self::class, 'cmdApprove']],
+                ['name' => 'faq', 'module' => 'SYSTEM', 'required_role' => 'VIEWER',
+                    'description' => 'Câu hỏi gợi ý', 'aliases' => ['cauhoi'],
+                    'handler' => [self::class, 'cmdFaq']],
                 ['name' => 'aireject', 'module' => 'AIDEV', 'required_role' => 'ADMIN',
                     'description' => 'Tá»« chá»‘i Dev Job', 'args_hint' => '<DEV-id>',
                     'handler' => [self::class, 'cmdReject']],
@@ -108,6 +111,12 @@ class AIDevConsole
         return ['text' => 'ÄÃ£ káº¿t thÃºc phiÃªn Dev.'];
     }
 
+    public static function cmdFaq(array $req): array
+    {
+        require_once __DIR__ . '/TelegramCommands.php';
+        return TelegramCommands::faq($req);
+    }
+
     public static function cmdApprove(array $req): array
     {
         $code = strtoupper(trim((string)($req['args'] ?? '')));
@@ -131,8 +140,7 @@ class AIDevConsole
         return ['text' => ''];
     }
 
-    public static function cmdReject(array $req): array
-    {
+    public static function cmdReject(array $req): array    {
         $code = strtoupper(trim((string)($req['args'] ?? '')));
         if ($code === '') return ['text' => 'DÃ¹ng: /aireject <DEV-id>'];
         if (!PermissionService::canApprove((string)($req['role'] ?? ''))) {
@@ -546,7 +554,8 @@ class AIDevConsole
 
     public static function handleCallback(string $chatId, string $userId, string $role, string $data): bool
     {
-        if (!str_starts_with($data, 'aidev:') && !str_starts_with($data, 'dev:')) return false;
+        if (!str_starts_with($data, 'aidev:') && !str_starts_with($data, 'dev:')
+            && !str_starts_with($data, 'faq:')) return false;
         try {
             $parts = explode(':', $data, 3);
             $act = ($parts[0] ?? '') . ':' . ($parts[1] ?? '');
@@ -586,6 +595,19 @@ class AIDevConsole
                         return true;
                     }
                     self::devFromDiag($chatId, $userId, $arg);
+                    return true;
+                }
+                                case 'faq:cat': {
+                    require_once __DIR__ . '/TelegramFAQService.php';
+                    $rows = TelegramFAQService::list($arg !== '' ? $arg : null);
+                    $rows = array_slice(array_filter($rows, fn($r) => ($r['match_type'] ?? '') !== 'PATTERN'), 0, 5);
+                    if (!$rows) {
+                        self::reply($chatId, 'Chưa có gợi ý cho nhóm này.');
+                        return true;
+                    }
+                    $lines = ['Gợi ý (' . $arg . '):'];
+                    foreach ($rows as $r) $lines[] = '• ' . $r['question'];
+                    self::reply($chatId, implode("\n", $lines));
                     return true;
                 }
                 case 'aidev:ocstart': {    try {

@@ -49,6 +49,24 @@ class AIControlOrchestrator
             ]);
             $intent = $cl['intent'];
             $entity = EntityResolver::resolve($text, $ctx);
+            // Priority 4: DEV_FOLLOWUP truoc FAQ
+            if ($intent === AIIntentRouter::DEV_FOLLOWUP) {
+                $r = AIDevConsole::handleTextWithIntent($chatId, $userId, $role, $text, $intent, $cl, $entity);
+                if ($r) AIConversationContext::touch($chatId, $userId, $intent, $entity);
+                return ['handled' => $r];
+            }
+            // Priority 5: FAQ (static + dynamic runtime). Miss -> AI tiep (§16).
+            try {
+                require_once __DIR__ . '/TelegramFAQService.php';
+                $faqHit = TelegramFAQService::match($text, $entity);
+                if ($faqHit) {
+                    $ans = TelegramFAQService::answer($faqHit);
+                    AIDevConsole::reply($chatId, (string)($ans['text'] ?? ''));
+                    AIConversationContext::touch($chatId, $userId, 'FAQ', $entity);
+                    return ['handled' => true];
+                }
+            } catch (Throwable $e) {
+            }
             switch ($intent) {
                 case AIIntentRouter::GENERAL_CHAT:
                     AIDevConsole::reply($chatId, self::greeting());
@@ -70,6 +88,13 @@ class AIControlOrchestrator
                 case AIIntentRouter::TOOL_ACTION: {
                     require_once __DIR__ . '/CommandRouter.php';
                     $reply = CommandRouter::route($text, 'TELEGRAM', $chatId, $userId);
+                    if (!empty($reply['not_a_command'])) {
+                        // Pattern nhan dien duoc y dinh hanh dong nhung chua co command tuong ung
+                        AIDevConsole::reply($chatId, "Tôi hiểu bạn muốn thao tác, nhưng chưa có lệnh tương ứng.\n"
+                            . "Thử /help để xem lệnh có sẵn, hoặc mô tả để tạo Dev Job.");
+                        AIConversationContext::touch($chatId, $userId, $intent, $entity);
+                        return ['handled' => true];
+                    }
                     AIConversationContext::touch($chatId, $userId, $intent, $entity);
                     return ['handled' => true, 'reply' => $reply];
                 }
@@ -133,46 +158,18 @@ class AIControlOrchestrator
 
     public static function channelDetail(array $entity): string
     {
-        $id = (int)($entity['id'] ?? 0);
-        if ($id <= 0) return 'Chưa xác định được kênh nào. Thử "kênh 8" hoặc tên kênh.';
-        try {
-            $st = db()->prepare('SELECT p.id, p.name, p.channel_handle, p.status, p.proxy_id,
-                    pr.name AS proxy_name, pr.status AS proxy_status,
-                    a.eval_status, a.login_state, a.channel_state, a.last_error, a.last_checked_at
-                FROM profiles p
-                LEFT JOIN proxies pr ON pr.id=p.proxy_id
-                LEFT JOIN account_states a ON a.profile_id=p.id
-                WHERE p.id=?');
-            $st->execute([$id]);
-            $c = $st->fetch();
-            if (!$c) return "Không thấy kênh #$id.";
-            $auto = '';
-            try {
-                require_once __DIR__ . '/ActivityManager.php';
-                $cfg = ActivityManager::getConfig($id);
-                if (!empty($cfg['enabled'])) {
-                    $auto = "\nAuto Activity: BẬT" . (!empty($cfg['next_run_at']) ? ' · tiếp theo ' . $cfg['next_run_at'] : '');
-                } else {
-                    $auto = "\nAuto Activity: tắt";
-                }
-            } catch (Throwable $e) {
-            }
-            return "Kênh #$id " . ($c['name'] ?? '') . "\n"
-                . 'Chrome: ' . strtoupper((string)($c['status'] ?? '?')) . "\n"
-                . 'Proxy: ' . ($c['proxy_name'] ?? 'không có') . ' (' . strtoupper((string)($c['proxy_status'] ?? '?')) . ")\n"
-                . 'Evaluation: ' . (string)($c['eval_status'] ?? 'UNCHECKED')
-                . ' · login=' . (string)($c['login_state'] ?? '?')
-                . ' · channel=' . (string)($c['channel_state'] ?? '?') . $auto
-                . (!empty($c['last_error']) ? "\nLỗi gần nhất: " . mb_substr((string)$c['last_error'], 0, 150) : '');
-        } catch (Throwable $e) {
-            return '❌ Không đọc được kênh.';
-        }
+        require_once __DIR__ . '/RuntimeQueryService.php';
+        return RuntimeQueryService::channelStatus((int)($entity['id'] ?? 0));
     }
 
     public static function proxyDetail(array $entity): string
     {
         $id = (int)($entity['id'] ?? 0);
-        if ($id <= 0) return 'Chưa xác định proxy nào. Thử "proxy 4".';
+        if ($id <= 0) {
+            require_once __DIR__ . '/RuntimeQueryService.php';
+            return RuntimeQueryService::proxySummary();
+        }
+        require_once __DIR__ . '/EntityResolver.php';
         $p = EntityResolver::proxyById($id);
         if (!$p) return "Không thấy proxy #$id.";
         return "Proxy #$id " . ($p['name'] ?? '') . "\nTrạng thái: " . strtoupper((string)($p['status'] ?? '?'));
@@ -180,19 +177,8 @@ class AIControlOrchestrator
 
     public static function telegramDetail(): string
     {
-        try {
-            require_once __DIR__ . '/TelegramSupervisor.php';
-            $h = TelegramSupervisor::health();
-            return 'Telegram' . "\n"
-                . 'Gateway: ' . (!empty($h['worker_alive']) || ($h['state'] ?? '') === 'LISTENING' ? 'ONLINE' : 'xem Receiver') . "\n"
-                . 'Receiver: ' . ($h['state'] ?? '?') . "\n"
-                . 'Heartbeat: poll cuối ' . ($h['last_poll_success_at'] ?? '—') . "\n"
-                . 'Tin nhận cuối: ' . ($h['last_inbound_at'] ?? '—') . "\n"
-                . 'Reconnect: ' . ($h['reconnect_count'] ?? 0) . "\n"
-                . 'Lỗi: ' . ($h['last_error'] ?? 'không');
-        } catch (Throwable $e) {
-            return '❌ Không đọc được Telegram.';
-        }
+        require_once __DIR__ . '/RuntimeQueryService.php';
+        return RuntimeQueryService::telegramStatus();
     }
 
     /** @return array{text, job_id?} */

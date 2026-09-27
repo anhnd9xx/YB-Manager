@@ -128,6 +128,9 @@ try {
             $text = trim((string)($b['text'] ?? ''));
             if ($text === '') json_out(['ok' => false, 'message' => 'Trống'], 400);
             $reply = CommandRouter::route($text, 'UI', 'local-ui', 'admin');
+            if (!empty($reply['not_a_command'])) {
+                $reply['text'] = 'Tôi chưa hiểu. Thử /help hoặc hỏi AI Dev (tab AI Dev).';
+            }
             ConversationService::log(ConversationService::IN, 'local-ui', $text,
                 ['source' => 'UI', 'user_id' => 'admin', 'command_id' => $reply['command_id'] ?? null]);
             ConversationService::log(ConversationService::OUT, 'local-ui', (string)($reply['text'] ?? ''),
@@ -444,6 +447,54 @@ try {
         case 'job_status': {
             $pid = tgp_pid('job_worker');
             json_out(['ok' => true, 'data' => ['running' => $pid !== null, 'pid' => $pid]]);
+            break;
+        }
+
+        case 'faq_list': {
+            require_once __DIR__ . '/../sync/TelegramFAQService.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => true, 'data' => TelegramFAQService::list(($b['category'] ?? null) ?: null)]);
+            break;
+        }
+
+        case 'faq_save': {
+            require_once __DIR__ . '/../sync/TelegramFAQService.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $r = TelegramFAQService::save(isset($b['id']) ? (int)$b['id'] : null, $b);
+            json_out($r['ok'] ? ['ok' => true, 'data' => ['id' => $r['id']]]
+                : ['ok' => false, 'message' => $r['error'] ?? 'Lỗi'], $r['ok'] ? 200 : 400);
+            break;
+        }
+
+        case 'faq_toggle': {
+            require_once __DIR__ . '/../sync/TelegramFAQService.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => TelegramFAQService::toggle((int)($b['id'] ?? 0), !empty($b['enabled']))]);
+            break;
+        }
+
+        case 'faq_delete': {
+            require_once __DIR__ . '/../sync/TelegramFAQService.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            json_out(['ok' => TelegramFAQService::delete((int)($b['id'] ?? 0))]);
+            break;
+        }
+
+        case 'faq_preview': {
+            // Chay thu: input -> matched FAQ + action + ket qua that (§20)
+            require_once __DIR__ . '/../sync/TelegramFAQService.php';
+            $b = $method === 'GET' ? $_GET : json_body();
+            $text = trim((string)($b['text'] ?? ''));
+            if ($text === '') json_out(['ok' => false, 'message' => 'Trống'], 400);
+            require_once __DIR__ . '/../sync/EntityResolver.php';
+            $entity = EntityResolver::resolve($text, []);
+            $hit = TelegramFAQService::match($text, $entity);
+            if (!$hit) json_out(['ok' => true, 'data' => ['matched' => null]]);
+            $ans = TelegramFAQService::answer($hit);
+            json_out(['ok' => true, 'data' => ['matched' => [
+                'question' => $hit['entry']['question'] ?? '',
+                'category' => $hit['entry']['category'] ?? '',
+                'action' => $hit['action_id'] ?? null], 'result' => $ans['text'] ?? '']]);
             break;
         }
 
