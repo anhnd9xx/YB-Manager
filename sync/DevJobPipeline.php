@@ -186,6 +186,11 @@ class DevJobPipeline
                 $ruleText .= '[' . $k['ktype'] . '] ' . $k['title'] . ': ' . mb_substr((string)$k['body'], 0, 160) . "\n";
             }
             $prompt = "Bạn là REVIEWER độc lập. Chỉ review DIFF (đừng tin lời coder).\n"
+                . "WORKTREE (code nằm đây): " . (string)$job['worktree_path'] . "\n"
+                . "Chạy mọi lệnh git với -C worktree trên. So sánh base "
+                . (string)$job['base_branch'] . "..." . (string)$job['work_branch'] . ".\n"
+                . "LƯU Ý: Tool tự stage+commit trên work branch (by design) — KHÔNG tính là vi phạm 'không commit'. "
+                . "Chỉ review các file trong SCOPE dưới đây; untracked artifacts ngoài scope thì bỏ qua.\n"
                 . "YÊU CẦU GỐC: " . mb_substr((string)$job['request'], 0, 800) . "\n"
                 . "PLAN: " . mb_substr((string)($job['planning_summary'] ?? ''), 0, 1500) . "\n"
                 . "STATIC CHECKS:\n" . ($staticText !== '' ? $staticText : '(sạch)') . "\n"
