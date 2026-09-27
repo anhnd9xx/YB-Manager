@@ -223,6 +223,12 @@ class DevJobPipeline
         $scopeNote = (string)get_setting('ai_rev_scope_' . $code, '');
         set_setting($rsidKey, '');
         $verdict = (string)($rev['verdict'] ?? 'CHANGES_REQUIRED');
+        // Verdict xau nhung khong co issue cu the -> khong loop vo nghia
+        if ($verdict !== 'PASS' && empty($rev['issues'])) {
+            $verdict = 'PASS_WITH_WARNINGS';
+            $rev['issues'] = [['severity' => 'MINOR',
+                'text' => 'Reviewer không nêu issue cụ thể — kiểm tra thủ công khi duyệt']];
+        }
         DevJobManager::setFields($code, ['review_result' => json_encode([
             'verdict' => $verdict, 'issues' => $rev['issues'] ?? [], 'scope' => $scopeNote,
             'session' => $rsid], JSON_UNESCAPED_UNICODE)]);
@@ -272,8 +278,12 @@ class DevJobPipeline
             if (!is_array($expected)) $expected = [];
             $diff = self::worktreeDiff($job, true);
             $changed = [];
+            $added = [];
             foreach (explode("\n", $diff) as $line) {
-                if (preg_match('/^[AMD]\s+(.+)$/', trim($line), $m)) $changed[] = trim($m[1]);
+                if (preg_match('/^([AMD])\s+(.+)$/', trim($line), $m)) {
+                    $changed[] = trim($m[2]);
+                    if ($m[1] === 'A') $added[] = trim($m[2]);
+                }
             }
             $extra = [];
             foreach ($changed as $f) {
@@ -284,6 +294,8 @@ class DevJobPipeline
                         break;
                     }
                 }
+                // Task tao file moi (expected rong): file ADDED la hop le
+                if (!$ok && empty($expected) && in_array($f, $added, true)) $ok = true;
                 if (!$ok && preg_match('/(test|spec|types?\.php|migration|\.sql|import)/i', $f)) $ok = true;
                 if (!$ok) $extra[] = $f;
             }

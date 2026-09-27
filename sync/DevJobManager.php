@@ -420,7 +420,7 @@ class DevJobManager
                 }
             }
             // Timeout guard
-            $maxMin = max(5, (int)get_setting('ai_dev_max_duration_min', '60'));
+            $maxMin = max(5, (int)get_setting('ai_dev_max_duration_min', '120'));
             if (!empty($job['started_at']) && (time() - strtotime((string)$job['started_at'])) > $maxMin * 60
                 && in_array($job['status'], [self::ST_CODING, self::ST_TESTING, self::ST_ANALYZING], true)) {
                 self::set($code, ['status' => self::ST_FAILED, 'error' => 'Quá thời gian cho phép']);
