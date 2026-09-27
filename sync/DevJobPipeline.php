@@ -154,24 +154,78 @@ class DevJobPipeline
         return self::stepReview(DevJobManager::get($code) ?: $job);
     }
 
-    /** Review doc lap + scope guard + verify -> REVIEW_READY hoac fix loop. */
+    /** Review doc lap + scope guard + verify -> REVIEW_READY hoac fix loop. Async: tao session 1 lan, cac tick sau doc answer. */
     private static function stepReview(array $job): array
     {
         $code = (string)$job['job_code'];
         require_once __DIR__ . '/AICodeReviewer.php';
         require_once __DIR__ . '/ArchitectureRuleEngine.php';
         require_once __DIR__ . '/TestSelectionService.php';
-        // Scope guard: diff files vs expected
-        $scopeNote = self::scopeCheck($job);
-        $diff = self::worktreeDiff($job);
-        $rev = AICodeReviewer::review((int)$job['project_id'], (string)$job['request'],
-            (string)($job['planning_summary'] ?? $job['plan_text'] ?? ''),
-            $diff, (string)($job['test_report'] ?? ''));
-        if (empty($rev['ok'])) return ['ok' => false, 'error' => $rev['error'] ?? 'review_fail'];
+        require_once __DIR__ . '/OpenCodeGateway.php';
+        require_once __DIR__ . '/DevProjectRegistry.php';
+        $rsidKey = 'ai_rev_sid_' . $code;
+        $rsid = (string)get_setting($rsidKey, '');
+        if ($rsid === '') {
+            // Chuan bi prompt review 1 lan
+            $scopeNote = self::scopeCheck($job);
+            $diff = self::worktreeDiff($job);
+            $p = DevProjectRegistry::get((int)$job['project_id']);
+            $static = ArchitectureRuleEngine::check(self::diffFiles($diff), $diff);
+            $staticText = '';
+            foreach ($static['violations'] ?? [] as $v) {
+                $staticText .= '[' . $v['severity'] . '] ' . $v['rule'] . ': ' . $v['detail'] . "\n";
+            }
+            $rules = [];
+            try {
+                require_once __DIR__ . '/ProjectKnowledgeService.php';
+                $rules = ProjectKnowledgeService::relevant((int)$job['project_id'], (string)$job['request'] . ' review', 5);
+            } catch (Throwable $e) {
+            }
+            $ruleText = '';
+            foreach ($rules as $k) {
+                $ruleText .= '[' . $k['ktype'] . '] ' . $k['title'] . ': ' . mb_substr((string)$k['body'], 0, 160) . "\n";
+            }
+            $prompt = "Bạn là REVIEWER độc lập. Chỉ review DIFF (đừng tin lời coder).\n"
+                . "YÊU CẦU GỐC: " . mb_substr((string)$job['request'], 0, 800) . "\n"
+                . "PLAN: " . mb_substr((string)($job['planning_summary'] ?? ''), 0, 1500) . "\n"
+                . "STATIC CHECKS:\n" . ($staticText !== '' ? $staticText : '(sạch)') . "\n"
+                . "SCOPE: $scopeNote\nRULES:\n$ruleText\n"
+                . "TEST RESULTS:\n" . mb_substr((string)($job['test_report'] ?? ''), 0, 800) . "\n"
+                . "DIFF:\n" . mb_substr($diff, 0, 12000) . "\n"
+                . "Kiểm tra: correctness, regression, concurrency, async lifecycle, leaks, errors, "
+                . "persistence, idempotency, security, architecture, duplicate service, test quality.\n"
+                . "Format: VERDICT: PASS|PASS_WITH_WARNINGS|CHANGES_REQUIRED|BLOCK\n"
+                . "ISSUES:\n- [CRITICAL|MAJOR|MINOR] file: symbol — mô tả => fix: ...\n(mỗi dòng 1 issue, hoặc 'none')";
+            $c = OpenCodeGateway::createSession('Review ' . $code, $p ? (string)$p['root_path'] : '');
+            if (empty($c['ok'])) return ['ok' => false, 'error' => $c['error'] ?? 'oc_error'];
+            $rsid = (string)($c['session']['id'] ?? '');
+            if ($rsid === '') return ['ok' => false, 'error' => 'oc_no_session'];
+            set_setting($rsidKey, $rsid);
+            // Luu scope de dung khi answer ve
+            set_setting('ai_rev_scope_' . $code, $scopeNote);
+            $pr = OpenCodeGateway::prompt($rsid, $prompt);
+            if (empty($pr['ok'])) {
+                set_setting($rsidKey, '');
+                return ['ok' => false, 'error' => $pr['error'] ?? 'oc_error'];
+            }
+            return ['ok' => true, 'advanced' => true, 'state' => 'TESTING_REVIEW'];
+        }
+        // Doc answer (giuu lai late answers)
+        $a = OpenCodeGateway::lastAssistantText($rsid);
+        if (trim($a['text'] ?? '') === '') {
+            OpenCodeGateway::waitIdle($rsid, 45);
+            $a = OpenCodeGateway::lastAssistantText($rsid);
+            if (trim($a['text'] ?? '') === '') {
+                return ['ok' => true, 'advanced' => false, 'state' => 'TESTING_REVIEW'];
+            }
+        }
+        $rev = AICodeReviewer::parseReview(trim((string)$a['text']));
+        $scopeNote = (string)get_setting('ai_rev_scope_' . $code, '');
+        set_setting($rsidKey, '');
         $verdict = (string)($rev['verdict'] ?? 'CHANGES_REQUIRED');
         DevJobManager::setFields($code, ['review_result' => json_encode([
             'verdict' => $verdict, 'issues' => $rev['issues'] ?? [], 'scope' => $scopeNote,
-            'session' => $rev['session_id'] ?? ''], JSON_UNESCAPED_UNICODE)]);
+            'session' => $rsid], JSON_UNESCAPED_UNICODE)]);
         if ($verdict === 'BLOCK') {
             DevJobManager::setFields($code, ['status' => DevJobManager::ST_FAILED,
                 'error' => 'Review BLOCK: ' . mb_substr(json_encode($rev['issues'] ?? []), 0, 200)]);
@@ -197,6 +251,17 @@ class DevJobPipeline
         DevJobManager::setFields($code, ['verification_result' => $verify]);
         DevJobManager::finishReview($code, (string)($job['requested_by'] ?? ''));
         return ['ok' => true, 'advanced' => true, 'state' => DevJobManager::ST_REVIEW_READY];
+    }
+
+    /** @return string[] "STATUS path" tu name-status diff */
+    private static function diffFiles(string $namesDiff): array
+    {
+        $out = [];
+        foreach (explode("\n", $namesDiff) as $line) {
+            $line = trim($line);
+            if (preg_match('/^[AMD]\s+.+$/', $line)) $out[] = $line;
+        }
+        return $out;
     }
 
     /** Scope guard: files ngoai expected (tru tests/types/migration/imports co giai trinh). */
