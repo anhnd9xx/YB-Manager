@@ -21,14 +21,7 @@ class DevJobPipeline
             $job = DevJobManager::get($code);
             if (!$job) return ['ok' => false, 'error' => 'Không thấy job'];
             $st = (string)$job['status'];
-            // Throttle buoc ton tien (plan): khong spam session moi
-            if (in_array($st, ['ANALYZING'], true)) {
-                $last = (int)get_setting('ai_adv_at_' . $code, '0');
-                if ((time() - $last) < 600) {
-                    return ['ok' => true, 'advanced' => false, 'state' => $st, 'throttled' => true];
-                }
-                set_setting('ai_adv_at_' . $code, (string)time());
-            }
+            // Single-session plan: advance re doc answer, khong spam session -> khong throttle
             switch ($st) {
                 case DevJobManager::ST_QUEUED:
                     return self::stepPrepare($job);
@@ -58,23 +51,68 @@ class DevJobPipeline
     {
         $code = (string)$job['job_code'];
         require_once __DIR__ . '/DevPlanningEngine.php';
-        $b = DevPlanningEngine::buildPlan((int)$job['project_id'], (string)$job['request'],
-            !empty($job['plan_text']) ? ['full' => true] : []);
-        if (empty($b['ok'])) {
-            if (($b['error'] ?? '') === 'opencode_offline') {
-                return ['ok' => false, 'error' => 'opencode_offline'];
-            }
-            return ['ok' => false, 'error' => $b['error'] ?? 'plan_fail'];
-        }
+        require_once __DIR__ . '/OpenCodeGateway.php';
+        require_once __DIR__ . '/DevProjectRegistry.php';
+        $pid = (int)$job['project_id'];
+        // Impact + size: nhanh, local — luu ngay ke ca khi plan chua xong
+        $impact = DevPlanningEngine::impact($pid, (string)$job['request']);
+        $size = DevPlanningEngine::classify((string)$job['request'],
+            array_merge($impact, ['files' => count($impact['files'])]));
         DevJobManager::setFields($code, [
-            'planning_summary' => mb_substr((string)$b['plan'], 0, 4000),
-            'impact_report' => json_encode($b['impact'] ?? [], JSON_UNESCAPED_UNICODE),
-            'acceptance_criteria' => self::extractAcceptance((string)$b['plan']),
-            'risk_level' => (string)($b['size'] ?? 'MEDIUM'),
-            'expected_files' => json_encode(array_slice($b['impact']['files'] ?? [], 0, 30), JSON_UNESCAPED_UNICODE),
+            'impact_report' => json_encode($impact, JSON_UNESCAPED_UNICODE),
+            'risk_level' => $size,
+            'expected_files' => json_encode(array_slice($impact['files'], 0, 30), JSON_UNESCAPED_UNICODE),
         ]);
-        // Coding ngay voi package day du
-        $plan = (string)$b['plan'];
+        $p = DevProjectRegistry::get($pid);
+        $psidKey = 'ai_plan_sid_' . $code;
+        $psid = (string)get_setting($psidKey, '');
+        if ($psid === '') {
+            // Tao session + prompt, khong doi dong bo (runner tick sau se doc)
+            require_once __DIR__ . '/SmartContextBuilder.php';
+            require_once __DIR__ . '/OpenCodeService.php';
+            $ens = OpenCodeService::ensureRunning();
+            if (empty($ens['ok'])) return ['ok' => false, 'error' => 'opencode_offline'];
+            $cx = SmartContextBuilder::build($pid, (string)$job['request'], 'PLAN_REQUEST', ['history' => true]);
+            if (empty($cx['ok'])) return ['ok' => false, 'error' => $cx['error'] ?? 'context_error'];
+            $light = in_array($size, ['TRIVIAL', 'SMALL'], true) && empty($job['plan_text']);
+            $prompt = $light
+                ? "Lập LIGHT PLAN (KHÔNG CODE, không sửa file):\nYÊU CẦU: " . $job['request'] . "\nCONTEXT:\n" . $cx['context']
+                : "Lập PHƯƠNG ÁN (KHÔNG CODE, không sửa file):\nYÊU CẦU: " . $job['request'] . "\n"
+                . "IMPACT: files=" . implode(',', array_slice($impact['files'], 0, 10)) . "\nCONTEXT:\n" . $cx['context']
+                . "\nFormat: GOAL / CURRENT ARCHITECTURE / PROPOSED CHANGE / FILES EXPECTED / DATABASE CHANGES / "
+                . "API CHANGES / UI CHANGES / EVENT CHANGES / RISK / BACKWARD COMPATIBILITY / TEST PLAN / ACCEPTANCE CRITERIA";
+            $c = OpenCodeGateway::createSession('Plan ' . $code, $p ? (string)$p['root_path'] : '');
+            if (empty($c['ok'])) return ['ok' => false, 'error' => $c['error'] ?? 'oc_error'];
+            $psid = (string)($c['session']['id'] ?? '');
+            if ($psid === '') return ['ok' => false, 'error' => 'oc_no_session'];
+            set_setting($psidKey, $psid);
+            $pr = OpenCodeGateway::prompt($psid, $prompt);
+            if (empty($pr['ok'])) {
+                set_setting($psidKey, '');
+                return ['ok' => false, 'error' => $pr['error'] ?? 'oc_error'];
+            }
+            try {
+                require_once __DIR__ . '/SyncLogger.php';
+                SyncLogger::info('aidev', "[PIPE] $code plan prompted session=$psid");
+            } catch (Throwable $e) {
+            }
+            return ['ok' => true, 'advanced' => true, 'state' => 'ANALYZING_PLAN'];
+        }
+        // Da co session: doc answer (khong bo neu tre)
+        $a = OpenCodeGateway::lastAssistantText($psid);
+        if (trim($a['text'] ?? '') === '') {
+            OpenCodeGateway::waitIdle($psid, 45);
+            $a = OpenCodeGateway::lastAssistantText($psid);
+            if (trim($a['text'] ?? '') === '') {
+                return ['ok' => true, 'advanced' => false, 'state' => 'ANALYZING_PLAN'];
+            }
+        }
+        $plan = trim((string)$a['text']);
+        DevJobManager::setFields($code, [
+            'planning_summary' => mb_substr($plan, 0, 4000),
+            'acceptance_criteria' => self::extractAcceptance($plan),
+        ]);
+        set_setting($psidKey, '');
         $st = DevJobManager::startCoding($code, (string)($job['requested_by'] ?? ''), $plan);
         if (empty($st['ok'])) return ['ok' => false, 'error' => $st['error'] ?? 'coding_fail'];
         return ['ok' => true, 'advanced' => true, 'state' => DevJobManager::ST_CODING];
