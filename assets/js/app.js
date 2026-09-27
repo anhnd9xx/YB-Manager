@@ -443,6 +443,20 @@ function toggleSelectAll(checked) {
   pageItems.forEach(p => { checked ? selectedProfileIds.add(Number(p.id)) : selectedProfileIds.delete(Number(p.id)); });
   renderProfiles();
 }
+// Helper DUY NHAT resolve profile id tu moi dang input (Phase 9).
+// Auto Activity chay tren Chrome profile (DB id), khong phai display index.
+function resolveProfileId(v) {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === 'number') return v > 0 ? Math.floor(v) : 0;
+  if (typeof v === 'string') { const n = Number(v.trim()); return n > 0 ? Math.floor(n) : 0; }
+  if (typeof v === 'object') {
+    for (const k of ['profile_id', 'profileId', 'id']) {
+      const n = Number(v[k]);
+      if (n > 0) return Math.floor(n);
+    }
+  }
+  return 0;
+}
 function getSelectedIds() {
   // PURE READ: khong clear, khong render (clear chi sau action success).
   return Array.from(selectedProfileIds);
@@ -1559,7 +1573,7 @@ async function actDrawerRun(id) {
 let actBulkIds = [];
 let actBulkBusy = false;
 function actBulkOpen() {
-  const ids = getSelectedIds().map(Number).filter(x => x > 0);
+  const ids = getSelectedIds().map(resolveProfileId).filter(x => x > 0);
   console.log('[1 CHANNEL_SELECTION]', ids);
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
   actBulkIds = [...new Set(ids)]; // snapshot: modal chi dung ban nay
