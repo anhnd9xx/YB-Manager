@@ -147,6 +147,11 @@ try {
         case 'bulk': {
             $b = $method === 'GET' ? $_GET : json_body();
             $ids = array_values(array_unique(array_filter(array_map('intval', (array)($b['ids'] ?? [])))));
+            try {
+                SyncLogger::info('activity', '[7 BACKEND_RECEIVED] keys=[' . implode(',', array_keys($b)) . ']'
+                    . ' profile_ids=[' . implode(',', array_slice($ids, 0, 20)) . '] count=' . count($ids));
+            } catch (Throwable $e) {
+            }
             if (!$ids) json_out(['ok' => false, 'message' => 'Chua chon kenh nao'], 400);
             $patch = is_array($b['patch'] ?? null) ? $b['patch'] : [];
             // Template: bung preset thanh gia tri cu the (§43-45)

@@ -1906,7 +1906,7 @@
   </div>
 </div>
 
-<script src="assets/js/app.js?v=20260921i"></script>
+<script src="assets/js/app.js?v=20260928a"></script>
 <script src="assets/js/monitoring.js?v=20260921a"></script>
 <script src="assets/js/notify.js?v=20260924a"></script>
 <script src="assets/js/controlcenter.js?v=20260924a"></script>

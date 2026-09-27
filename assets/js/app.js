@@ -1560,8 +1560,10 @@ let actBulkIds = [];
 let actBulkBusy = false;
 function actBulkOpen() {
   const ids = getSelectedIds().map(Number).filter(x => x > 0);
+  console.log('[1 CHANNEL_SELECTION]', ids);
   if (!ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
   actBulkIds = [...new Set(ids)]; // snapshot: modal chi dung ban nay
+  console.log('[2 OPEN_AUTO_MODAL]', actBulkIds);
   actBulkBusy = false;
   actBulkRender();
   showModal('bulk-act-modal');
@@ -1574,7 +1576,10 @@ function actBulkProfiles() {
 function actBulkRender() {
   const n = actBulkIds.length;
   const list = actBulkProfiles();
+  console.log('[3 MODAL_PROPS] profileIds=', actBulkIds);
+  console.log('[4 MODAL_SNAPSHOT] snapshotIds=', [...actBulkIds]);
   $('bulk-act-count').innerHTML = `<strong>${n} KÊNH ĐÃ CHỌN</strong> <button type="button" class="btn btn-xs" onclick="actBulkListToggle()">Xem</button>`
+    + `<div class="hint mono" style="margin-top:2px">IDs: ${actBulkIds.join(', ') || '—'}</div>`
     + `<div id="bulk-act-list" class="hidden" style="margin-top:6px;max-height:120px;overflow-y:auto">`
     + list.map(p => `<div><small>✓ ${escapeHtml(p.name || ('Kênh #' + p.id))}</small></div>`).join('') + `</div>`
     + `<div class="hint" id="bulk-act-exist" style="margin-top:4px">Đang kiểm tra lịch hiện có...</div>`;
@@ -1608,6 +1613,7 @@ function actBulkPreview() {
 }
 async function actBulkSave() {
   const ids = actBulkIds; // SNAPSHOT — khong query lai store
+  console.log('[5 SUBMIT_CLICK] snapshotIds=', [...ids]);
   if (!ids || !ids.length) { toast('Chưa chọn kênh nào', 'error'); return; }
   if (actBulkBusy) return; // chong double-click
   actBulkBusy = true;
@@ -1617,7 +1623,7 @@ async function actBulkSave() {
     const pages = [];
     document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
     if (btn) { btn.disabled = true; btn.textContent = `Đang lưu lịch... 0/${ids.length}`; }
-    const r = await sendJson(api + 'activity.php?action=bulk', { ids, patch: {
+    const payload = { ids, patch: {
       enabled: $('bact-enabled').checked ? 1 : 0,
       schedule_start: $('bact-start').value,
       schedule_end: $('bact-end').value,
@@ -1625,7 +1631,9 @@ async function actBulkSave() {
       required_pages: pages,
       activity_mode: $('bact-mode').value,
       ...($('bact-template').value ? { template: $('bact-template').value } : {}),
-    }});
+    }};
+    console.log('[6 API_PAYLOAD]', JSON.stringify(payload));
+    const r = await sendJson(api + 'activity.php?action=bulk', payload);
     if (r.ok) {
       const d = r.data || {};
       closeModal('bulk-act-modal');
