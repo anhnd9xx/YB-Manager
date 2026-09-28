@@ -150,7 +150,84 @@ class ActivityPlanner
             $usedKinds[] = $kind;
         }
         if (!$tasks) $tasks[] = ['kind' => 'GMAIL'];
+        // Custom tabs theo lich (§14-16): them entries mo URL
+        if (!empty($cfg['scheduled_tabs_enabled'])) {
+            $tbMin = max(1, (int)($cfg['tabs_min'] ?? 1));
+            $tbMax = max($tbMin, (int)($cfg['tabs_max'] ?? 2));
+            $n = ActivityManager::next_interval($tbMin, $tbMax);
+            $urls = self::pickCustomUrls($cfg, [], $n);
+            foreach ($urls as $u) {
+                $tasks[] = ['kind' => 'CUSTOM_TAB', 'url' => $u['url'], 'label' => $u['label'] ?? ''];
+            }
+        }
         return $tasks;
+    }
+
+    /**
+     * Chon URL tuy chinh: source filter + cooldown + ORDER/RANDOM (§16, §21-22).
+     * @return array[{url,label,domain}]
+     */
+    public static function pickCustomUrls(array $cfg, array $excludeDomains, int $count): array
+    {
+        $src = (string)($cfg['tab_source_mode'] ?? 'BOTH');
+        $cands = [];
+        if ($src === 'DEFAULT' || $src === 'BOTH') {
+            foreach (ActivityManager::requiredUrls($cfg) as $u) {
+                $cands[] = ['url' => $u, 'label' => ActivityManager::hostOf($u), 'weight' => 1];
+            }
+        }
+        if ($src === 'CUSTOM' || $src === 'BOTH') {
+            foreach ((array)($cfg['custom_tabs'] ?? []) as $t) {
+                if (!in_array(strtoupper((string)($t['behavior'] ?? 'BOTH')), ['OPEN_SCHEDULED', 'BOTH'], true)) continue;
+                $cands[] = ['url' => (string)$t['url'], 'label' => (string)($t['label'] ?? ''),
+                    'domain' => (string)($t['domain'] ?? ''), 'weight' => 1];
+            }
+        }
+        // Cooldown: loai domain dung gan (§22)
+        $cool = max(0, (int)($cfg['url_cooldown_minutes'] ?? 60));
+        $ex = array_map('strtolower', $excludeDomains);
+        if ($cool > 0 || $ex) {
+            $kept = [];
+            foreach ($cands as $c) {
+                $d = strtolower(ActivityManager::domainOf((string)$c['url']));
+                if (in_array($d, $ex, true)) continue;
+                if ($cool > 0 && self::domainUsedRecently((int)($cfg['profile_id'] ?? 0), $d, $cool)) continue;
+                $kept[] = $c;
+            }
+            if ($kept) $cands = $kept; // het thi tha long (van mo, tranh doi tra)
+        }
+        if (!$cands) return [];
+        if ((string)($cfg['tab_selection_mode'] ?? 'RANDOM') === 'ORDER') {
+            // Xoay vong theo index (§16, §23 doc lap)
+            $st = ActivityManager::stateGet((int)($cfg['profile_id'] ?? 0));
+            $idx = (int)($st['custom_idx'] ?? 0);
+            $out = [];
+            for ($i = 0; $i < min($count, count($cands)); $i++) {
+                $out[] = $cands[($idx + $i) % count($cands)];
+            }
+            return $out;
+        }
+        return ActivityManager::select_tabs($cands, min($count, count($cands)), $count);
+    }
+
+    private static function domainUsedRecently(int $profileId, string $domain, int $minutes): bool
+    {
+        return ActivityManager::domainCoolingDown($profileId, $domain, $minutes);
+    }
+
+    /** Tang custom_idx sau session (ORDER rotation). */
+    public static function bumpCustomIdx(int $profileId, int $n): void
+    {
+        try {
+            $cfg = ActivityManager::getConfig($profileId);
+            $total = 0;
+            if ((string)($cfg['tab_source_mode'] ?? 'BOTH') !== 'CUSTOM') {
+                $total += count(ActivityManager::requiredUrls($cfg));
+            }
+            $total += count((array)($cfg['custom_tabs'] ?? []));
+            ActivityManager::stateBump($profileId, 'custom_idx', $n, max(1, $total));
+        } catch (Throwable $e) {
+        }
     }
 
     /** @return array[] sessions hom nay (som nhat truoc) */
@@ -349,6 +426,12 @@ class ActivityPlanner
                 . " ok=$ok fail=$fail duration=" . $ms . 'ms', $profileId);
         } catch (Throwable $e) {
         }
+        // ORDER rotation cho custom tabs
+        $nCustom = 0;
+        foreach ($tasks as $tk) {
+            if (strtoupper((string)($tk['kind'] ?? '')) === 'CUSTOM_TAB') $nCustom++;
+        }
+        if ($nCustom > 0) self::bumpCustomIdx($profileId, $nCustom);
         self::bumpDayJob($profileId);
         self::updateNextRun($profileId);
     }
@@ -400,6 +483,11 @@ class ActivityPlanner
                 $done = ActivityManager::countToday($profileId);
                 if ($done['WEBSITE'] >= (int)($limits['WEBSITE'][1] ?? 99)) return null;
                 return ['type' => ActivityManager::T_WEBSITE, 'exclude' => $excludeDomains];
+            }
+            case 'CUSTOM_TAB': {
+                $url = trim((string)($tk['url'] ?? ''));
+                if (!ActivityManager::validHttpUrl($url)) return null;
+                return ['type' => ActivityManager::T_CUSTOM, 'url' => $url];
             }
             default:
                 return null;

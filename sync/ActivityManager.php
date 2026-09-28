@@ -25,6 +25,7 @@ class ActivityManager
     public const T_CLOSE_AUTO = 'CLOSE_AUTOMATION_TAB';
     public const T_WEBSITE = 'OPEN_RANDOM_WEBSITE';
     public const T_SEARCH_VISIT = 'SEARCH_VISIT';
+    public const T_CUSTOM = 'OPEN_CUSTOM_TAB';
 
     // Results / errors (§32)
     public const R_OPENED = 'OPENED';
@@ -113,6 +114,17 @@ class ActivityManager
                 'next_run_at' => 'DATETIME NULL',
                 'search_behavior' => "VARCHAR(15) NOT NULL DEFAULT 'SEARCH_VISIT'",
                 'max_result_depth' => 'INT NOT NULL DEFAULT 10',
+                'interval_mode' => "VARCHAR(15) NOT NULL DEFAULT 'FIXED'",
+                'random_min' => 'INT NOT NULL DEFAULT 30',
+                'random_max' => 'INT NOT NULL DEFAULT 90',
+                'scheduled_tabs_enabled' => 'TINYINT(1) NOT NULL DEFAULT 0',
+                'tab_source_mode' => "VARCHAR(15) NOT NULL DEFAULT 'BOTH'",
+                'tab_selection_mode' => "VARCHAR(15) NOT NULL DEFAULT 'RANDOM'",
+                'tabs_min' => 'INT NOT NULL DEFAULT 1',
+                'tabs_max' => 'INT NOT NULL DEFAULT 2',
+                'max_automation_tabs' => 'INT NOT NULL DEFAULT 2',
+                'url_cooldown_minutes' => 'INT NOT NULL DEFAULT 60',
+                'custom_tabs_json' => 'TEXT NULL',
             ];
             foreach ($add as $col => $def) {
                 if (empty($cols[$col])) {
@@ -185,7 +197,11 @@ class ActivityManager
             'active_days' => '1,2,3,4,5,6,7', 'sessions_min' => 6, 'sessions_max' => 10,
             'tasks_min' => 1, 'tasks_max' => 3, 'gap_min' => 30, 'gap_max' => 120,
             'limits_json' => null, 'template' => 'NORMAL', 'planner_enabled' => 1,
-            'next_run_at' => null, 'search_behavior' => 'SEARCH_VISIT', 'max_result_depth' => 10];
+            'next_run_at' => null, 'search_behavior' => 'SEARCH_VISIT', 'max_result_depth' => 10,
+            'interval_mode' => 'FIXED', 'random_min' => 30, 'random_max' => 90,
+            'scheduled_tabs_enabled' => 0, 'tab_source_mode' => 'BOTH', 'tab_selection_mode' => 'RANDOM',
+            'tabs_min' => 1, 'tabs_max' => 2, 'max_automation_tabs' => 2,
+            'url_cooldown_minutes' => 60, 'custom_tabs' => []];
     }
 
     public static function getConfig(int $profileId): array
@@ -209,6 +225,8 @@ class ActivityManager
             $r['required_pages'] = is_array($rp) ? array_values($rp) : [];
             $sq = json_decode((string)($r['search_queries'] ?? ''), true);
             $r['search_queries'] = is_array($sq) ? array_values($sq) : [];
+            $ct = json_decode((string)($r['custom_tabs_json'] ?? ''), true);
+            $r['custom_tabs'] = is_array($ct) ? array_values($ct) : [];
             $r['active_days'] = (string)($r['active_days'] ?? '1,2,3,4,5,6,7');
             $r['sessions_min'] = max(1, (int)($r['sessions_min'] ?? 6));
             $r['sessions_max'] = max($r['sessions_min'], (int)($r['sessions_max'] ?? 10));
@@ -219,6 +237,21 @@ class ActivityManager
             $r['template'] = in_array(($r['template'] ?? 'NORMAL'), ['LIGHT', 'NORMAL', 'HIGH', 'CUSTOM'], true)
                 ? (string)$r['template'] : 'NORMAL';
             $r['planner_enabled'] = (int)($r['planner_enabled'] ?? 1);
+            $im = strtoupper((string)($r['interval_mode'] ?? 'FIXED'));
+            $r['interval_mode'] = $im === 'RANDOM_RANGE' ? 'RANDOM_RANGE' : 'FIXED';
+            $r['random_min'] = max(1, (int)($r['random_min'] ?? 30));
+            $r['random_max'] = max($r['random_min'], (int)($r['random_max'] ?? 90));
+            $r['scheduled_tabs_enabled'] = (int)($r['scheduled_tabs_enabled'] ?? 0);
+            $sm = strtoupper((string)($r['tab_source_mode'] ?? 'BOTH'));
+            $r['tab_source_mode'] = in_array($sm, ['DEFAULT', 'CUSTOM', 'BOTH'], true) ? $sm : 'BOTH';
+            $sl = strtoupper((string)($r['tab_selection_mode'] ?? 'RANDOM'));
+            $r['tab_selection_mode'] = $sl === 'ORDER' ? 'ORDER' : 'RANDOM';
+            $r['tabs_min'] = max(1, min(5, (int)($r['tabs_min'] ?? 1)));
+            $r['tabs_max'] = max($r['tabs_min'], min(5, (int)($r['tabs_max'] ?? 2)));
+            $r['max_automation_tabs'] = max($r['tabs_max'], (int)($r['max_automation_tabs'] ?? 2));
+            $r['url_cooldown_minutes'] = max(0, (int)($r['url_cooldown_minutes'] ?? 60));
+            $ct = json_decode((string)($r['custom_tabs_json'] ?? ''), true);
+            $r['custom_tabs'] = is_array($ct) ? array_values($ct) : [];
             $bh = strtoupper((string)($r['search_behavior'] ?? 'SEARCH_VISIT'));
             $r['search_behavior'] = in_array($bh, ['SEARCH_ONLY', 'SEARCH_VISIT', 'DIRECT'], true) ? $bh : 'SEARCH_VISIT';
             $r['max_result_depth'] = max(1, min(30, (int)($r['max_result_depth'] ?? 10)));
@@ -238,11 +271,8 @@ class ActivityManager
         $ss = self::cleanTime((string)($in['schedule_start'] ?? $cur['schedule_start']), '08:00');
         $se = self::cleanTime((string)($in['schedule_end'] ?? $cur['schedule_end']), '22:00');
         $iv = (int)($in['interval_minutes'] ?? $cur['interval_minutes']);
-        if ($iv < 15) {
-            // Custom < 15 phut khong cho (§14); lam tron len muc gan nhat
-            $iv = 15;
-            $errors[] = 'interval_min_15';
-        }
+        // Custom cycle: 1..1440 phut, luu so nguyen (§2). Cu giu nguyen neu khong gui.
+        $iv = max(1, min(1440, $iv));
         $mt = (int)($in['max_tabs'] ?? $cur['max_tabs']);
         if (!in_array($mt, self::MAX_TABS_OPTS, true)) {
             $mt = 5;
@@ -282,13 +312,47 @@ class ActivityManager
         if (!in_array($bh, ['SEARCH_ONLY', 'SEARCH_VISIT', 'DIRECT'], true)) $bh = 'SEARCH_VISIT';
         $depth = (int)($in['max_result_depth'] ?? $cur['max_result_depth']);
         $depth = max(1, min(30, $depth));
+        // Interval mode + custom cycle (§1-5, §45): cycle>0, min<=max
+        $im = strtoupper((string)($in['interval_mode'] ?? $cur['interval_mode']));
+        if (!in_array($im, ['FIXED', 'RANDOM_RANGE'], true)) $im = 'FIXED';
+        $cyc = (int)($in['interval_minutes'] ?? $cur['interval_minutes']);
+        $cyc = max(1, min(1440, $cyc));
+        $rMin = max(1, (int)($in['random_min'] ?? $cur['random_min']));
+        $rMax = max($rMin, (int)($in['random_max'] ?? $cur['random_max']));
+        $schedOn = array_key_exists('scheduled_tabs_enabled', $in)
+            ? (!empty($in['scheduled_tabs_enabled']) ? 1 : 0) : (int)$cur['scheduled_tabs_enabled'];
+        $sm = strtoupper((string)($in['tab_source_mode'] ?? $cur['tab_source_mode']));
+        if (!in_array($sm, ['DEFAULT', 'CUSTOM', 'BOTH'], true)) $sm = 'BOTH';
+        $sl = strtoupper((string)($in['tab_selection_mode'] ?? $cur['tab_selection_mode']));
+        if (!in_array($sl, ['ORDER', 'RANDOM'], true)) $sl = 'RANDOM';
+        $tbMin = max(1, min(5, (int)($in['tabs_min'] ?? $cur['tabs_min'])));
+        $tbMax = max($tbMin, min(5, (int)($in['tabs_max'] ?? $cur['tabs_max'])));
+        $maxAuto = max($tbMax, (int)($in['max_automation_tabs'] ?? $cur['max_automation_tabs']));
+        $cool = max(0, (int)($in['url_cooldown_minutes'] ?? $cur['url_cooldown_minutes']));
+        // Custom tabs bulk semantics (§41-42):
+        // - khong gui key custom_tabs -> GIU NGUYEN (ke ca mode replace)
+        // - mode add -> merge theo domain vao hien tai
+        // - con lai (replace) -> thay the han
+        if (!array_key_exists('custom_tabs', $in) || $in['custom_tabs'] === null) {
+            $customTabs = self::cleanCustomTabs($cur['custom_tabs'] ?? []);
+        } elseif (strtolower((string)($in['custom_list_mode'] ?? 'replace')) === 'add') {
+            $merged = [];
+            foreach (self::cleanCustomTabs($cur['custom_tabs'] ?? []) as $t) $merged[$t['domain']] = $t;
+            foreach (self::cleanCustomTabs($in['custom_tabs']) as $t) $merged[$t['domain']] = $t;
+            $customTabs = array_values($merged);
+        } else {
+            $customTabs = self::cleanCustomTabs($in['custom_tabs']);
+        }
         try {
             db()->prepare('INSERT INTO activity_configs (profile_id, enabled, schedule_start, schedule_end,
                     interval_minutes, max_tabs, keep_required_tabs, required_pages, search_queries,
                     activity_mode, auto_start_profile, maintain_always, store_queries, pause_until,
                     active_days, sessions_min, sessions_max, tasks_min, tasks_max, gap_min, gap_max,
-                    limits_json, template, planner_enabled, search_behavior, max_result_depth)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    limits_json, template, planner_enabled, search_behavior, max_result_depth,
+                    interval_mode, random_min, random_max, scheduled_tabs_enabled, tab_source_mode,
+                    tab_selection_mode, tabs_min, tabs_max, max_automation_tabs, url_cooldown_minutes,
+                    custom_tabs_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON DUPLICATE KEY UPDATE enabled=VALUES(enabled), schedule_start=VALUES(schedule_start),
                     schedule_end=VALUES(schedule_end), interval_minutes=VALUES(interval_minutes),
                     max_tabs=VALUES(max_tabs), keep_required_tabs=VALUES(keep_required_tabs),
@@ -301,8 +365,16 @@ class ActivityManager
                     gap_min=VALUES(gap_min), gap_max=VALUES(gap_max),
                     limits_json=VALUES(limits_json), template=VALUES(template),
                     planner_enabled=VALUES(planner_enabled),
-                    search_behavior=VALUES(search_behavior), max_result_depth=VALUES(max_result_depth)')
-                ->execute([$profileId, $enabled, $ss . ':00', $se . ':00', $iv, $mt,
+                    search_behavior=VALUES(search_behavior), max_result_depth=VALUES(max_result_depth),
+                    interval_mode=VALUES(interval_mode), random_min=VALUES(random_min),
+                    random_max=VALUES(random_max),
+                    scheduled_tabs_enabled=VALUES(scheduled_tabs_enabled),
+                    tab_source_mode=VALUES(tab_source_mode), tab_selection_mode=VALUES(tab_selection_mode),
+                    tabs_min=VALUES(tabs_min), tabs_max=VALUES(tabs_max),
+                    max_automation_tabs=VALUES(max_automation_tabs),
+                    url_cooldown_minutes=VALUES(url_cooldown_minutes),
+                    custom_tabs_json=VALUES(custom_tabs_json)')
+                ->execute([$profileId, $enabled, $ss . ':00', $se . ':00', $cyc, $mt,
                     !empty($in['keep_required_tabs']) || !array_key_exists('keep_required_tabs', $in) ? 1 : 0,
                     json_encode(array_values($rp), JSON_UNESCAPED_UNICODE),
                     json_encode($sq, JSON_UNESCAPED_UNICODE),
@@ -312,7 +384,9 @@ class ActivityManager
                     !empty($in['maintain_always']) ? 1 : 0,
                     !empty($in['store_queries']) ? 1 : 0,
                     $pauseUntil, $days, $sMin, $sMax, $tMin, $tMax, $gMin, $gMax,
-                    $limits, $tpl, $plannerOn, $bh, $depth]);
+                    $limits, $tpl, $plannerOn, $bh, $depth, $im, $rMin, $rMax, $schedOn,
+                    $sm, $sl, $tbMin, $tbMax, $maxAuto, $cool,
+                    json_encode(array_values($customTabs), JSON_UNESCAPED_UNICODE)]);
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['db_error']];
         }
@@ -391,6 +465,102 @@ class ActivityManager
             $v[$k] = [max(0, (int)$vv[0]), max((int)$vv[0], (int)$vv[1])];
         }
         return json_encode($v, JSON_UNESCAPED_UNICODE);
+    }
+
+    /** Tab behavior hop le: MAINTAIN | OPEN_SCHEDULED | BOTH (§12). */
+    public const TAB_BEHAVIORS = ['MAINTAIN', 'OPEN_SCHEDULED', 'BOTH'];
+
+    /**
+     * Chuan hoa custom tab list (§9-10): trim/blank/dedupe theo domain/validate.
+     * @return array[{label,url,domain,behavior}]
+     */
+    public static function cleanCustomTabs($v): array
+    {
+        if (is_string($v)) {
+            // Textarea: 1 dong 1 URL
+            $lines = preg_split('/\r?\n/', $v);
+            $v = array_map(fn($l) => ['url' => trim((string)$l)], $lines);
+        }
+        if (!is_array($v)) return [];
+        $out = [];
+        $seen = [];
+        foreach ($v as $item) {
+            $url = trim((string)(is_array($item) ? ($item['url'] ?? '') : $item));
+            if ($url === '') continue;
+            if (!preg_match('#^[a-z][a-z0-9+.-]*://#i', $url)) {
+                if (preg_match('#^(javascript|file|data|ftp|about):#i', $url)) continue; // §10, §71 reject
+                $url = 'https://' . ltrim($url, '/');
+            }
+            if (!self::validHttpUrl($url)) continue;
+            $domain = self::normHost($url);
+            if ($domain === '' || isset($seen[$domain])) continue; // dedupe theo domain (§10)
+            $seen[$domain] = true;
+            $bh = strtoupper((string)(is_array($item) ? ($item['behavior'] ?? 'BOTH') : 'BOTH'));
+            if (!in_array($bh, self::TAB_BEHAVIORS, true)) $bh = 'BOTH';
+            $label = mb_substr(trim((string)(is_array($item) ? ($item['label'] ?? '') : '')) ?: $domain, 0, 60);
+            $out[] = ['label' => $label, 'url' => $url, 'domain' => $domain, 'behavior' => $bh];
+            if (count($out) >= 200) break;
+        }
+        return array_values($out);
+    }
+
+    /**
+     * ScheduleRandomizer (§33): random tap trung 1 cho + injectable de test deterministic.
+     * @var callable|null ($min,$max)->int
+     */
+    public static $randFn = null;
+
+    private static function rnd(int $min, int $max): int
+    {
+        if ($min >= $max) return $min;
+        $f = self::$randFn;
+        if (is_callable($f)) {
+            try {
+                return max($min, min($max, (int)$f($min, $max)));
+            } catch (Throwable $e) {
+            }
+        }
+        return mt_rand($min, $max);
+    }
+
+    /** @return int minutes */
+    public static function next_interval(int $min, int $max): int
+    {
+        return self::rnd(max(1, $min), max(max(1, $min), $max));
+    }
+
+    /**
+     * @param array[] $candidates (co the co weight)
+     * @return array[] da chon (count trong [min,max], khong vuot candidates)
+     */
+    public static function select_tabs(array $candidates, int $minCount, int $maxCount): array
+    {
+        $candidates = array_values($candidates);
+        if (!$candidates) return [];
+        $maxCount = max(1, min(count($candidates), $maxCount));
+        $minCount = max(1, min($maxCount, $minCount));
+        $n = self::rnd($minCount, $maxCount);
+        // Weighted shuffle nhe (weight mac dinh 1)
+        $weighted = [];
+        foreach ($candidates as $c) {
+            $w = max(1, (int)($c['weight'] ?? 1));
+            for ($i = 0; $i < min($w, 5); $i++) $weighted[] = $c;
+        }
+        // Fisher-Yates bang rnd (deterministic khi inject)
+        for ($i = count($weighted) - 1; $i > 0; $i--) {
+            $j = self::rnd(0, $i);
+            [$weighted[$i], $weighted[$j]] = [$weighted[$j], $weighted[$i]];
+        }
+        $picked = [];
+        $seen = [];
+        foreach ($weighted as $c) {
+            $key = (string)($c['url'] ?? $c['domain'] ?? json_encode($c));
+            if (isset($seen[$key])) continue;
+            $seen[$key] = true;
+            $picked[] = $c;
+            if (count($picked) >= $n) break;
+        }
+        return $picked;
     }
 
     private static function cleanTime(string $v, string $fb): string
@@ -475,6 +645,17 @@ class ActivityManager
     public static function stateClear(int $profileId): void
     {
         @unlink(self::stateFile($profileId));
+    }
+
+    /** Tang counter trong state file (ORDER rotation...). @return int gia tri moi */
+    public static function stateBump(int $profileId, string $key, int $n = 1, int $mod = 0): int
+    {
+        $st = self::stateGet($profileId);
+        $cur = (int)($st[$key] ?? 0) + $n;
+        if ($mod > 0) $cur = $cur % $mod;
+        $st[$key] = $cur;
+        self::stateSet($profileId, $st);
+        return $cur;
     }
 
     /** @return string[] queries vua dung gan nhat (selector tranh lap) */
@@ -637,6 +818,8 @@ class ActivityManager
                         (int)($task['depth'] ?? 0), (bool)($task['test_mode'] ?? false), $ms);
                 case self::T_WEBSITE:
                     return self::taskWebsite($profileId, $port, (array)($task['exclude'] ?? []), $ms);
+                case self::T_CUSTOM:
+                    return self::taskCustom($profileId, $port, (string)($task['url'] ?? ''), $ms);
                 case self::T_CHECK:
                     return self::taskCheck($profileId, $port, $ms);
                 case self::T_CLOSE_AUTO:
@@ -1008,8 +1191,94 @@ class ActivityManager
         return false;
     }
 
-    /** CHECK_TAB: verify required hien dien (khong mo gi). */
-    private static function taskCheck(int $profileId, int $port, callable $ms): array
+    /** Domain co dang cooldown (dung gan day)? Public de test. */
+    public static function domainCoolingDown(int $profileId, string $domain, int $minutes): bool
+    {
+        if ($profileId <= 0 || $domain === '' || $minutes <= 0) return false;
+        try {
+            self::ensureTables();
+            $st = db()->prepare('SELECT COUNT(*) FROM activity_history WHERE profile_id=?
+                AND domain=? AND created_at>=DATE_SUB(NOW(), INTERVAL ' . $minutes . ' MINUTE)
+                AND result NOT IN (\'SKIPPED\')');
+            $st->execute([$profileId, $domain]);
+            return (int)$st->fetchColumn() > 0;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * OPEN_CUSTOM_TAB (§19-20, §46-47): mo URL tuy chinh trong AUTOMATION tab.
+     * - USER tab da co domain -> coi nhu satisfied (khong navigate/dong).
+     * - Qua max_automation_tabs -> reuse automation tab cu (navigate lai).
+     * - Cooldown theo lich su (§22).
+     */
+    private static function taskCustom(int $profileId, int $port, string $url, callable $ms): array
+    {
+        $url = trim($url);
+        if (!self::validHttpUrl($url)) {
+            self::record($profileId, self::T_CUSTOM, self::domainOf($url), self::R_SKIPPED, $ms(), self::E_INVALID_URL);
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_INVALID_URL, 'ms' => $ms()];
+        }
+        $cfg = self::getConfig($profileId);
+        $domain = self::domainOf($url);
+        // Cooldown (§22)
+        $cool = max(0, (int)$cfg['url_cooldown_minutes']);
+        if (self::domainCoolingDown($profileId, $domain, $cool)) {
+            self::record($profileId, self::T_CUSTOM, $domain, self::R_SKIPPED, $ms(), 'COOLDOWN');
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => 'COOLDOWN', 'ms' => $ms()];
+        }
+        $live = self::liveTabs($port);
+        $st = self::stateGet($profileId);
+        $auto = self::pruneAuto((array)($st['auto_tabs'] ?? []), $live);
+        // USER tab da co -> satisfied, khong dung vao (§47)
+        foreach ($live as $t) {
+            if (!isset($auto[(string)($t['id'] ?? '')]) && self::domainMatch((string)($t['url'] ?? ''), $url)) {
+                self::record($profileId, self::T_CUSTOM, $domain, self::R_REUSED, $ms());
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$t['id']];
+            }
+        }
+        // Automation tab da co domain nay -> reuse
+        foreach ($auto as $tid => $info) {
+            if (self::domainMatch((string)($info['url'] ?? ''), $url)) {
+                self::record($profileId, self::T_CUSTOM, $domain, self::R_REUSED, $ms());
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$tid];
+            }
+        }
+        $limit = max(1, (int)$cfg['max_automation_tabs']);
+        if (count($auto) >= $limit) {
+            // Reuse automation tab cu nhat (navigate lai) thay vi mo moi (§19)
+            $oldest = null;
+            $oldestAt = PHP_INT_MAX;
+            foreach ($auto as $tid => $info) {
+                $at = (int)($info['at'] ?? time());
+                if ($at < $oldestAt) {
+                    $oldestAt = $at;
+                    $oldest = $tid;
+                }
+            }
+            if ($oldest !== null && self::navigateTab($port, (string)$oldest, $url)) {
+                $auto[$oldest] = ['url' => $url, 'kind' => 'page', 'at' => time()];
+                self::stateSet($profileId, ['auto_tabs' => $auto]);
+                self::pushRecentDomain($profileId, $domain);
+                self::record($profileId, self::T_CUSTOM, $domain, self::R_REUSED, $ms());
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$oldest];
+            }
+            self::record($profileId, self::T_CUSTOM, $domain, self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
+            return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
+        }
+        $r = self::taskOpen($profileId, $port, $url, $ms, false);
+        if (!empty($r['ok'])) {
+            self::pushRecentDomain($profileId, $domain);
+            self::record($profileId, self::T_CUSTOM, $domain, self::R_OPENED, $ms());
+            $r['result'] = self::R_OPENED;
+        } else {
+            self::record($profileId, self::T_CUSTOM, $domain, self::R_SKIPPED, $ms(), $r['error'] ?? null);
+        }
+        return $r;
+    }
+
+    /** CHECK_TAB: verify required hien dien (khong mo gi). */    private static function taskCheck(int $profileId, int $port, callable $ms): array
     {
         $cfg = self::getConfig($profileId);
         $live = self::liveTabs($port);
@@ -1415,6 +1684,20 @@ class ActivityManager
             // BLOCKED -> dung search luon cycle nay (khong thu query khac)
             if (($r['result'] ?? '') !== self::R_BLOCKED) {
                 self::stateSet($profileId, ['search_idx' => $idx + 1]);
+            }
+        }
+        // Custom tabs (legacy interval mode): MAINTAIN ensure + scheduled picks
+        if (!empty($cfg['scheduled_tabs_enabled'])) {
+            foreach ((array)($cfg['custom_tabs'] ?? []) as $ct) {
+                if (strtoupper((string)($ct['behavior'] ?? '')) === 'MAINTAIN' && !empty($ct['url'])) {
+                    $out[] = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$ct['url']]);
+                }
+            }
+            require_once __DIR__ . '/ActivityPlanner.php';
+            $cfg2 = self::getConfig($profileId);
+            $cfg2['profile_id'] = $profileId;
+            foreach (ActivityPlanner::pickCustomUrls($cfg2, [], (int)$cfg2['tabs_max']) as $u) {
+                $out[] = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$u['url']]);
             }
         }
         try {

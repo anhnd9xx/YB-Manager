@@ -77,10 +77,12 @@ try {
         ORDER BY run_at ASC LIMIT 1")->fetch();
     t('boot recovery', ($r['status'] ?? '') === 'PLANNED', $r['status'] ?? '?');
 
-    // next_run hop le
+    // next_run hop le (ep 1 session future de khong phu thuoc gio chay test)
+    db()->exec("UPDATE activity_sessions SET run_at=DATE_ADD(NOW(), INTERVAL 1 HOUR), status='PLANNED'
+        WHERE profile_id=9011 AND plan_date=CURDATE() ORDER BY run_at ASC LIMIT 1");
     ActivityPlanner::updateNextRun(9011);
     $nx = db()->query('SELECT next_run_at FROM activity_configs WHERE profile_id=9011')->fetchColumn();
-    t('next_run set', $nx !== null && $nx !== false, (string)$nx);
+    t('next_run set', $nx !== null && $nx !== false && strtotime((string)$nx) > time(), (string)$nx);
 
     // Tick chay duoc (profiles stopped -> skipped, khong exception)
     $tick = ActivityScheduler::tick(2);
@@ -90,9 +92,9 @@ try {
     $sum = ActivityPlanner::dailySummary();
     t('daily summary', isset($sum['profiles'], $sum['sessions'], $sum['failed']), json_encode($sum));
 
-    // next_run_at NULL khi chua co plan? (profile moi chua ensure)
+    // summary co next (session future vua ep o tren)
     $s = ActivityPlanner::summary(9011);
-    t('summary shape', isset($s['sessions_done'], $s['next_in']), json_encode($s));
+    t('summary shape', isset($s['sessions_done'], $s['next_in']) && $s['next_in'] !== null, json_encode($s));
 } finally {
     cleanup_sched($ids);
 }

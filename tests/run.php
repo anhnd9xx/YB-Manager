@@ -30,6 +30,7 @@ function run_case($label, $cmd, &$pass, &$fail, &$details) {
 $php = PHP_BINARY;
 run_case('backend bulk', $php . ' tests/backend/test_bulk_assign.php', $pass, $fail, $details);
 run_case('backend scheduler', $php . ' tests/backend/test_scheduler.php', $pass, $fail, $details);
+run_case('backend advanced', $php . ' tests/backend/test_activity_advanced.php', $pass, $fail, $details);
 run_case('frontend', 'node tests/frontend/run.js', $pass, $fail, $details);
 
 echo implode("\n\n", $details) . "\n\n";

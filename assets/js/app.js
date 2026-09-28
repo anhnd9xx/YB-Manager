@@ -1617,13 +1617,37 @@ function actBulkListToggle() {
   const el = $('bulk-act-list');
   if (el) el.classList.toggle('hidden');
 }
+function actCycleUI() {
+  const custom = $('bact-interval').value === 'custom';
+  $('bact-custom-row').classList.toggle('hidden', !custom);
+  if (!custom) $('bact-random-row').classList.add('hidden');
+  else actRunModeUI();
+  actBulkPreview();
+}
+function actRunModeUI() {
+  const rnd = $('bact-interval').value === 'custom' && $('bact-run-mode').value === 'RANDOM_RANGE';
+  $('bact-random-row').classList.toggle('hidden', !rnd);
+  actBulkPreview();
+}
+// Chu ky hieu luc: preset hoac custom number+unit -> phut (§1-2)
+function actBulkCycle() {
+  if ($('bact-interval').value !== 'custom') return Number($('bact-interval').value) || 30;
+  let n = Number($('bact-custom-n').value) || 30;
+  if ($('bact-custom-unit').value === 'h') n *= 60;
+  return Math.max(1, Math.min(1440, Math.round(n)));
+}
 function actBulkPreview() {
   const el = $('bulk-act-preview');
   if (!el) return;
   const pages = [];
   document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
-  el.innerHTML = `${escapeHtml($('bact-start').value)} → ${escapeHtml($('bact-end').value)} · mỗi ${escapeHtml($('bact-interval').value)} phút<br>`
-    + `${pages.length} tab · ${actBulkIds.length} profiles`;
+  let cycTxt = $('bact-interval').value === 'custom'
+    ? ($('bact-run-mode').value === 'RANDOM_RANGE'
+      ? `ngẫu nhiên ${$('bact-rand-min').value}–${$('bact-rand-max').value} phút`
+      : `mỗi ${actBulkCycle()} phút`)
+    : `mỗi ${$('bact-interval').value} phút`;
+  el.innerHTML = `${escapeHtml($('bact-start').value)} → ${escapeHtml($('bact-end').value)} · ${cycTxt}<br>`
+    + `${pages.length} tab duy trì · ${actBulkIds.length} profiles`;
 }
 async function actBulkSave() {
   const ids = actBulkIds; // SNAPSHOT — khong query lai store
@@ -1647,6 +1671,29 @@ async function actBulkSave() {
       ...($('bact-template').value ? { template: $('bact-template').value } : {}),
     }};
     console.log('[6 API_PAYLOAD]', JSON.stringify(payload));
+    const adv = {
+      interval_minutes: actBulkCycle(),
+      interval_mode: $('bact-interval').value === 'custom' && $('bact-run-mode').value === 'RANDOM_RANGE' ? 'RANDOM_RANGE' : 'FIXED',
+      random_min: Math.max(1, Number($('bact-rand-min').value) || 30),
+      random_max: Math.max(1, Number($('bact-rand-max').value) || 90),
+      scheduled_tabs_enabled: $('bact-sched-tabs').checked ? 1 : 0,
+      tab_source_mode: $('bact-tab-source').value,
+      tab_selection_mode: $('bact-tab-sel').value,
+      tabs_min: Math.max(1, Number($('bact-tabs-min').value) || 1),
+      tabs_max: Math.max(1, Number($('bact-tabs-max').value) || 2),
+      max_automation_tabs: Math.max(1, Number($('bact-max-auto').value) || 2),
+      url_cooldown_minutes: Math.max(0, Number($('bact-cool').value) || 0),
+    };
+    adv.random_max = Math.max(adv.random_min, adv.random_max);
+    adv.tabs_max = Math.max(adv.tabs_min, adv.tabs_max);
+    adv.max_automation_tabs = Math.max(adv.tabs_max, adv.max_automation_tabs);
+    Object.assign(payload.patch, adv);
+    // Custom list: chi gui khi user chon add/replace (§41-42)
+    const lm = (document.querySelector('input[name=bact-listmode]:checked') || {}).value || 'keep';
+    if (lm !== 'keep') {
+      payload.patch.custom_list_mode = lm;
+      payload.patch.custom_tabs = $('bact-custom-urls').value.split('\n').map(s => s.trim()).filter(Boolean);
+    }
     const r = await sendJson(api + 'activity.php?action=bulk', payload);
     if (r.ok) {
       const d = r.data || {};
@@ -1978,11 +2025,13 @@ function autoBadge(p) {
 let actCustomUrls = []; // [{label,url}] custom pages trong modal
 async function actLoad(id) {
   actCustomUrls = [];
+  actCustomTabs = [];
   if (!id) {
     $('act-enabled').checked = false;
     document.querySelectorAll('#act-presets input[data-preset]').forEach(cb => { cb.checked = false; });
     $('act-queries').value = '';
     actRenderCustom();
+    actCustomTabRender();
     return;
   }
   try {
@@ -2007,6 +2056,8 @@ async function actLoad(id) {
     }
     $('act-queries').value = (c.search_queries || []).join('\n');
     $('act-template').value = c.template || 'NORMAL';
+    actCustomTabs = Array.isArray(c.custom_tabs) ? c.custom_tabs : [];
+    actCustomTabRender();
     $('act-sess-min').value = c.sessions_min || 6;
     $('act-sess-max').value = c.sessions_max || 10;
     const days = String(c.active_days || '1,2,3,4,5,6,7').split(',');
@@ -2062,6 +2113,7 @@ function actCollect() {
     search_behavior: $('act-search-behavior').value,
     max_result_depth: Number($('act-result-depth').value) || 10,
     template: $('act-template').value,
+    custom_tabs: actCustomTabs,
     sessions_min: Number($('act-sess-min').value) || 6,
     sessions_max: Number($('act-sess-max').value) || 10,
     active_days: days.join(',') || '1,2,3,4,5,6,7',
@@ -2083,6 +2135,33 @@ async function actTemplateApply() {
     $('act-sess-max').value = p.sessions_max;
     toast(`Đã áp mẫu ${t} (nhớ bấm Lưu)`, 'success');
   } catch (e) {}
+}
+// ---- Tab tuy chinh per-profile (§8-13) ----
+let actCustomTabs = []; // [{label,url,domain,behavior}] per-profile (drawer)
+const ACT_CT_BEHAVIOR_VN = { MAINTAIN: 'Duy trì', OPEN_SCHEDULED: 'Theo lịch', BOTH: 'Cả hai' };
+function actCustomTabRender() {
+  const el = $('act-custom-tabs');
+  if (!el) return;
+  el.innerHTML = actCustomTabs.length ? actCustomTabs.map((t, i) =>
+    `<div class="meta-row"><span class="meta-label">${escapeHtml(t.label || t.domain || '')}<br><small class="mono muted">${escapeHtml(t.domain || '')}</small></span>`
+    + `<span class="meta-value"><span class="badge badge-info">${ACT_CT_BEHAVIOR_VN[t.behavior] || t.behavior}</span> `
+    + `<button type="button" class="btn btn-xs" onclick="actCustomTabDel(${i})">✕</button></span></div>`).join('')
+    : '<p class="muted">Chưa có URL nào.</p>';
+}
+function actCustomTabAdd() {
+  const url = ($('act-ct-url').value || '').trim();
+  if (!url) return;
+  let host = '';
+  try { host = new URL(/^https?:\/\//i.test(url) ? url : 'https://' + url).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) {}
+  if (!host.includes('.')) { toast('URL không hợp lệ', 'error'); return; }
+  if (actCustomTabs.some(t => t.domain === host)) { toast('Domain đã có trong danh sách', 'error'); return; }
+  actCustomTabs.push({ label: host, url, domain: host, behavior: $('act-ct-behavior').value || 'BOTH' });
+  $('act-ct-url').value = '';
+  actCustomTabRender();
+}
+function actCustomTabDel(i) {
+  actCustomTabs.splice(i, 1);
+  actCustomTabRender();
 }
 // ---- Lich hom nay (§17, §47) ----
 async function actPlanLoad(id) {

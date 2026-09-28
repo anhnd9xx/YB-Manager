@@ -69,9 +69,61 @@ class ActivityScheduler
     public static function due(array $cfg, ?int $now = null): bool
     {
         $now = $now ?? time();
+        // RANDOM_RANGE uu tien next_run_at da tinh (§5)
+        if (($cfg['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE' && !empty($cfg['next_run_at'])) {
+            return strtotime((string)$cfg['next_run_at']) <= $now;
+        }
         if (empty($cfg['last_run_at'])) return true;
         $iv = max(15, (int)($cfg['interval_minutes'] ?? 30)) * 60;
         return (strtotime((string)$cfg['last_run_at']) + $iv) <= $now;
+    }
+
+    /**
+     * Tinh next_run (§32): FIXED = last + cycle; RANDOM = now + rand(min,max).
+     * Qua active window -> dau window active tiep theo (§6). Khong sleep.
+     * @return string Y-m-d H:i:s
+     */
+    public static function calculateNextRun(array $cfg, ?int $now = null): string
+    {
+        $now = $now ?? time();
+        if (($cfg['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE') {
+            $min = max(1, (int)($cfg['random_min'] ?? 30));
+            $max = max($min, (int)($cfg['random_max'] ?? 90));
+            $cand = $now + ActivityManager::next_interval($min, $max) * 60;
+        } else {
+            $base = !empty($cfg['last_run_at']) ? strtotime((string)$cfg['last_run_at']) : $now;
+            if ($base === false) $base = $now;
+            $cand = $base + max(1, (int)($cfg['interval_minutes'] ?? 30)) * 60;
+        }
+        return self::clampWindow($cfg, $cand, $now);
+    }
+
+    /**
+     * Kep vao active window; qua gio -> dau window ngay active tiep theo.
+     * @return string Y-m-d H:i:s
+     */
+    public static function clampWindow(array $cfg, int $cand, ?int $now = null): string
+    {
+        $now = $now ?? time();
+        $ss = substr((string)($cfg['schedule_start'] ?? '08:00'), 0, 5);
+        $se = substr((string)($cfg['schedule_end'] ?? '22:00'), 0, 5);
+        $days = array_map('intval', explode(',', (string)($cfg['active_days'] ?? '1,2,3,4,5,6,7')));
+        if (!$days) $days = [1, 2, 3, 4, 5, 6, 7];
+        for ($d = 0; $d < 8; $d++) {
+            $dayTs = strtotime(date('Y-m-d', $now + $d * 86400));
+            $dow = (int)date('N', $dayTs);
+            if (!in_array($dow, $days, true)) continue;
+            $ws = strtotime(date('Y-m-d', $dayTs) . ' ' . $ss);
+            $we = strtotime(date('Y-m-d', $dayTs) . ' ' . $se);
+            if ($we <= $ws) $we = $ws + 3600;
+            if ($d === 0) {
+                if ($cand < $ws) return date('Y-m-d H:i:s', $ws);
+                if ($cand <= $we) return date('Y-m-d H:i:s', $cand);
+                continue; // qua gio hom nay -> ngay sau
+            }
+            return date('Y-m-d H:i:s', $ws);
+        }
+        return date('Y-m-d H:i:s', $now + 3600);
     }
 
     /**
@@ -148,6 +200,14 @@ class ActivityScheduler
                     $ran++;
                     $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
                         'tasks' => array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? [])];
+                    // RANDOM: chot next_run_at ngay (§5), khong sleep
+                    if (($cfg['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE') {
+                        try {
+                            db()->prepare('UPDATE activity_configs SET next_run_at=? WHERE profile_id=?')
+                                ->execute([self::calculateNextRun(ActivityManager::getConfig($id)), $id]);
+                        } catch (Throwable $e) {
+                        }
+                    }
                 }
             } catch (Throwable $e) {
                 $skipped[] = ['id' => $id, 'reason' => 'exception'];

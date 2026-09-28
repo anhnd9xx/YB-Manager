@@ -1444,6 +1444,14 @@
               </div>
             </div>
           </div>
+          <div class="form-group-title" style="margin-top:10px">Tab tùy chỉnh (riêng kênh)</div>
+          <div class="hint">URL riêng + hành vi: Duy trì / Theo lịch / Cả hai. Scheduler mở theo lịch, không đụng USER tab.</div>
+          <div id="act-custom-tabs"><div class="skeleton"></div></div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <input type="text" id="act-ct-url" placeholder="https://..." style="flex:1">
+            <select id="act-ct-behavior" style="width:auto"><option value="BOTH">Cả hai</option><option value="MAINTAIN">Duy trì</option><option value="OPEN_SCHEDULED">Theo lịch</option></select>
+            <button type="button" class="btn btn-sm" onclick="actCustomTabAdd()">+ Thêm</button>
+          </div>
           <div class="form-group-title" style="margin-top:10px">Lịch hôm nay</div>
           <div id="act-plan"><div class="skeleton"></div></div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -1718,11 +1726,12 @@
       </div>
       <div class="win-row">
         <div class="win-field"><label>Chu kỳ</label>
-          <select id="bact-interval" onchange="actBulkPreview()">
+          <select id="bact-interval" onchange="actBulkPreview();actCycleUI()">
             <option value="15">15 phút</option>
             <option value="30" selected>30 phút</option>
             <option value="60">60 phút</option>
             <option value="120">2 giờ</option>
+            <option value="custom">Tùy chỉnh...</option>
           </select>
         </div>
         <div class="win-field"><label>Chế độ</label>
@@ -1733,6 +1742,60 @@
           </select>
         </div>
       </div>
+      <div class="win-row hidden" id="bact-custom-row" style="margin-top:6px">
+        <div class="win-field"><label>Chu kỳ tùy chỉnh</label>
+          <div style="display:flex;gap:6px">
+            <input type="number" id="bact-custom-n" value="45" min="1" max="1440" style="flex:1" oninput="actBulkPreview()">
+            <select id="bact-custom-unit" style="width:auto" onchange="actBulkPreview()"><option value="m">phút</option><option value="h">giờ</option></select>
+          </div>
+        </div>
+        <div class="win-field"><label>Kiểu chạy</label>
+          <select id="bact-run-mode" onchange="actBulkPreview();actRunModeUI()">
+            <option value="FIXED">Cố định</option>
+            <option value="RANDOM_RANGE">Ngẫu nhiên trong khoảng</option>
+          </select>
+        </div>
+      </div>
+      <div class="win-row hidden" id="bact-random-row" style="margin-top:6px">
+        <div class="win-field"><label>Từ (phút)</label><input type="number" id="bact-rand-min" value="30" min="1" max="1440" oninput="actBulkPreview()"></div>
+        <div class="win-field"><label>Đến (phút)</label><input type="number" id="bact-rand-max" value="90" min="1" max="1440" oninput="actBulkPreview()"></div>
+      </div>
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer;font-weight:600">Cấu hình nâng cao</summary>
+        <div style="margin-top:8px">
+          <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bact-sched-tabs" style="width:auto"> Mở tab theo lịch</label>
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Nguồn tab</label>
+              <select id="bact-tab-source"><option value="BOTH">Cả hai</option><option value="DEFAULT">Tab mặc định</option><option value="CUSTOM">Danh sách tùy chỉnh</option></select>
+            </div>
+            <div class="win-field"><label>Chọn URL</label>
+              <select id="bact-tab-sel"><option value="RANDOM">Ngẫu nhiên</option><option value="ORDER">Theo thứ tự</option></select>
+            </div>
+          </div>
+          <div class="win-row" style="margin-top:6px">
+            <div class="win-field"><label>Mỗi phiên mở (từ–đến)</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="number" id="bact-tabs-min" value="1" min="1" max="5" style="width:100%">
+                <span class="muted">→</span>
+                <input type="number" id="bact-tabs-max" value="2" min="1" max="5" style="width:100%">
+              </div>
+            </div>
+            <div class="win-field"><label>Automation tabs tối đa</label>
+              <input type="number" id="bact-max-auto" value="2" min="1" max="10">
+            </div>
+          </div>
+          <div class="win-field" style="margin-top:6px"><label>Không lặp cùng URL (phút)</label>
+            <input type="number" id="bact-cool" value="60" min="0" max="1440">
+          </div>
+          <label style="margin-top:6px">Danh sách URL tùy chỉnh</label>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="bact-listmode" value="keep" checked style="width:auto"> Giữ nguyên</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="bact-listmode" value="add" style="width:auto"> Thêm vào</label>
+            <label style="display:flex;gap:4px;align-items:center"><input type="radio" name="bact-listmode" value="replace" style="width:auto"> Thay thế</label>
+          </div>
+          <textarea id="bact-custom-urls" rows="3" style="width:100%" placeholder="https://example.com&#10;https://docs.example.com"></textarea>
+        </div>
+      </details>
       <label>Tab cần duy trì</label>
       <div id="bact-presets" style="display:flex;gap:12px;flex-wrap:wrap" onchange="actBulkPreview()">
         <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" data-preset="gmail" style="width:auto" checked> Gmail</label>

@@ -13,6 +13,7 @@ function makeEl(id) {
     closest() { return null; }, click() {}, focus() {}, remove() {} };
 }
 const document = { addEventListener() {}, querySelectorAll() { return []; },
+  querySelector() { return null; },
   getElementById(id) { if (!__els[id]) __els[id] = makeEl(id); return __els[id]; },
   createElement() { return makeEl('x'); }, hidden: false, body: makeEl('body') };
 const window = { __ytmBulkOp: false };
