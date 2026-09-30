@@ -151,6 +151,16 @@ function open_chrome(array $p, ?string $url = null): void
     if ($url === null) {
         $url = get_setting('home_url', 'https://www.google.com/');
     }
+    // Portable profile dir (PC khac): resolve truoc moi logic running/launch
+    try {
+        require_once __DIR__ . '/../sync/ProfilePathResolver.php';
+        $pr = ProfilePathResolver::resolve($p);
+        if (!$pr['exists']) {
+            json_out(['ok' => false, 'message' => 'Thu muc profile khong ton tai: ' . ($p['user_data_dir'] ?? '')], 400);
+        }
+        if ($pr['migrated']) $p['user_data_dir'] = $pr['path'];
+    } catch (Throwable $e) {
+    }
     // Neu Chrome dang chay VA CDP con phan hoi VA config (proxy/user-agent) dung nhu DB
     // -> tra ve ngay, khong dong/restart (tranh mat tab khi user bam "Mo" lai).
     // Neu config da doi (gan proxy moi, doi UA...) -> restart de ap dung config moi.
@@ -236,8 +246,30 @@ function open_chrome(array $p, ?string $url = null): void
         json_out(['ok' => false, 'proxy_dead' => true, 'message' => $e->getMessage()], 409);
     }
 
-    db()->prepare('UPDATE profiles SET status=?, last_opened=NOW(), debug_port=? WHERE id=?')
-        ->execute(['running', $port, (int)$p['id']]);
+    db()->prepare('UPDATE profiles SET debug_port=? WHERE id=?')
+        ->execute([$port, (int)$p['id']]);
+    // Quick verify: Popen/dispatched != RUNNING. Cho process xuat hien ngan
+    // (toi da ~2s); khong thay process -> bao loi thay vi ghi 'running' gia.
+    $alive = false;
+    try {
+        $udir = (string)($p['user_data_dir'] ?? '');
+        $dl = microtime(true) + 2.0;
+        do {
+            if ($udir !== '' && chrome_processes_alive($udir)) { $alive = true; break; }
+            usleep(200000);
+        } while (microtime(true) < $dl);
+    } catch (Throwable $e) {
+        $alive = true; // khong xac dinh duoc -> giu hanh vi cu
+    }
+    if (!$alive) {
+        try {
+            db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', (int)$p['id']]);
+        } catch (Throwable $e) {
+        }
+        json_out(['ok' => false, 'message' => 'Chrome thoát ngay sau khi mở (PROCESS_EXITED). Thử lại hoặc kiểm tra profile/port.'], 500);
+    }
+    db()->prepare('UPDATE profiles SET status=?, last_opened=NOW() WHERE id=?')
+        ->execute(['running', (int)$p['id']]);
     // Account Evaluation: dam bao state + danh dau due neu bat "Evaluate on Profile Start"
     try {
         require_once __DIR__ . '/../sync/AccountRepository.php';
@@ -289,7 +321,9 @@ function tab_snapshot_before_close(array $p): void
         // Deadline 1200ms: qua gio dung last_good, khong block dong Chrome.
         $snap = TabSessionStore::snapshotLive($id, $port, true, 1200);
         if ($snap === null) return;
-        TabSessionStore::save($id, $snap);
+        require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+        TabSessionStore::save($id, $snap,
+            ['generation' => ChromeBatchManager::currentGeneration($id), 'phase' => 'PRE_CLOSE']);
         $ms = (int)round((microtime(true) - $t0) * 1000);
         SyncLogger::info('tab_session', "[SESSION] profile=$id port=$port snapshot "
             . count($snap['tabs']) . " tabs: {$ms}ms (pre-close)", $id);

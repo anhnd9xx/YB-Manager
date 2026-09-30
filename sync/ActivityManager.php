@@ -125,6 +125,12 @@ class ActivityManager
                 'max_automation_tabs' => 'INT NOT NULL DEFAULT 2',
                 'url_cooldown_minutes' => 'INT NOT NULL DEFAULT 60',
                 'custom_tabs_json' => 'TEXT NULL',
+                // V3: schedule mode 24/24, config versioning, supervisor-lite
+                'schedule_mode' => "VARCHAR(10) NOT NULL DEFAULT 'WINDOW'",
+                'config_version' => 'INT NOT NULL DEFAULT 1',
+                'runtime_state' => "VARCHAR(15) NOT NULL DEFAULT 'WAITING'",
+                'fail_streak' => 'INT NOT NULL DEFAULT 0',
+                'last_error' => 'VARCHAR(60) NULL',
             ];
             foreach ($add as $col => $def) {
                 if (empty($cols[$col])) {
@@ -188,6 +194,7 @@ class ActivityManager
     public static function defaultConfig(int $profileId): array
     {
         return ['profile_id' => $profileId, 'enabled' => 0,
+            'schedule_mode' => 'WINDOW',
             'schedule_start' => '08:00', 'schedule_end' => '22:00',
             'interval_minutes' => 30, 'max_tabs' => 5, 'keep_required_tabs' => 1,
             'required_pages' => ['gmail', 'google'], 'search_queries' => [],
@@ -201,7 +208,9 @@ class ActivityManager
             'interval_mode' => 'FIXED', 'random_min' => 30, 'random_max' => 90,
             'scheduled_tabs_enabled' => 0, 'tab_source_mode' => 'BOTH', 'tab_selection_mode' => 'RANDOM',
             'tabs_min' => 1, 'tabs_max' => 2, 'max_automation_tabs' => 2,
-            'url_cooldown_minutes' => 60, 'custom_tabs' => []];
+            'url_cooldown_minutes' => 60, 'custom_tabs' => [],
+            'config_version' => 1, 'runtime_state' => 'WAITING', 'fail_streak' => 0,
+            'last_error' => null];
     }
 
     public static function getConfig(int $profileId): array
@@ -214,6 +223,12 @@ class ActivityManager
             if (!$r) return self::defaultConfig($profileId);
             $r['enabled'] = (int)$r['enabled'];
             $r['interval_minutes'] = (int)$r['interval_minutes'];
+            $smode = strtoupper((string)($r['schedule_mode'] ?? 'WINDOW'));
+            $r['schedule_mode'] = $smode === 'ALWAYS' ? 'ALWAYS' : 'WINDOW';
+            $r['config_version'] = max(1, (int)($r['config_version'] ?? 1));
+            $r['runtime_state'] = (string)($r['runtime_state'] ?? 'WAITING');
+            $r['fail_streak'] = max(0, (int)($r['fail_streak'] ?? 0));
+            $r['last_error'] = $r['last_error'] ?? null;
             $r['max_tabs'] = (int)$r['max_tabs'];
             $r['keep_required_tabs'] = (int)$r['keep_required_tabs'];
             $r['auto_start_profile'] = (int)$r['auto_start_profile'];
@@ -268,6 +283,8 @@ class ActivityManager
         $errors = [];
         $cur = self::getConfig($profileId);
         $enabled = !empty($in['enabled']) ? 1 : 0;
+        $smode = strtoupper((string)($in['schedule_mode'] ?? $cur['schedule_mode'] ?? 'WINDOW'));
+        if (!in_array($smode, ['ALWAYS', 'WINDOW'], true)) $smode = 'WINDOW';
         $ss = self::cleanTime((string)($in['schedule_start'] ?? $cur['schedule_start']), '08:00');
         $se = self::cleanTime((string)($in['schedule_end'] ?? $cur['schedule_end']), '22:00');
         $iv = (int)($in['interval_minutes'] ?? $cur['interval_minutes']);
@@ -344,16 +361,17 @@ class ActivityManager
             $customTabs = self::cleanCustomTabs($in['custom_tabs']);
         }
         try {
-            db()->prepare('INSERT INTO activity_configs (profile_id, enabled, schedule_start, schedule_end,
+            db()->prepare('INSERT INTO activity_configs (profile_id, enabled, schedule_mode, schedule_start, schedule_end,
                     interval_minutes, max_tabs, keep_required_tabs, required_pages, search_queries,
                     activity_mode, auto_start_profile, maintain_always, store_queries, pause_until,
                     active_days, sessions_min, sessions_max, tasks_min, tasks_max, gap_min, gap_max,
                     limits_json, template, planner_enabled, search_behavior, max_result_depth,
                     interval_mode, random_min, random_max, scheduled_tabs_enabled, tab_source_mode,
                     tab_selection_mode, tabs_min, tabs_max, max_automation_tabs, url_cooldown_minutes,
-                    custom_tabs_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON DUPLICATE KEY UPDATE enabled=VALUES(enabled), schedule_start=VALUES(schedule_start),
+                    custom_tabs_json, config_version)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                ON DUPLICATE KEY UPDATE enabled=VALUES(enabled), schedule_mode=VALUES(schedule_mode),
+                    schedule_start=VALUES(schedule_start),
                     schedule_end=VALUES(schedule_end), interval_minutes=VALUES(interval_minutes),
                     max_tabs=VALUES(max_tabs), keep_required_tabs=VALUES(keep_required_tabs),
                     required_pages=VALUES(required_pages), search_queries=VALUES(search_queries),
@@ -373,8 +391,11 @@ class ActivityManager
                     tabs_min=VALUES(tabs_min), tabs_max=VALUES(tabs_max),
                     max_automation_tabs=VALUES(max_automation_tabs),
                     url_cooldown_minutes=VALUES(url_cooldown_minutes),
-                    custom_tabs_json=VALUES(custom_tabs_json)')
-                ->execute([$profileId, $enabled, $ss . ':00', $se . ':00', $cyc, $mt,
+                    custom_tabs_json=VALUES(custom_tabs_json),
+                    config_version=config_version+1,
+                    fail_streak=IF(VALUES(enabled)=1 AND enabled=0, 0, fail_streak),
+                    runtime_state=IF(VALUES(enabled)=1, IF(runtime_state IN (\'SUSPENDED\',\'SUSPENDED_ERROR\',\'ERROR\'), \'WAITING\', runtime_state), \'DISABLED\')')
+                ->execute([$profileId, $enabled, $smode, $ss . ':00', $se . ':00', $cyc, $mt,
                     !empty($in['keep_required_tabs']) || !array_key_exists('keep_required_tabs', $in) ? 1 : 0,
                     json_encode(array_values($rp), JSON_UNESCAPED_UNICODE),
                     json_encode($sq, JSON_UNESCAPED_UNICODE),
@@ -390,7 +411,153 @@ class ActivityManager
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['db_error']];
         }
-        return ['ok' => true, 'errors' => $errors];
+        $new = self::getConfig($profileId);
+        // Co hieu luc ngay: tinh lai next_run + regen plan tuong lai (khong can restart Tool)
+        try {
+            self::afterSave($profileId, $cur, $new);
+        } catch (Throwable $e) {
+        }
+        return ['ok' => true, 'errors' => $errors, 'config_version' => (int)($new['config_version'] ?? 1)];
+    }
+
+    /**
+     * Sau save: enabled -> recalc next_run_at + regen plan future theo config moi;
+     * disabled -> xoa next_run. Job dang RUNNING giu snapshot cu, new config tu next session.
+     */
+    public static function afterSave(int $profileId, array $old, array $new): void
+    {
+        self::ensureTables();
+        if (empty($new['enabled'])) {
+            try {
+                db()->prepare('UPDATE activity_configs SET next_run_at=NULL WHERE profile_id=?')
+                    ->execute([$profileId]);
+            } catch (Throwable $e) {
+            }
+            return;
+        }
+        $schedKeys = ['schedule_mode', 'schedule_start', 'schedule_end', 'interval_minutes',
+            'interval_mode', 'random_min', 'random_max', 'active_days', 'sessions_min',
+            'sessions_max', 'gap_min', 'gap_max', 'planner_enabled'];
+        $changed = false;
+        foreach ($schedKeys as $k) {
+            if ((string)($old[$k] ?? '') !== (string)($new[$k] ?? '')) {
+                $changed = true;
+                break;
+            }
+        }
+        try {
+            require_once __DIR__ . '/ActivityScheduler.php';
+            require_once __DIR__ . '/ActivityPlanner.php';
+            if ($changed) {
+                // Huy future run cu theo lich cu, tinh lai theo lich moi
+                try {
+                    db()->prepare("DELETE FROM activity_sessions WHERE profile_id=?
+                        AND plan_date=CURDATE() AND status='PLANNED' AND run_at>NOW()")
+                        ->execute([$profileId]);
+                } catch (Throwable $e) {
+                }
+                ActivityPlanner::ensureTodayPlan($profileId);
+            }
+            // Legacy mode (planner tat): next_run truc tiep tu cycle
+            if (empty($new['planner_enabled'])) {
+                db()->prepare('UPDATE activity_configs SET next_run_at=? WHERE profile_id=?')
+                    ->execute([ActivityScheduler::calculateNextRun($new), $profileId]);
+            } else {
+                ActivityPlanner::updateNextRun($profileId);
+            }
+        } catch (Throwable $e) {
+        }
+        try {
+            require_once __DIR__ . '/EventBus.php';
+            EventBus::emit(AppEvent::STATUS_CHANGED, AppEvent::MOD_AUTO_ACTIVITY, AppEvent::SEV_INFO,
+                'AUTO ACTIVITY — CẬP NHẬT CẤU HÌNH',
+                "Profile: $profileId\nVersion: v" . (int)($new['config_version'] ?? 1),
+                ['profile_id' => $profileId,
+                    'data' => ['config_version' => (int)($new['config_version'] ?? 1)]]);
+        } catch (Throwable $e) {
+        }
+    }
+
+    /** Ghi nhan ket qua session cho supervisor-lite (retry/circuit breaker). */
+    public static function noteResult(int $profileId, bool $ok, ?string $error = null): void
+    {
+        try {
+            self::ensureTables();
+            if ($ok) {
+                db()->prepare("UPDATE activity_configs SET fail_streak=0,
+                        runtime_state=IF(runtime_state IN ('SUSPENDED','SUSPENDED_ERROR','ERROR','RETRYING'),'WAITING',runtime_state),
+                        last_error=NULL WHERE profile_id=?")
+                    ->execute([$profileId]);
+                return;
+            }
+            $transient = in_array((string)$error, ['NETWORK_ERROR', 'CDP_ERROR', 'PAGE_TIMEOUT',
+                'PROXY_ERROR', 'VISIT_FAILED', 'RESULT_PARSE_FAILED', 'empty_pool'], true);
+            if ($transient) {
+                db()->prepare("UPDATE activity_configs SET fail_streak=fail_streak+1,
+                        runtime_state=IF(fail_streak+1>=5,'SUSPENDED','RETRYING'), last_error=?
+                    WHERE profile_id=? AND enabled=1")
+                    ->execute([(string)$error, $profileId]);
+            } else {
+                db()->prepare("UPDATE activity_configs SET runtime_state='ERROR', last_error=?
+                    WHERE profile_id=? AND enabled=1")
+                    ->execute([(string)$error, $profileId]);
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    /**
+     * Bulk UPSERT hang loat: 1 profile = 1 row (profile_id PK). Da co -> UPDATE
+     * (version++), chua co -> CREATE. Khong bao gio skip vi "da co lich".
+     * @return array{requested,assigned,created,updated,failed,results,config_versions}
+     */
+    public static function bulkSave(array $ids, array $patch): array
+    {
+        self::ensureTables();
+        // Template: bung preset thanh gia tri cu the
+        if (!empty($patch['template']) && in_array(strtoupper((string)$patch['template']), ['LIGHT', 'NORMAL', 'HIGH'], true)) {
+            $patch = array_merge($patch, self::applyTemplate((string)$patch['template']));
+        }
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        $res = ['ok' => [], 'failed' => []];
+        $created = 0;
+        $updated = 0;
+        $versions = [];
+        foreach ($ids as $pid) {
+            try {
+                $exists = db()->prepare('SELECT id FROM profiles WHERE id=?');
+                $exists->execute([$pid]);
+                if (!$exists->fetchColumn()) {
+                    $res['failed'][] = ['id' => $pid, 'error' => 'PROFILE_NOT_FOUND'];
+                    continue;
+                }
+                $had = db()->prepare('SELECT profile_id FROM activity_configs WHERE profile_id=?');
+                $had->execute([$pid]);
+                $isUpdate = (bool)$had->fetchColumn();
+                $cur = self::getConfig($pid);
+                $merged = array_merge($cur, $patch);
+                $r = self::saveConfig($pid, $merged);
+                if (empty($r['ok'])) {
+                    $res['failed'][] = ['id' => $pid, 'error' => 'SAVE_FAILED'];
+                    continue;
+                }
+                if ($isUpdate) $updated++;
+                else $created++;
+                $res['ok'][] = $pid;
+                $versions[$pid] = (int)(self::getConfig($pid)['config_version'] ?? 1);
+            } catch (Throwable $e) {
+                $res['failed'][] = ['id' => $pid, 'error' => 'EXCEPTION'];
+            }
+        }
+        $assigned = $created + $updated;
+        try {
+            SyncLogger::info('activity', '[BULK] requested=' . count($ids) . " assigned=$assigned created=$created updated=$updated failed=" . count($res['failed']));
+        } catch (Throwable $e) {
+        }
+        return ['requested' => count($ids), 'assigned' => $assigned,
+            'created' => $created, 'updated' => $updated,
+            'failed' => count($res['failed']), 'results' => $res,
+            'config_versions' => $versions];
     }
 
     /** Templates LIGHT/NORMAL/HIGH (§44-45). Tra ve patch ap dung len config. */
@@ -863,6 +1030,30 @@ class ActivityManager
         return $auto;
     }
 
+    /**
+     * Hard cap automation tabs/profile: dat cap thi navigate lai tab cu nhat
+     * thay vi mo moi (khong bao gio vuot cap, khong dung USER tabs).
+     * @return array{reused:bool, tab?:string}
+     */
+    private static function reuseOldestAuto(int $profileId, int $port, string $url, array $auto): array
+    {
+        $oldest = null;
+        $oldestAt = PHP_INT_MAX;
+        foreach ($auto as $tid => $info) {
+            $at = (int)($info['at'] ?? time());
+            if ($at < $oldestAt) {
+                $oldestAt = $at;
+                $oldest = $tid;
+            }
+        }
+        if ($oldest !== null && self::navigateTab($port, (string)$oldest, $url)) {
+            $auto[$oldest] = ['url' => $url, 'kind' => 'page', 'at' => time()];
+            self::stateSet($profileId, ['auto_tabs' => $auto]);
+            return ['reused' => true, 'tab' => (string)$oldest];
+        }
+        return ['reused' => false];
+    }
+
     /** ENSURE_TAB (§6): reuse neu ton tai (bat ky owner), khong duplicate. */
     private static function taskEnsure(int $profileId, int $port, string $page, callable $ms): array
     {
@@ -890,23 +1081,12 @@ class ActivityManager
                 return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)($t['id'] ?? '')];
             }
         }
-        // Mo moi: check tab limit (§21)
-        if (count($auto) >= max(1, (int)$cfg['max_tabs'])) {
-            // Reuse automation search tab cu (navigate lai) thay vi mo vo han
-            $reuse = null;
-            foreach ($auto as $tid => $info) {
-                if (($info['kind'] ?? '') === 'search') {
-                    $reuse = $tid;
-                    break;
-                }
-            }
-            if ($reuse !== null) {
-                if (self::navigateTab($port, (string)$reuse, $url)) {
-                    $auto[$reuse] = ['url' => $url, 'kind' => 'required', 'at' => time()];
-                    self::stateSet($profileId, ['auto_tabs' => $auto]);
-                    self::record($profileId, self::T_ENSURE, self::domainOf($url), self::R_REUSED, $ms());
-                    return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$reuse];
-                }
+        // Mo moi: hard cap automation tabs/profile (reuse cu nhat thay vi mo vo han)
+        if (count($auto) >= max(1, (int)$cfg['max_automation_tabs'])) {
+            $re = self::reuseOldestAuto($profileId, $port, $url, $auto);
+            if ($re['reused']) {
+                self::record($profileId, self::T_ENSURE, self::domainOf($url), self::R_REUSED, $ms());
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => $re['tab']];
             }
             self::record($profileId, self::T_ENSURE, self::domainOf($url), self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
             return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
@@ -927,13 +1107,25 @@ class ActivityManager
         return ['ok' => true, 'result' => self::R_OPENED, 'ms' => $ms(), 'tab' => $tid];
     }
 
-    /** OPEN_PAGE: nhu ensure nhung luon mo tab automation moi (khong reuse user tab). */
+    /** OPEN_PAGE: nhu ensure nhung luon mo tab automation moi (khong reuse user tab).
+     * Hard cap: dat max_automation_tabs thi reuse cu nhat (khong vuot cap). */
     private static function taskOpen(int $profileId, int $port, string $url, callable $ms, bool $isSearch): array
     {
         if (!self::validHttpUrl($url)) {
             self::record($profileId, $isSearch ? self::T_SEARCH : self::T_OPEN,
                 self::domainOf($url), self::R_SKIPPED, $ms(), self::E_INVALID_URL);
             return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_INVALID_URL, 'ms' => $ms()];
+        }
+        try {
+            $cfg = self::getConfig($profileId);
+            $auto = self::pruneAuto((array)(self::stateGet($profileId)['auto_tabs'] ?? []), self::liveTabs($port));
+            if (count($auto) >= max(1, (int)$cfg['max_automation_tabs'])) {
+                $re = self::reuseOldestAuto($profileId, $port, $url, $auto);
+                if ($re['reused']) {
+                    return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => $re['tab']];
+                }
+            }
+        } catch (Throwable $e) {
         }
         $tid = self::openTab($port, $url);
         if ($tid === null) {
@@ -979,7 +1171,7 @@ class ActivityManager
             }
         }
         if ($reuse === null) {
-            if (count($auto) >= max(1, (int)$cfg['max_tabs'])) {
+            if (count($auto) >= max(1, (int)$cfg['max_automation_tabs'])) {
                 self::record($profileId, self::T_SEARCH, 'google.com', self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
                 return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
             }
@@ -1031,15 +1223,12 @@ class ActivityManager
         $live = self::liveTabs($port);
         $st = self::stateGet($profileId);
         $auto = self::pruneAuto((array)($st['auto_tabs'] ?? []), $live);
-        // Tab limit: reuse search tab cu nhu ensure
-        if (count($auto) >= max(1, (int)$cfg['max_tabs'])) {
-            foreach ($auto as $tid => $info) {
-                if (($info['kind'] ?? '') === 'search' && self::navigateTab($port, (string)$tid, $url)) {
-                    $auto[$tid] = ['url' => $url, 'kind' => 'page', 'at' => time()];
-                    self::stateSet($profileId, ['auto_tabs' => $auto]);
-                    self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_REUSED, $ms());
-                    return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$tid];
-                }
+        // Tab limit: hard cap automation tabs, reuse cu nhat
+        if (count($auto) >= max(1, (int)$cfg['max_automation_tabs'])) {
+            $re = self::reuseOldestAuto($profileId, $port, $url, $auto);
+            if ($re['reused']) {
+                self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_REUSED, $ms());
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => $re['tab']];
             }
             self::record($profileId, self::T_WEBSITE, self::domainOf($url), self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
             return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
@@ -1248,21 +1437,11 @@ class ActivityManager
         $limit = max(1, (int)$cfg['max_automation_tabs']);
         if (count($auto) >= $limit) {
             // Reuse automation tab cu nhat (navigate lai) thay vi mo moi (§19)
-            $oldest = null;
-            $oldestAt = PHP_INT_MAX;
-            foreach ($auto as $tid => $info) {
-                $at = (int)($info['at'] ?? time());
-                if ($at < $oldestAt) {
-                    $oldestAt = $at;
-                    $oldest = $tid;
-                }
-            }
-            if ($oldest !== null && self::navigateTab($port, (string)$oldest, $url)) {
-                $auto[$oldest] = ['url' => $url, 'kind' => 'page', 'at' => time()];
-                self::stateSet($profileId, ['auto_tabs' => $auto]);
+            $re = self::reuseOldestAuto($profileId, $port, $url, $auto);
+            if ($re['reused']) {
                 self::pushRecentDomain($profileId, $domain);
                 self::record($profileId, self::T_CUSTOM, $domain, self::R_REUSED, $ms());
-                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => (string)$oldest];
+                return ['ok' => true, 'result' => self::R_REUSED, 'ms' => $ms(), 'tab' => $re['tab']];
             }
             self::record($profileId, self::T_CUSTOM, $domain, self::R_SKIPPED, $ms(), self::E_TAB_LIMIT);
             return ['ok' => false, 'result' => self::R_SKIPPED, 'error' => self::E_TAB_LIMIT, 'ms' => $ms()];
@@ -1672,7 +1851,9 @@ class ActivityManager
         if (!empty($cfg['keep_required_tabs'])) {
             foreach (self::requiredUrls($cfg) as $url) {
                 $key = array_search($url, self::PRESETS, true);
-                $out[] = self::runTask($profileId, ['type' => self::T_ENSURE, 'page' => $key !== false ? $key : $url]);
+                $tk = self::runTask($profileId, ['type' => self::T_ENSURE, 'page' => $key !== false ? $key : $url]);
+                $tk['label'] = self::domainOf($url);
+                $out[] = $tk;
             }
         }
         if (in_array($mode, ['search', 'full'], true) && !empty($cfg['search_queries'])) {
@@ -1680,6 +1861,7 @@ class ActivityManager
             $idx = (int)($st['search_idx'] ?? 0);
             $q = $cfg['search_queries'][$idx % count($cfg['search_queries'])];
             $r = self::runTask($profileId, ['type' => self::T_SEARCH, 'query' => $q]);
+            $r['label'] = 'search:' . mb_substr((string)$q, 0, 40);
             $out[] = $r;
             // BLOCKED -> dung search luon cycle nay (khong thu query khac)
             if (($r['result'] ?? '') !== self::R_BLOCKED) {
@@ -1690,14 +1872,18 @@ class ActivityManager
         if (!empty($cfg['scheduled_tabs_enabled'])) {
             foreach ((array)($cfg['custom_tabs'] ?? []) as $ct) {
                 if (strtoupper((string)($ct['behavior'] ?? '')) === 'MAINTAIN' && !empty($ct['url'])) {
-                    $out[] = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$ct['url']]);
+                    $tk = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$ct['url']]);
+                    $tk['label'] = self::domainOf((string)$ct['url']);
+                    $out[] = $tk;
                 }
             }
             require_once __DIR__ . '/ActivityPlanner.php';
             $cfg2 = self::getConfig($profileId);
             $cfg2['profile_id'] = $profileId;
             foreach (ActivityPlanner::pickCustomUrls($cfg2, [], (int)$cfg2['tabs_max']) as $u) {
-                $out[] = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$u['url']]);
+                $tk = self::runTask($profileId, ['type' => self::T_CUSTOM, 'url' => (string)$u['url']]);
+                $tk['label'] = self::domainOf((string)$u['url']);
+                $out[] = $tk;
             }
         }
         try {

@@ -30,6 +30,11 @@ class WindowPlacementManager
     public const PROTECTION_MS = 10000;
     /** @var int[] moc verify sparse trong 10s dau */
     public const PROTECTION_CHECKS_MS = [100, 350, 800, 1500, 3000, 5000, 7500, 10000];
+    /** User layout giu quyen uu tien sau Apply (startup worker cu phai exit) */
+    public const LAYOUT_LOCK_MS = 3000;
+    /** Priority: USER_LAYOUT > EXPLICIT_PROFILE_MOVE > STARTUP_PLACEMENT > AUTO_LAYOUT > RESTORE_FALLBACK */
+    public const OWNER_USER_LAYOUT = 'USER_LAYOUT';
+    public const OWNER_STARTUP = 'STARTUP';
 
     /** Cache topology 5s de khong EnumDisplayMonitors lien tuc */
     private static ?array $monCache = null;
@@ -308,7 +313,20 @@ class WindowPlacementManager
     public static function resolve_target_monitor(array $profile, ?array $layoutHint = null): ?array
     {
         $mode = strtoupper(trim((string)($profile['monitor_mode'] ?? 'LAST')));
-        if (!in_array($mode, ['LAST', 'FIXED', 'AUTO'], true)) $mode = 'LAST';
+        if (!in_array($mode, ['LAST', 'FIXED', 'AUTO', 'SECONDARY'], true)) $mode = 'LAST';
+        // SECONDARY (portable): monitor lon nhat khong phai primary, khong phu thuoc DISPLAYx
+        if ($mode === 'SECONDARY') {
+            try {
+                require_once __DIR__ . '/MonitorRegistry.php';
+                $sec = MonitorRegistry::getSecondary();
+                if ($sec !== null) {
+                    $m = self::findByDevice((string)$sec['device_name']);
+                    if ($m !== null) return $m;
+                }
+            } catch (Throwable $e) {
+            }
+            // roi xuong LAST nhu cu neu khong co secondary
+        }
         // FIXED: monitor user chon
         if ($mode === 'FIXED') {
             $m = self::findByDevice((string)($profile['fixed_monitor_device'] ?? ''));
@@ -504,15 +522,20 @@ class WindowPlacementManager
     public static function startGuard(int $profileId, int $hwnd, array $rect, array $monitor,
         ?string $batchId = null, ?int $generation = null): void
     {
-        @file_put_contents(self::guardFile($profileId), json_encode([
+        require_once __DIR__ . '/StateStore.php';
+        require_once __DIR__ . '/MachineContext.php';
+        $payload = [
             'hwnd' => $hwnd, 'rect' => $rect,
             'monitor' => $monitor['device_name'] ?? '',
             't0' => microtime(true), 'checks' => self::PROTECTION_CHECKS_MS,
             'batch_id' => $batchId, 'generation' => $generation,
             'owner' => 'STARTUP', 'locked' => true,
             'lock_until' => microtime(true) + self::PROTECTION_MS / 1000,
-            'stable' => false,
-        ], JSON_UNESCAPED_UNICODE));
+            'stable' => false, 'machine' => MachineContext::id(),
+        ];
+        StateStore::withLock('profile-' . $profileId, function () use ($profileId, $payload) {
+            StateStore::writeJson(self::guardFile($profileId), $payload);
+        }, 1000);
     }
 
     public static function clearGuard(int $profileId): void
@@ -520,27 +543,82 @@ class WindowPlacementManager
         @unlink(self::guardFile($profileId));
     }
 
+    /** So generation tang dan cho moi arrange operation (callback cu phai discard). */
+    public static function nextLayoutGeneration(): int
+    {
+        require_once __DIR__ . '/StateStore.php';
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_layout_gen.json';
+        $j = StateStore::readJson($f);
+        $gen = (int)(is_array($j) ? ($j['gen'] ?? 0) : 0) + 1;
+        StateStore::writeJson($f, ['gen' => $gen]);
+        return $gen;
+    }
+
+    /**
+     * User Arrange thang Startup placement: overwrite guard bang owner=USER_LAYOUT
+     * + generation moi. apply_window worker cu thay batch/gen doi -> exit ngay
+     * (khong keo window ve vi tri cu). Lock ngan de on dinh.
+     * @param array $rectsByPid [profileId => ['rect'=>[x,y,w,h],'monitor'=>deviceName,'hwnd'=>int]]
+     * @return int so guard da claim (worker cu se discard)
+     */
+    public static function claimLayoutLock(array $rectsByPid, string $layoutId, int $generation): int
+    {
+        require_once __DIR__ . '/StateStore.php';
+        require_once __DIR__ . '/MachineContext.php';
+        $n = 0;
+        foreach ($rectsByPid as $pid => $info) {
+            $pid = (int)$pid;
+            if ($pid <= 0 || !is_array($info) || empty($info['rect'])) continue;
+            $r = $info['rect'];
+            StateStore::writeJson(self::guardFile($pid), [
+                'hwnd' => (int)($info['hwnd'] ?? 0),
+                'rect' => ['x' => (int)$r['x'], 'y' => (int)$r['y'], 'w' => (int)$r['w'], 'h' => (int)$r['h']],
+                'monitor' => (string)($info['monitor'] ?? ''),
+                't0' => microtime(true), 'checks' => [],
+                'batch_id' => $layoutId, 'generation' => $generation,
+                'owner' => self::OWNER_USER_LAYOUT, 'locked' => true,
+                'lock_until' => microtime(true) + self::LAYOUT_LOCK_MS / 1000,
+                'stable' => false, 'machine' => MachineContext::id(),
+            ]);
+            $n++;
+        }
+        return $n;
+    }
+
+    /** User layout lock con hieu luc khong (startup/auto khong duoc overwrite). */
+    public static function layoutLocked(int $profileId): bool
+    {
+        require_once __DIR__ . '/StateStore.php';
+        require_once __DIR__ . '/MachineContext.php';
+        $g = StateStore::readJson(self::guardFile($profileId));
+        if (!is_array($g) || ($g['owner'] ?? '') !== self::OWNER_USER_LAYOUT) return false;
+        if (isset($g['machine']) && !MachineContext::isCurrent($g)) return false;
+        return microtime(true) < (float)($g['lock_until'] ?? 0);
+    }
+
     /** Cap nhat HWND vao guard (viet luc Popen voi hwnd=0, apply_window dien sau). */
     public static function updateGuardHwnd(int $profileId, int $hwnd): void
     {
+        require_once __DIR__ . '/StateStore.php';
         $f = self::guardFile($profileId);
-        if (!is_file($f)) return;
-        try {
-            $g = json_decode((string)@file_get_contents($f), true);
-            if (!is_array($g)) return;
-            $g['hwnd'] = $hwnd;
-            @file_put_contents($f, json_encode($g, JSON_UNESCAPED_UNICODE));
-        } catch (Throwable $e) {
-        }
+        $g = StateStore::readJson($f);
+        if (!is_array($g)) return;
+        $g['hwnd'] = $hwnd;
+        StateStore::writeJson($f, $g);
     }
 
     /** 1 tick guard (goi tu apply_window loop): tra ve 'stable'|'wait'|'done'. */
     public static function guardTick(int $profileId, array $profile): string
     {
+        require_once __DIR__ . '/StateStore.php';
+        require_once __DIR__ . '/MachineContext.php';
         $f = self::guardFile($profileId);
-        if (!is_file($f)) return 'done';
-        $g = json_decode((string)@file_get_contents($f), true);
+        $g = StateStore::readJson($f);
         if (!is_array($g)) {
+            @unlink($f);
+            return 'done';
+        }
+        if (isset($g['machine']) && !MachineContext::isCurrent($g)) {
             @unlink($f);
             return 'done';
         }

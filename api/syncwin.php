@@ -154,6 +154,7 @@ try {
             if (!empty($b['skipMinimized'])) $opts['skipMinimized'] = true;
             if (!empty($b['allowLocked'])) $opts['allowLocked'] = true;
             if (isset($b['cols'])) $opts['cols'] = (int)$b['cols'];
+            if (isset($b['slotsPerMonitor'])) $opts['slotsPerMonitor'] = max(0, (int)$b['slotsPerMonitor']);
             if (isset($b['minW'])) $opts['minW'] = (int)$b['minW'];
             if (isset($b['minH'])) $opts['minH'] = (int)$b['minH'];
             if (isset($b['gapX'])) $opts['gapX'] = (int)$b['gapX'];
@@ -169,11 +170,47 @@ try {
             $out = ['ok' => $r['ok'] || ($r['partial'] ?? false), 'partial' => $r['partial'] ?? false,
                     'message' => $r['message'], 'session' => $r['session'], 'results' => $r['results']];
             foreach (['plan', 'breakdown', 'missingMonitors', 'disconnected', 'disconnectAsk',
-                      'availableMonitors', 'dryRun'] as $k) {
+                      'availableMonitors', 'dryRun', 'layout_id', 'generation', 'layoutPlan',
+                      'diag', 'requested', 'valid', 'moved', 'verified', 'failed', 'skipped',
+                      'duration_ms', 'resolutions', 'remapped', 'monitor_diag'] as $k) {
                 if (array_key_exists($k, $r)) $out[$k] = $r[$k];
             }
             if (isset($r['plan']['breakdown'])) $out['breakdown'] = $r['plan']['breakdown'];
             json_out($out, $code);
+            break;
+        }
+
+        case 'arrange_undo': {
+            $r = SyncWindowLayoutManager::arrangeUndo();
+            json_out(['ok' => (bool)$r['ok'], 'message' => $r['message'] ?? '',
+                'results' => $r['results'] ?? [], 'layout_id' => $r['layout_id'] ?? null,
+                'duration_ms' => $r['duration_ms'] ?? 0], $r['ok'] ? 200 : 400);
+            break;
+        }
+
+        case 'monitors_diag': {
+            // Chan doan man hinh portable: count/session/method/monitors (khong bao gio throw)
+            require_once __DIR__ . '/../sync/MonitorRegistry.php';
+            if (!empty($b['refresh'] ?? $_GET['refresh'] ?? false)) {
+                MonitorRegistry::refresh();
+            }
+            json_out(['ok' => true, 'data' => MonitorRegistry::diagnostics()]);
+            break;
+        }
+
+        case 'monitors_refresh': {
+            // Quet lai: invalidate cache + refresh registry + tra danh sach tuoi
+            require_once __DIR__ . '/../sync/MonitorRegistry.php';
+            $all = MonitorRegistry::refresh();
+            json_out(['ok' => true, 'data' => [
+                'monitors' => $all, 'diag' => MonitorRegistry::diagnostics()]]);
+            break;
+        }
+
+        case 'deploy_check': {
+            // Portable deployment check (PC-B first startup + diagnostics)
+            require_once __DIR__ . '/../sync/RuntimeReconciler.php';
+            json_out(['ok' => true, 'data' => RuntimeReconciler::deployCheck()]);
             break;
         }
 

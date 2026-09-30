@@ -60,6 +60,10 @@
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8 11H5v2h3v3h2v-3h3v-2h-3V8H8v3zm8-8H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H4V5h12v12zm4-13v9h-2V6l-2 2V5l3.5-3L22 5v3l-2-2v7h-2z"/></svg>
         <span>Synchronize</span>
       </button>
+      <button class="nav-btn" data-view="upload" data-tip="Upload Video">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+        <span>Upload</span>
+      </button>
       <button class="nav-btn" data-view="logs" data-tip="Nhật ký">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
         <span>Nhật ký</span>
@@ -426,10 +430,19 @@
                   </div>
                   <button class="link-btn" onclick="gotoLayoutSettings()">Cài đặt nâng cao…</button>
                 </div>
+                <div class="arr-group">
+                  <div class="arr-gtitle">Chẩn đoán màn hình</div>
+                  <div class="hint" id="arr-mon-diag">Chưa quét.</div>
+                  <div class="preset-row" style="margin-top:7px">
+                    <button class="btn btn-sm" onclick="arrMonDiag()">Chẩn đoán màn hình</button>
+                    <button class="btn btn-sm" onclick="arrMonRescan()">Quét lại màn hình</button>
+                  </div>
+                </div>
                 </div>
                 <div class="arr-foot">
                   <button class="btn" onclick="closeArrangeDrawer()">Hủy</button>
-                  <button class="btn btn-primary" onclick="arrApplyPanel()">✓ Áp dụng</button>
+                  <button class="btn" id="arr-undo-btn" onclick="arrUndo()" title="Hoàn tác lần sắp xếp trước">← Hoàn tác</button>
+                  <button class="btn btn-primary" id="arr-apply-btn" onclick="arrApplyPanel()">✓ Áp dụng</button>
                 </div>
               </div>
               <div class="drawer-overlay hidden" id="arrange-overlay" onclick="closeArrangeDrawer()"></div>
@@ -1022,6 +1035,49 @@
         </div>
       </section>
 
+      <!-- ===== VIEW: UPLOAD ===== -->
+      <section id="view-upload" class="view">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Upload Video</h3>
+            <div class="spacer"></div>
+            <button class="btn btn-sm" onclick="upOpenImport()">+ Thêm video/folder</button>
+            <button class="btn btn-sm" onclick="upOpenBulk()">Gán lịch hàng loạt</button>
+            <button class="btn btn-primary btn-sm" onclick="upRefresh()">↻ Làm mới</button>
+          </div>
+          <div class="cc-kpis" id="up-kpis" style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px"></div>
+          <div class="cc-counts" id="up-pipe" style="margin-top:10px"></div>
+          <div class="hint" id="up-provider-note" style="margin-top:6px"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div class="cc-actions" id="up-tabs">
+              <button class="btn btn-sm" data-uptab="today" onclick="upTab('today')">Hôm nay</button>
+              <button class="btn btn-sm" data-uptab="channels" onclick="upTab('channels')">Kênh</button>
+              <button class="btn btn-sm" data-uptab="library" onclick="upTab('library')">Thư viện</button>
+              <button class="btn btn-sm" data-uptab="schedule" onclick="upTab('schedule')">Lịch đăng</button>
+              <button class="btn btn-sm" data-uptab="uploads" onclick="upTab('uploads')">Lịch sử</button>
+              <button class="btn btn-sm" data-uptab="templates" onclick="upTab('templates')">Mẫu</button>
+              <button class="btn btn-sm" data-uptab="health" onclick="upTab('health')">Sức khỏe</button>
+            </div>
+          </div>
+          <div id="up-body"><div class="skeleton"></div></div>
+        </div>
+      </section>
+
+      <!-- ===== MODAL: Upload channel config ===== -->
+      <div id="up-cfg-modal" class="modal-overlay hidden">
+        <div class="modal">
+          <div class="modal-header"><h2 id="up-cfg-title">Cấu hình upload</h2>
+            <button class="modal-close" onclick="closeModal('up-cfg-modal')">&times;</button></div>
+          <div class="modal-body" id="up-cfg-body"></div>
+          <div class="modal-footer">
+            <button class="btn" onclick="closeModal('up-cfg-modal')">Hủy</button>
+            <button class="btn btn-primary" id="up-cfg-save" onclick="upCfgSave()">Lưu</button>
+          </div>
+        </div>
+      </div>
+
       <!-- ===== VIEW: LOGS ===== -->
       <section id="view-logs" class="view">
         <div class="panel">
@@ -1390,11 +1446,12 @@
           <textarea id="act-queries" rows="3" style="width:100%" placeholder="tin công nghệ&#10;hướng dẫn Excel"></textarea>
           <div class="win-row" style="margin-top:6px">
             <div class="win-field"><label>Chế độ</label>
-              <select id="act-mode">
+              <select id="act-mode" onchange="actModeHint()">
                 <option value="maintain">Chỉ duy trì tab</option>
                 <option value="search">Tab + tìm kiếm</option>
                 <option value="full">Đầy đủ</option>
               </select>
+              <div class="hint" id="act-mode-hint"></div>
             </div>
             <div class="win-field"><label>Mẫu (template)</label>
               <select id="act-template" onchange="actTemplateApply()">
@@ -1550,6 +1607,7 @@
         <select id="pf-monitor-mode" onchange="pfRefreshMonitorHint();profileDraftChanged()">
           <option value="LAST">Nhớ màn hình lần cuối</option>
           <option value="AUTO">Tự động</option>
+          <option value="SECONDARY">Màn hình phụ (portable)</option>
           <option value="FIXED">Màn hình cố định…</option>
         </select>
         <select id="pf-monitor-fixed" class="hidden" style="margin-top:6px"></select>
@@ -1712,6 +1770,9 @@
     <div class="modal-body">
       <div class="hint" id="bulk-act-count" style="margin-top:0"></div>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bact-enabled" style="width:auto" checked> Bật Auto Activity</label>
+      <div class="win-field" style="margin-top:6px"><label>Thời gian hoạt động</label>
+        <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="bact-always" style="width:auto" checked onchange="actAlwaysUI();actBulkPreview()"> Chạy 24/24</label>
+      </div>
       <div class="win-field" style="margin-top:6px"><label>Mẫu (template)</label>
         <select id="bact-template">
           <option value="">Giữ nguyên</option>
@@ -1720,7 +1781,7 @@
           <option value="HIGH">HIGH — dày</option>
         </select>
       </div>
-      <div class="win-row">
+      <div class="win-row" id="bact-window-row">
         <div class="win-field"><label>Hoạt động trong: từ</label><input type="time" id="bact-start" value="08:00" onchange="actBulkPreview()"></div>
         <div class="win-field"><label>đến</label><input type="time" id="bact-end" value="22:00" onchange="actBulkPreview()"></div>
       </div>
@@ -1735,11 +1796,12 @@
           </select>
         </div>
         <div class="win-field"><label>Chế độ</label>
-          <select id="bact-mode">
+          <select id="bact-mode" onchange="actModeHint();actBulkPreview()">
             <option value="maintain">Chỉ duy trì tab</option>
             <option value="search">Tab + tìm kiếm</option>
             <option value="full">Đầy đủ</option>
           </select>
+          <div class="hint" id="bact-mode-hint">Chỉ kiểm tra tab đã chọn, mở tab còn thiếu. Đủ tab rồi sẽ không mở thêm (xem lịch sử để biết đã chạy).</div>
         </div>
       </div>
       <div class="win-row hidden" id="bact-custom-row" style="margin-top:6px">
@@ -1974,5 +2036,6 @@
 <script src="assets/js/notify.js?v=<?= filemtime(__DIR__ . '/assets/js/notify.js') ?>"></script>
 <script src="assets/js/controlcenter.js?v=<?= filemtime(__DIR__ . '/assets/js/controlcenter.js') ?>"></script>
 <script src="assets/js/aidev.js?v=<?= filemtime(__DIR__ . '/assets/js/aidev.js') ?>"></script>
+<script src="assets/js/upload.js?v=<?= filemtime(__DIR__ . '/assets/js/upload.js') ?>"></script>
 </body>
 </html>

@@ -97,7 +97,54 @@ function set_setting(string $key, string $value): void
 
 function chrome_path(): string
 {
-    return get_setting('chrome_path', CHROME_DEFAULT_PATH);
+    try {
+        $cfg = get_setting('chrome_path', CHROME_DEFAULT_PATH);
+    } catch (Throwable $e) {
+        $cfg = CHROME_DEFAULT_PATH;
+    }
+    if ($cfg !== '' && is_file($cfg)) return $cfg;
+    // Discovery per-machine (PC khac co the cai cho khac): cache theo machine
+    static $found = null;
+    if ($found !== null) return $found;
+    $cands = [];
+    try {
+        $out = [];
+        @exec('reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe" /ve 2>NUL', $out);
+        foreach ($out as $line) {
+            if (preg_match('/REG_SZ\s+(.+\.exe)\s*$/i', trim($line), $m) && is_file(trim($m[1]))) {
+                $cands[] = trim($m[1]);
+            }
+        }
+    } catch (Throwable $e) {
+    }
+    foreach (['C:\Program Files\Google\Chrome\Application\chrome.exe',
+              'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'] as $p) {
+        $cands[] = $p;
+    }
+    try {
+        $local = getenv('LOCALAPPDATA') ?: '';
+        if ($local !== '') $cands[] = $local . '\Google\Chrome\Application\chrome.exe';
+    } catch (Throwable $e) {
+    }
+    foreach ($cands as $p) {
+        if (is_file($p)) {
+            $found = $p;
+            return $found;
+        }
+    }
+    // Khong thay: tra ve configured de caller bao loi ro (chrome_not_found)
+    $found = $cfg !== '' ? $cfg : CHROME_DEFAULT_PATH;
+    return $found;
+}
+
+/** Kiem tra Chrome executable that su ton tai (dung cho preflight/deploy check). */
+function chrome_available(): bool
+{
+    try {
+        return is_file(chrome_path());
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function proxy_timeout(): int
@@ -1462,7 +1509,22 @@ function delete_profile(array $p): void
     // 4. Xoa khung hinh daemon (frame.jpg, meta.json, daemon.log, daemon.pid, ctrl.json...)
     rrmdir(__DIR__ . '/android/frames/ch' . $id);
 
-    // 5. Xoa DB row (activity_logs.profile_id tu SET NULL on delete)
+    // 5. Xoa rows lien quan (activity/upload configs, queue, uploads, schedules).
+    // tab_sessions tu CASCADE theo FK; video_assets chung giua cac kenh -> GIU.
+    try {
+        foreach (['activity_configs' => 'profile_id', 'channel_upload_configs' => 'profile_id',
+                  'channel_video_queue' => 'profile_id', 'video_uploads' => 'profile_id',
+                  'video_publish_schedules' => 'profile_id', 'account_states' => 'profile_id',
+                  'account_history' => 'profile_id'] as $tb => $col) {
+            try {
+                db()->prepare("DELETE FROM $tb WHERE $col=?")->execute([$id]);
+            } catch (Throwable $e2) {
+            }
+        }
+    } catch (Throwable $e) {
+    }
+
+    // 6. Xoa DB row (activity_logs.profile_id tu SET NULL on delete)
     log_action($id, 'delete', 'Xoa profile (da xoa cache)');
     db()->prepare('DELETE FROM profiles WHERE id = ?')->execute([$id]);
 }

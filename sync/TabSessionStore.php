@@ -10,19 +10,53 @@ require_once __DIR__ . '/TabSessionManager.php';
 
 class TabSessionStore
 {
+    public const SNAPSHOT_VERSION = 2;
+
+    /** Cot generation/version/checksum (migrate lazy, khong mat du lieu cu). */
+    public static function ensureColumns(): void
+    {
+        static $done = false;
+        if ($done) return;
+        $done = true;
+        try {
+            $cols = [];
+            foreach (db()->query('SHOW COLUMNS FROM tab_sessions')->fetchAll() as $r) {
+                $cols[(string)$r['Field']] = true;
+            }
+            $add = ['generation' => 'INT NOT NULL DEFAULT 0',
+                'snapshot_version' => 'INT NOT NULL DEFAULT 1',
+                'checksum' => 'VARCHAR(64) NULL'];
+            foreach ($add as $col => $def) {
+                if (empty($cols[$col])) {
+                    try {
+                        db()->exec("ALTER TABLE tab_sessions ADD COLUMN $col $def");
+                    } catch (Throwable $e) {
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
     /**
      * Luu snapshot {tabs,active_index,fingerprint,good}.
      * - validate truoc: invalid (khong phai list) -> KHONG GHI GI ca (giu current+last_good).
+     * - EMPTY GUARD (§41): snapshot rong KHONG duoc xoa current dang co tabs
+     *   (late callback sau close tra [] -> giu last valid).
+     * - GENERATION (§13): snapshot gen cu hon stored -> IGNORE toan bo.
      * - current: skip khi fingerprint giong (khong ghi disk khi khong doi).
      * - last_good: CHI khi good.
-     * Tra ve ['savedCurrent'=>bool,'savedGood'=>bool].
+     * $opts: ['generation'=>int, 'phase'=>string]
+     * Tra ve ['savedCurrent'=>bool,'savedGood'=>bool,'reason'=>?string].
      */
-    public static function save(int $profileId, array $snap): array
+    public static function save(int $profileId, array $snap, array $opts = []): array
     {
+        self::ensureColumns();
         $now = date('Y-m-d H:i:s');
         $v = TabSessionManager::validate_session($snap['tabs'] ?? null);
         if (!$v['valid']) return ['savedCurrent' => false, 'savedGood' => false];
         $snap['tabs'] = $v['tabs'];
+        $gen = isset($opts['generation']) ? (int)$opts['generation'] : 0;
         // Tat "nho tab active" -> active_index luon 0 (tinh lai fingerprint de skip-save van dung)
         try {
             $ra = get_setting('tab_remember_active', '1');
@@ -33,6 +67,7 @@ class TabSessionStore
         } catch (Throwable $e) {
         }
         $tabsJson = json_encode($snap['tabs'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $checksum = md5($tabsJson . '|' . (string)($snap['fingerprint'] ?? ''));
         $savedCurrent = false;
         $savedGood = false;
         try {
@@ -43,26 +78,39 @@ class TabSessionStore
             }
             require_once __DIR__ . '/SyncLogger.php';
             SyncLogger::debug('tab_snapshot', "[SESSION SNAPSHOT] #$profileId\n" . implode("\n", $rawLines), $profileId);
-            // current: skip khi fingerprint giong (khong ghi disk khi khong doi)
             $cur = self::get($profileId, 'current');
+            // GENERATION: snapshot cu hon stored -> IGNORE (late callback may cu)
+            if ($gen > 0 && $cur !== null && (int)($cur['generation'] ?? 0) > $gen) {
+                return ['savedCurrent' => false, 'savedGood' => false, 'reason' => 'stale_generation'];
+            }
+            $curCount = $cur !== null ? count((array)($cur['tabs'] ?? [])) : 0;
+            // EMPTY GUARD: snapshot rong khong duoc xoa current dang co tabs
+            if (count($snap['tabs']) === 0 && $curCount > 0) {
+                return ['savedCurrent' => false, 'savedGood' => false, 'reason' => 'empty_guarded'];
+            }
+            // current: skip khi fingerprint giong (khong ghi disk khi khong doi)
             if ($cur === null || ($cur['fingerprint'] ?? null) !== $snap['fingerprint']) {
                 db()->prepare(
-                    'INSERT INTO tab_sessions (profile_id, kind, saved_at, active_index, tabs, fingerprint)
-                     VALUES (?,?,?,?,?,?)
+                    'INSERT INTO tab_sessions (profile_id, kind, saved_at, active_index, tabs, fingerprint, generation, snapshot_version, checksum)
+                     VALUES (?,?,?,?,?,?,?,?,?)
                      ON DUPLICATE KEY UPDATE saved_at=VALUES(saved_at), active_index=VALUES(active_index),
-                     tabs=VALUES(tabs), fingerprint=VALUES(fingerprint)'
-                )->execute([$profileId, 'current', $now, (int)$snap['active_index'], $tabsJson, $snap['fingerprint']]);
+                     tabs=VALUES(tabs), fingerprint=VALUES(fingerprint), generation=VALUES(generation),
+                     snapshot_version=VALUES(snapshot_version), checksum=VALUES(checksum)'
+                )->execute([$profileId, 'current', $now, (int)$snap['active_index'], $tabsJson, $snap['fingerprint'],
+                    $gen, self::SNAPSHOT_VERSION, $checksum]);
                 $savedCurrent = true;
             }
             if (!empty($snap['good'])) {
                 $lg = self::get($profileId, 'last_good');
                 if ($lg === null || ($lg['fingerprint'] ?? null) !== $snap['fingerprint']) {
                     db()->prepare(
-                        'INSERT INTO tab_sessions (profile_id, kind, saved_at, active_index, tabs, fingerprint)
-                         VALUES (?,?,?,?,?,?)
+                        'INSERT INTO tab_sessions (profile_id, kind, saved_at, active_index, tabs, fingerprint, generation, snapshot_version, checksum)
+                         VALUES (?,?,?,?,?,?,?,?,?)
                          ON DUPLICATE KEY UPDATE saved_at=VALUES(saved_at), active_index=VALUES(active_index),
-                         tabs=VALUES(tabs), fingerprint=VALUES(fingerprint)'
-                    )->execute([$profileId, 'last_good', $now, (int)$snap['active_index'], $tabsJson, $snap['fingerprint']]);
+                         tabs=VALUES(tabs), fingerprint=VALUES(fingerprint), generation=VALUES(generation),
+                         snapshot_version=VALUES(snapshot_version), checksum=VALUES(checksum)'
+                    )->execute([$profileId, 'last_good', $now, (int)$snap['active_index'], $tabsJson, $snap['fingerprint'],
+                        $gen, self::SNAPSHOT_VERSION, $checksum]);
                     $savedGood = true;
                 }
             }
@@ -71,20 +119,30 @@ class TabSessionStore
         return ['savedCurrent' => $savedCurrent, 'savedGood' => $savedGood];
     }
 
-    /** Doc session (kind current|last_good). Tra ve null neu chua co. */
+    /** Doc session (kind current|last_good). Tra ve null neu chua co/corrupt/checksum lech. */
     public static function get(int $profileId, string $kind = 'current'): ?array
     {
         try {
-            $st = db()->prepare('SELECT profile_id, kind, saved_at, active_index, tabs, fingerprint
-                                 FROM tab_sessions WHERE profile_id=? AND kind=?');
+            self::ensureColumns();
+            $st = db()->prepare('SELECT profile_id, kind, saved_at, active_index, tabs, fingerprint,
+                    generation, snapshot_version, checksum
+                    FROM tab_sessions WHERE profile_id=? AND kind=?');
             $st->execute([$profileId, $kind]);
             $r = $st->fetch();
             if (!$r) return null;
             $tabs = json_decode((string)($r['tabs'] ?? '[]'), true);
+            if (!is_array($tabs)) return null;
+            // Checksum: chi verify khi co (du lieu cu khong co van dung duoc)
+            if (!empty($r['checksum'])) {
+                $expect = md5((string)($r['tabs'] ?? '') . '|' . (string)($r['fingerprint'] ?? ''));
+                if (!hash_equals((string)$r['checksum'], $expect)) return null;
+            }
             return [
                 'profile_id' => (int)$r['profile_id'], 'kind' => $r['kind'],
                 'saved_at' => $r['saved_at'], 'active_index' => (int)$r['active_index'],
-                'tabs' => is_array($tabs) ? $tabs : [], 'fingerprint' => $r['fingerprint'],
+                'tabs' => $tabs, 'fingerprint' => $r['fingerprint'],
+                'generation' => (int)($r['generation'] ?? 0),
+                'snapshot_version' => (int)($r['snapshot_version'] ?? 1),
             ];
         } catch (Throwable $e) {
             return null;

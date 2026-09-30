@@ -221,7 +221,11 @@ class TabBatchManager
         // Save session 1 LAN cuoi (khong save tung tab)
         try {
             $snap = TabSessionStore::snapshotLive($profileId, $port, false);
-            if ($snap !== null) TabSessionStore::save($profileId, $snap);
+            if ($snap !== null) {
+                require_once __DIR__ . '/ChromeBatchManager.php';
+                TabSessionStore::save($profileId, $snap,
+                    ['generation' => ChromeBatchManager::currentGeneration($profileId), 'phase' => 'TAB_BATCH']);
+            }
         } catch (Throwable $e) {
         }
         $msTotal = (int)round((microtime(true) - $t0) * 1000);
@@ -271,7 +275,11 @@ class TabBatchManager
         $mgr->disconnect();
         try {
             $snap = TabSessionStore::snapshotLive($profileId, $port, false);
-            if ($snap !== null) TabSessionStore::save($profileId, $snap);
+            if ($snap !== null) {
+                require_once __DIR__ . '/ChromeBatchManager.php';
+                TabSessionStore::save($profileId, $snap,
+                    ['generation' => ChromeBatchManager::currentGeneration($profileId), 'phase' => 'TAB_BATCH']);
+            }
         } catch (Throwable $e) {
         }
         $msTotal = (int)round((microtime(true) - $t0) * 1000);

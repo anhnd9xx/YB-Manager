@@ -105,6 +105,30 @@ function Get-Monitors {
 }
 
 $monitors = Get-Monitors
+$monitorEnumMethod = 'EnumDisplayMonitors'
+# FALLBACK PORTABLE: neu P/Invoke enum ra 0 (ConstrainedLanguage, .NET loi,
+# Session 0) thi dung System.Windows.Forms.Screen (khong can Add-Type).
+if ($monitors.Count -eq 0) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $fb = @()
+        $i = 0
+        foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+            $i++
+            $b = $s.Bounds; $w = $s.WorkingArea
+            $fb += [ordered]@{
+                id = $i
+                handle = 0
+                name = if ($s.DeviceName) { $s.DeviceName } else { "DISPLAY$i" }
+                resolution = @{ w = $b.Width; h = $b.Height }
+                workArea = @{ x = $w.X; y = $w.Y; w = $w.Width; h = $w.Height }
+                dpi = @{ x = 96; y = 96 }
+                primary = [bool]$s.Primary
+            }
+        }
+        if ($fb.Count -gt 0) { $monitors = $fb; $monitorEnumMethod = 'FormsScreen' }
+    } catch {}
+}
 # Map handle -> monitor id de gan window vao monitor
 $monMap = @{}
 foreach ($m in $monitors) { $monMap[[string]$m.handle] = $m.id }
@@ -206,6 +230,14 @@ foreach ($pk in $byPid.Keys) {
     }
 }
 
-$result = [ordered]@{ processes = $procs; windows = $wins; monitors = $monitors }
+$result = [ordered]@{ processes = $procs; windows = $wins; monitors = $monitors; monitorEnumMethod = $monitorEnumMethod }
 try { $result['foregroundHwnd'] = [W32]::GetForegroundWindow().ToInt64() } catch { $result['foregroundHwnd'] = 0 }
+# Session diagnostics (Session 0 / service / RDP troubleshooting)
+try {
+    $p = [System.Diagnostics.Process]::GetCurrentProcess()
+    $result['session'] = [ordered]@{
+        processSession = $p.SessionId
+        username = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+} catch { $result['session'] = [ordered]@{ processSession = -1; username = '' } }
 $result | ConvertTo-Json -Depth 6 -Compress

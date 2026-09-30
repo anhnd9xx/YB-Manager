@@ -24,7 +24,8 @@ function storedPerPage(key, fb) {
 const api = 'api/';
 const VIEW_TITLES = {
   dashboard: 'Tổng quan', controlcenter: 'Trung tâm điều hành', aidev: 'AI Dev Console', profiles: 'Kênh', monitoring: 'Thống kê & Theo dõi', proxies: 'Proxy',
-  synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt', notify: 'Thông báo & Báo cáo'
+  synchronize: 'Synchronize', logs: 'Nhật ký', settings: 'Cài đặt', notify: 'Thông báo & Báo cáo',
+  upload: 'Upload Video'
 };
 
 // ============ INIT ============
@@ -117,6 +118,7 @@ function switchView(view) {
   if (view === 'settings') loadSettings();
   if (view === 'proxies') loadProxies();
   if (view === 'notify' && typeof notifyRefresh === 'function') notifyRefresh();
+  if (view === 'upload' && typeof upInit === 'function') upInit();
   // đóng sidebar trên mobile nếu đang mở
   if (document.body.classList.contains('sidebar-open')) document.body.classList.remove('sidebar-open');
 }
@@ -493,6 +495,7 @@ function openArrangeDrawer() {
   arrEnsureCfg();
   arrFillMonitors();
   arrPaint();
+  arrMonDiag();
   return false;
 }
 function closeArrangeDrawer() {
@@ -564,6 +567,53 @@ async function arrangeCall(payload) {
   window.__ytmArranging = false;
 }
 // ============ ARRANGE PANEL (nhom: pham vi / bo cuc / man hinh / tuy chon) ============
+// Chan doan man hinh portable (khong bao gio throw ra UI)
+async function arrMonDiag() {
+  const el = $('arr-mon-diag');
+  if (el) el.textContent = 'Đang quét...';
+  try {
+    const r = await getJson(api + 'syncwin.php?action=monitors_diag');
+    if (!r.ok) { if (el) el.textContent = 'Lỗi chẩn đoán.'; return; }
+    const d = r.data || {};
+    const mons = d.monitors || [];
+    if (!mons.length) {
+      const s = d.session || {};
+      if (el) el.textContent = `Không phát hiện màn hình (enum=${d.enum_method || '?'}`
+        + `, process session=${s.processSession ?? s.process_session ?? '?'})`
+        + ` — kiểm tra PowerShell/session Windows.`;
+      return;
+    }
+    if (el) el.textContent = `Phát hiện: ${mons.length} màn hình\n` + mons.map(m =>
+      `${m.device} · work ${m.work}${m.primary ? ' · Chính' : ''} · DPI ${m.dpi}`).join('\n');
+  } catch (e) {
+    if (el) el.textContent = 'Lỗi kết nối.';
+  }
+}
+async function arrMonRescan() {
+  const el = $('arr-mon-diag');
+  if (el) el.textContent = 'Đang quét lại...';
+  try {
+    const r = await getJson(api + 'syncwin.php?action=monitors_refresh');
+    if (r.ok && r.data && r.data.diag) {
+      const d = r.data.diag;
+      // Repopulate dropdown + cache profile (khong restart Tool)
+      try {
+        const list = (r.data.monitors || []).map(m => ({
+          id: m.runtime_id || m.index, name: m.device_name,
+          primary: !!m.is_primary,
+          resolution: m.bounds ? { w: m.bounds.w, h: m.bounds.h } : null,
+        }));
+        cachedMonitors = list;
+        arrFillMonitors();
+        pfFillMonitorSelect($('pf-monitor-fixed'), list, $('pf-monitor-fixed') ? $('pf-monitor-fixed').value : '');
+      } catch (e) {}
+      toast(`Đã quét: ${(d.monitors || []).length} màn hình`, 'success');
+    } else {
+      toast('Quét thất bại', 'error');
+    }
+  } catch (e) { toast('Lỗi kết nối', 'error'); }
+  arrMonDiag();
+}
 function arrDefaultCfg() {
   return { scope: 'visible', mode: 'smart_auto', monitor: 'settings', taskbar: true, uniform: true, autofit: true, skipmin: false, focus: true, size: 'auto', density: 'balanced', cols: 0 };
 }
@@ -614,10 +664,33 @@ function arrPaint() {
   set('arr-opt-focus', cfg.focus);
   if ($('arr-size')) $('arr-size').value = cfg.size || 'auto';
   if ($('arr-density')) $('arr-density').value = cfg.density || 'balanced';
+  const n = arrScopeIds().length;
+  const ab = $('arr-apply-btn');
+  if (ab) ab.textContent = n > 0 ? `✓ Áp dụng cho ${n} cửa sổ` : '✓ Áp dụng';
   arrPaintPreview();
   arrPaintPresets();
 }
+// Preview THẬT: dung chinh engine (dryRun) -> preview == actual.
+// Debounce de khong spam request khi user doi option lien tuc.
+let arrPrevTimer = null, arrPrevSeq = 0;
 function arrPaintPreview() {
+  const box = $('arr-preview');
+  if (!box) return;
+  arrPaintPreviewFallback();
+  clearTimeout(arrPrevTimer);
+  const seq = ++arrPrevSeq;
+  arrPrevTimer = setTimeout(async () => {
+    let p = null;
+    try { p = arrBuildPayload({ dryRun: true }); } catch (e) { return; }
+    if (!p) return;
+    try {
+      const res = await sendJson(api + 'syncwin.php?action=arrange', p);
+      if (seq !== arrPrevSeq || !res.ok || !res.plan) return;
+      arrPaintPreviewReal(res);
+    } catch (e) { /* giu fallback */ }
+  }, 450);
+}
+function arrPaintPreviewFallback() {
   const box = $('arr-preview');
   if (!box) return;
   const cfg = arrEnsureCfg();
@@ -640,6 +713,61 @@ function arrPaintPreview() {
   }
   box.style.display = 'flex';
   box.innerHTML = html;
+}
+function arrPaintPreviewReal(res) {
+  const box = $('arr-preview');
+  if (!box) return;
+  const plan = res.plan || {};
+  const sum = planSummaryOf(plan);
+  const perMon = sum.perMonitor || {};
+  const mons = Object.keys(perMon);
+  const cell = sum.cellMin || { w: 0, h: 0 };
+  let html = `<div style="font-size:12px;margin-bottom:6px">${(plan.slots || []).length} cửa sổ`
+    + (mons.length ? ` · ${mons.map(m => `M${m}: ${perMon[m]}`).join(' · ')}` : '')
+    + (cell.w ? ` · ${cell.w}×${cell.h}` : '')
+    + (sum.noOverlap === false ? ' · ⚠ chồng lấn' : ' · ✓ không chồng lấn')
+    + (plan.tooSmall ? ' · <b>⚠ cửa sổ rất nhỏ</b>' : '')
+    + `</div>`;
+  const bd = plan.breakdown && plan.breakdown.length ? plan.breakdown : null;
+  if (bd) {
+    html += bd.map(b => {
+      const n = Math.min(b.count, 12);
+      const cols = Math.max(1, b.cols || 1);
+      let cells = '';
+      for (let i = 0; i < n; i++) cells += '<span class="mp"></span>';
+      if (b.count > 12) cells += `<span style="font-size:11px">+${b.count - 12}</span>`;
+      return `<div style="font-size:11px;margin:2px 0 2px">Màn ${b.monitorId} (${b.count})</div>`
+        + `<div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:2px;margin-bottom:4px">${cells}</div>`;
+    }).join('');
+  } else {
+    const n = Math.min((plan.slots || []).length, 12);
+    let cells = '';
+    for (let i = 0; i < n; i++) cells += '<span class="mp"></span>';
+    html += `<div style="display:grid;grid-template-columns:repeat(${Math.max(1, plan.cols || 1)},1fr);gap:2px">${cells}</div>`;
+  }
+  box.style.display = 'block';
+  box.innerHTML = html;
+}
+function planSummaryOf(plan) {
+  if (plan.perMonitor) return plan;
+  const perMonitor = {};
+  let mw = 0, mh = 0;
+  (plan.slots || []).forEach(s => {
+    const m = String(s.monitorId || '?');
+    perMonitor[m] = (perMonitor[m] || 0) + 1;
+    if (s.w > 0 && (mw === 0 || s.w < mw)) mw = s.w;
+    if (s.h > 0 && (mh === 0 || s.h < mh)) mh = s.h;
+  });
+  return { perMonitor, cellMin: { w: mw, h: mh }, noOverlap: undefined };
+}
+async function arrUndo() {
+  try {
+    const res = await sendJson(api + 'syncwin.php?action=arrange_undo', {});
+    toast(res.message || (res.ok ? 'Đã hoàn tác' : 'Không hoàn tác được'), res.ok ? 'success' : 'error');
+    arrangeResultMsg((res.ok ? '← ' : '✗ ') + (res.message || ''), res.ok ? true : false);
+  } catch (e) {
+    toast('Lỗi kết nối khi hoàn tác', 'error');
+  }
 }
 function arrSelectMode(m) {
   const cfg = arrEnsureCfg();
@@ -720,8 +848,8 @@ function arrApplyPresetCols(n) {
   arrangeCall(base);
 }
 function arrApplyPresetCells(n) {
-  // "N o/man": grid voi so cot gan voi can bac 2 (4->2x2, 6->3x2, 8->4x2, 12->4x3)
-  const cols = n <= 4 ? 2 : (n <= 6 ? 3 : 4);
+  // "N o/man": moi monitor toi da N o (backend phan phoi + overflow),
+  // khong don tat ca vao 1 man hinh.
   const cfg = arrEnsureCfg();
   cfg.mode = 'grid';
   cfg.cols = 0;
@@ -730,7 +858,9 @@ function arrApplyPresetCells(n) {
   const base = arrBuildPayload();
   if (!base) return;
   base.mode = 'grid';
-  base.cols = cols;
+  delete base.cols;
+  base.slotsPerMonitor = n;
+  base.monitor = 'all';
   arrSaveLast();
   arrPaint();
   closeArrangeDrawer();
@@ -813,10 +943,13 @@ function renderPreviewModal(res) {
   const plan = res.plan;
   const bd = plan.breakdown && plan.breakdown.length ? plan.breakdown
     : [{ monitorId: (plan.monitors || [])[0], count: (plan.slots || []).length, rows: plan.rows, cols: plan.cols, cellW: plan.cellW, cellH: plan.cellH }];
+  const sum = planSummaryOf(plan);
   $('preview-summary').textContent =
     `${(plan.slots || []).length} cửa sổ · ${plan.cols}x${plan.rows}` +
     (plan.fallbackUsed ? ` (dự phòng ${plan.fallbackUsed})` : '') +
-    ((res.missingMonitors && res.missingMonitors.length) ? ` · thiếu màn hình: ${res.missingMonitors.join(',')}` : '');
+    ((res.missingMonitors && res.missingMonitors.length) ? ` · thiếu màn hình: ${res.missingMonitors.join(',')}` : '') +
+    (plan.tooSmall ? ' · ⚠ cửa sổ sẽ rất nhỏ (thêm màn hình / tăng mật độ)' : '') +
+    (sum.noOverlap === false ? ' · ⚠ chồng lấn' : ' · ✓ không chồng lấn');
   const liveWins = (res.session && res.session.windows ? res.session.windows : []);
   let html = '';
   let si = 0;
@@ -894,7 +1027,7 @@ async function batchOpenIds(ids, btnId, label) {
   const ui = batchBtn(btnId, label || 'Đang mở');
   window.__ytmBulkOp = true; // freeze reflow/arrange xen vao (§34-§35)
   startBulkTracker();
-  let launched = 0, failed = 0, stable = 0;
+  let launched = 0, failed = 0, stable = 0, failedIds = [];
   try {
     const prep = await sendJson(api + 'browser.php?action=batch_open_prepare', { ids });
     if (!prep.ok) { toast(prep.message || 'Lỗi tạo batch mở', 'error'); return { ok: 0, fail: ids.length }; }
@@ -918,21 +1051,26 @@ async function batchOpenIds(ids, btnId, label) {
       if (ch.data.done) break;
     }
     // Verify poll: HWND ready + placement stable + tab verify (không chờ website load)
-    const vDeadline = Date.now() + 45000;
+    // Progress hien VERIFIED (stable), khong hien dispatched — tranh 32/32 gia.
+    const vDeadline = Date.now() + 60000;
     for (;;) {
       let poll = null;
       try { poll = await getJson(api + `browser.php?action=batch_open_poll&batch_id=${batchId}`); } catch (e) {}
       if (poll && poll.ok && poll.data && poll.data.counts) {
         const c = poll.data.counts;
-        stable = c.stable || 0;
-        if (btnId) { const b = $(btnId); if (b) b.textContent = `◌ ${label || 'Đang mở'} ${c.windows || 0}/${total}`; }
+        stable = c.stable || c.verified_running || 0;
+        failed = c.failed || c.errors || failed;
+        if (poll.data.failed_ids) failedIds = poll.data.failed_ids;
+        if (btnId) { const b = $(btnId); if (b) b.textContent = `◌ ${label || 'Đang mở'} ${stable}/${total}`; }
         if (poll.data.done) break;
       }
       if (Date.now() > vDeadline) break;
       await sleep(800);
     }
     markProfileChanged();
-    return { ok: launched, fail: failed, stable, batch_id: batchId, total };
+    // ok = VERIFIED (khong phai dispatched). fail = con lai (chua verified + loi).
+    const failCount = Math.max(failed, total - stable);
+    return { ok: stable, fail: failCount, stable, launched, batch_id: batchId, total, failedIds };
   } finally {
     window.__ytmBulkOp = false;
     stopBulkTracker();
@@ -944,7 +1082,8 @@ async function openSelected() {
   const ids = getSelectedIds();
   const r = await batchOpenIds(ids, null, 'Đang mở');
   if (r.cancelled) { toast('Đã hủy mở hàng loạt', 'error'); refreshAll(); return; }
-  toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+  const total = r.total || ids.length;
+  toast(r.fail ? `Hoạt động ${r.ok}/${total} — ${r.fail} lỗi (Thử lại kênh lỗi)` : `Đã mở ${r.ok}/${total} kênh`, r.fail ? 'error' : 'success');
   clearProfileSelection();
   refreshAll();
   await autoArrangeAfterLaunch(ids);
@@ -1602,14 +1741,22 @@ function actBulkRender() {
     btn.textContent = n ? `Gán ${n} kênh` : 'Gán cho đã chọn';
     btn.disabled = !n;
   }
-  // Dem kenh da co lich (upsert warning §37)
+  actAlwaysUI();
+  // Dem kenh da co lich (upsert warning §37) + CTA dong theo new/update
   getJson(api + 'activity.php?action=bulk_existing&ids=' + encodeURIComponent(actBulkIds.join(',')))
     .then(r => {
       const el = $('bulk-act-exist');
       if (!el) return;
       const ex = (r.ok && r.data) ? r.data.existing : 0;
+      const nw = n - ex;
       el.textContent = ex ? `${ex}/${n} kênh đã có lịch — cấu hình sẽ được cập nhật (không tạo trùng).`
         : 'Chưa kênh nào có lịch.';
+      const btn2 = $('bulk-act-save-btn');
+      if (btn2) {
+        if (ex === 0) btn2.textContent = `Gán ${n} kênh`;
+        else if (nw === 0) btn2.textContent = `Cập nhật ${n} kênh`;
+        else btn2.textContent = `Áp dụng cho ${n} kênh (mới ${nw} · cập nhật ${ex})`;
+      }
     }).catch(() => {});
   actBulkPreview();
 }
@@ -1636,9 +1783,15 @@ function actBulkCycle() {
   if ($('bact-custom-unit').value === 'h') n *= 60;
   return Math.max(1, Math.min(1440, Math.round(n)));
 }
+function actAlwaysUI() {
+  const on = $('bact-always') ? $('bact-always').checked : true;
+  const row = $('bact-window-row');
+  if (row) row.classList.toggle('hidden', !!on);
+}
 function actBulkPreview() {
   const el = $('bulk-act-preview');
   if (!el) return;
+  const always = $('bact-always') ? $('bact-always').checked : true;
   const pages = [];
   document.querySelectorAll('#bact-presets input[data-preset]:checked').forEach(cb => pages.push(cb.dataset.preset));
   let cycTxt = $('bact-interval').value === 'custom'
@@ -1646,8 +1799,11 @@ function actBulkPreview() {
       ? `ngẫu nhiên ${$('bact-rand-min').value}–${$('bact-rand-max').value} phút`
       : `mỗi ${actBulkCycle()} phút`)
     : `mỗi ${$('bact-interval').value} phút`;
-  el.innerHTML = `${escapeHtml($('bact-start').value)} → ${escapeHtml($('bact-end').value)} · ${cycTxt}<br>`
-    + `${pages.length} tab duy trì · ${actBulkIds.length} profiles`;
+  const lm = (document.querySelector('input[name=bact-listmode]:checked') || {}).value || 'keep';
+  const customN = lm === 'keep' ? 'giữ nguyên'
+    : (($('bact-custom-urls').value || '').split('\n').map(s => s.trim()).filter(Boolean).length + ' URL (' + lm + ')');
+  el.innerHTML = `${always ? '24/24' : (escapeHtml($('bact-start').value) + ' → ' + escapeHtml($('bact-end').value))} · ${cycTxt}<br>`
+    + `${pages.length} tab duy trì · custom: ${customN} · ${actBulkIds.length} profiles`;
 }
 async function actBulkSave() {
   const ids = actBulkIds; // SNAPSHOT — khong query lai store
@@ -1663,6 +1819,7 @@ async function actBulkSave() {
     if (btn) { btn.disabled = true; btn.textContent = `Đang lưu lịch... 0/${ids.length}`; }
     const payload = { ids, patch: {
       enabled: $('bact-enabled').checked ? 1 : 0,
+      schedule_mode: ($('bact-always') && $('bact-always').checked) ? 'ALWAYS' : 'WINDOW',
       schedule_start: $('bact-start').value,
       schedule_end: $('bact-end').value,
       interval_minutes: Number($('bact-interval').value),
@@ -2067,9 +2224,30 @@ async function actLoad(id) {
     actRenderCustom();
     actPlanLoad(id);
     actPoolLoad();
+    actModeHint();
     const note = $('act-save-note');
-    if (note) note.textContent = c.last_run_at ? `Chạy lần cuối: ${c.last_run_at}` : '';
+    if (note) {
+      const last = c.last_run_at ? `Chạy cuối: ${c.last_run_at}` : 'Chưa chạy lần nào';
+      const next = c.next_run_at ? ` · Tiếp: ${c.next_run_at}` : '';
+      const ver = c.config_version ? ` · v${c.config_version}` : '';
+      note.textContent = last + next + ver;
+    }
   } catch (e) {}
+}
+function actModeHint() {
+  const v = $('act-mode') ? $('act-mode').value : 'maintain';
+  const el = $('act-mode-hint');
+  if (!el) return;
+  el.textContent = v === 'maintain'
+    ? 'Chỉ kiểm tra tab đã chọn, mở tab còn thiếu. Đủ tab rồi sẽ không mở thêm.'
+    : (v === 'full' ? 'Duy trì tab + chạy link theo lịch.' : 'Duy trì tab + tìm kiếm Google.');
+  const b = $('bact-mode-hint');
+  const bv = $('bact-mode') ? $('bact-mode').value : 'maintain';
+  if (b) {
+    b.textContent = bv === 'maintain'
+      ? 'Chỉ kiểm tra tab đã chọn, mở tab còn thiếu. Đủ tab rồi sẽ không mở thêm (xem lịch sử để biết đã chạy).'
+      : (bv === 'full' ? 'Duy trì tab + chạy link theo lịch.' : 'Duy trì tab + tìm kiếm Google.');
+  }
 }
 function actRenderCustom() {
   const el = $('act-custom-list');
@@ -2294,6 +2472,16 @@ async function actSearchBulk(op) {
   toast(r.ok ? 'Xong.' : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
   actSearchTable();
 }
+async function actWebAdd() {
+  const inp = $('act-web-url');
+  const url = (inp ? inp.value : '').trim();
+  if (!url) { toast('Nhập URL trước', 'error'); return; }
+  const r = await sendJson(api + 'activity.php?action=website_save', { url });
+  if (!r.ok) { toast(r.message || 'URL không hợp lệ', 'error'); return; }
+  if (inp) inp.value = '';
+  toast('Đã thêm website', 'success');
+  actWebTable();
+}
 async function actWebTest(id, btn) {
   if (btn) btn.textContent = '...';
   const r = await getJson(api + `activity.php?action=website_test&id=${id}`);
@@ -2387,10 +2575,27 @@ async function actSave() {
 async function actRunNow() {
   const id = Number($('pf-id').value);
   if (!id) { toast('Mở sửa kênh trước', 'error'); return; }
-  toast('Đang chạy activity...', '');
-  const r = await sendJson(api + 'activity.php?action=run', { id });
-  const tasks = (r.data && r.data.tasks ? r.data.tasks : [r.data]).map(t => (t && t.result) || '?').join(', ');
-  toast(r.ok ? `Xong: ${tasks}` : (r.message || 'Lỗi'), r.ok ? 'success' : 'error');
+  toast('Đang chạy thử activity...', '');
+  const note = $('act-save-note');
+  try {
+    const r = await sendJson(api + 'activity.php?action=run_now', { id });
+    if (!r.ok) {
+      toast(r.message || 'Lỗi', 'error');
+      if (note && r.data) {
+        note.textContent = `Chrome: ${r.data.chrome_running ? 'RUNNING' : 'STOPPED'} · CDP: ${r.data.cdp_ready ? 'READY' : 'NOT READY'}`;
+      }
+      return;
+    }
+    const d = r.data || {};
+    const tabLines = (d.tabs || []).map(x => `${x.label}: ${x.result}`).join(' · ');
+    if (note) {
+      note.textContent = `TEST OK · Mode ${d.mode} · ${d.required} required · ${tabLines} · ${d.ms}ms`
+        + (d.next_run_at ? ` · Tiếp: ${d.next_run_at}` : '');
+    }
+    toast(`Chạy thử ${d.result}: ${tabLines}`, d.result === 'SUCCESS' ? 'success' : 'error');
+  } catch (e) {
+    toast('Lỗi kết nối', 'error');
+  }
   actLoad(id);
 }
 
@@ -2675,7 +2880,7 @@ async function openAllProfiles() {
   const r = await batchOpenIds(ids, 'btn-open-all', 'Đang mở');
   if (r.cancelled) { toast('Đã hủy mở tất cả', 'error'); refreshAll(); return; }
   markProfileChanged();
-  toast(`Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
+  toast(r.fail ? `Hoạt động ${r.ok}/${ids.length} — ${r.fail} lỗi (Thử lại kênh lỗi)` : `Đã mở ${r.ok}/${ids.length} kênh`, r.fail ? 'error' : 'success');
   refreshAll();
   await autoArrangeAfterLaunch(ids);
 }

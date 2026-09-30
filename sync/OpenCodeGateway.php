@@ -98,12 +98,19 @@ class OpenCodeGateway
     /** Cho den idle: 204=idle, 503=busy. @return array{idle} */
     public static function waitIdle(string $sessionId, int $timeoutSec = 120): array
     {
+        // Giu headroom so voi max_execution_time de khong fatal giua request
+        $maxExec = (int)ini_get('max_execution_time');
+        if ($maxExec > 0) {
+            $timeoutSec = min($timeoutSec, max(10, $maxExec - 15));
+        }
         $t0 = microtime(true);
         while ((microtime(true) - $t0) < $timeoutSec) {
-            $r = self::post('/api/session/' . $sessionId . '/wait', (object)[], 30);
+            $remain = (int)max(5, $timeoutSec - (microtime(true) - $t0));
+            $r = self::post('/api/session/' . $sessionId . '/wait', (object)[], min(30, $remain));
             if (!empty($r['ok']) && ($r['http'] ?? 0) === 204) return ['idle' => true];
             if (!empty($r['ok'])) return ['idle' => true]; // 200 bat thuong -> coi nhu xong
             if (($r['http'] ?? 0) === 404) return ['idle' => false];
+            if ((microtime(true) - $t0) + 5 >= $timeoutSec) break;
             sleep(5); // busy/timeout -> cho, khong hammer server
         }
         return ['idle' => false];

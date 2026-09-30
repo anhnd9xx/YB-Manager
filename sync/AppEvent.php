@@ -40,6 +40,7 @@ class AppEvent
     public const MOD_EVALUATION = 'EVALUATION';
     public const MOD_PROXY = 'PROXY';
     public const MOD_AUTO_ACTIVITY = 'AUTO_ACTIVITY';
+    public const MOD_UPLOAD = 'UPLOAD';
     public const MOD_SYNCHRONIZE = 'SYNCHRONIZE';
     public const MOD_MONITORING = 'MONITORING';
     public const MOD_SYSTEM = 'SYSTEM';

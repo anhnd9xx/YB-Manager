@@ -242,6 +242,46 @@ class JobManager
         }
     }
 
+    /** Worker PID trong pid file co phai php dang song khong. */
+    public static function workerAlive(): bool
+    {
+        try {
+            $f = __DIR__ . '/../bin/.job_worker.pid';
+            if (!is_file($f)) return false;
+            $pid = (int)trim((string)@file_get_contents($f));
+            if ($pid <= 0) return false;
+            $out = [];
+            @exec('tasklist /FI "PID eq ' . $pid . '" /FO CSV /NH 2>NUL', $out);
+            foreach ($out as $line) {
+                if (preg_match('/^"([^"]+)","\s*' . $pid . '\b/', trim($line), $m)
+                    && stripos($m[1], 'php') !== false) {
+                    return true;
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        return false;
+    }
+
+    /** Dam bao job worker chay (singleton nho flock trong worker). Khong spawn thua. */
+    public static function ensureWorker(): bool
+    {
+        try {
+            if (self::workerAlive()) return true;
+            $php = php_cli_binary();
+            if ($php === '') return false;
+            pclose(popen('start "" /B "' . $php . '" -f "' . __DIR__ . '/../bin/job_worker.php'
+                . '" >> "' . __DIR__ . '/../bin/job_worker.log" 2>&1', 'r'));
+            for ($i = 0; $i < 6; $i++) {
+                usleep(500000);
+                if (self::workerAlive()) return true;
+            }
+            return self::workerAlive();
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
     /** Hoan tat job + emit JOB_COMPLETED/JOB_FAILED (§18, §38). Ton trong notify flags. */
     public static function finish(string $jobId, string $status, ?string $result = null, ?string $error = null, ?string $errorCode = null): void
     {

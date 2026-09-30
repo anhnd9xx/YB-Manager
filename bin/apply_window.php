@@ -253,16 +253,25 @@ if ($r['ok']) {
     foreach ($checks as $ms) {
         usleep(max(0, ($ms - $prev) * 1000));
         $prev = $ms;
-        // Stale check: guard bi start moi hon overwrite -> worker cu exit
+        // Stale check: guard bi start moi hon overwrite -> worker cu exit.
+        // Guard may khac (copy %TEMP%) -> exit luon.
         try {
             $gf = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_guard_' . $profileId . '.json';
             if (is_file($gf)) {
                 $cur = json_decode((string)@file_get_contents($gf), true);
                 $curBatch = is_array($cur) ? (string)($cur['batch_id'] ?? '') : '';
                 $curGen = is_array($cur) && isset($cur['generation']) ? (int)$cur['generation'] : null;
+                $curMach = is_array($cur) ? (string)($cur['machine'] ?? '') : '';
                 if ($curBatch !== $myBatch || $curGen !== $myGen) {
                     aw_log('[Window] Guard doi (batch/gen moi) -> worker cu exit', $profileId);
                     exit(0);
+                }
+                if ($curMach !== '') {
+                    require_once __DIR__ . '/../sync/MachineContext.php';
+                    if (!MachineContext::isCurrent($cur)) {
+                        aw_log('[Window] Guard may khac -> exit', $profileId);
+                        exit(0);
+                    }
                 }
             } else {
                 // Guard bi xoa (cancel/stop) -> exit

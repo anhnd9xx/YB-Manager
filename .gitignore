@@ -25,3 +25,14 @@ android/frames/
 .DS_Store
 # Shortcut taskbar sinh tu bin/build_shortcuts.php - rieng tung may
 shortcuts/
+
+# Runtime process files (pid/lock/heartbeat) - rieng tung may, khong commit
+bin/.*.pid
+bin/.*.lock
+bin/.*.hb
+
+# Archive ca nhan
+*.rar
+
+# Worktrees phu
+.worktrees/

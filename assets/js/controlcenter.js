@@ -39,6 +39,7 @@ async function ccRefresh(force) {
     ccRenderSched(d.upcoming || []);
     ccRenderRes(d.resources || {});
     ccRenderActWidget(d.auto_activity || null);
+    ccRenderUploadWidget(d.video_upload || null);
     ccRenderActivity(d.activity || []);
     const ov = d.overall || {};
     const el = $('cc-overall');
@@ -417,11 +418,26 @@ function ccRenderRes(rs) {
 function ccRenderActWidget(a) {
   const el = $('cc-res');
   if (!el || !a) return;
+  const w = a.worker || {};
+  const wOn = w.state === 'RUNNING';
+  const hb = (w.heartbeat_age === null || w.heartbeat_age === undefined) ? '—' : (w.heartbeat_age + 's trước');
   el.innerHTML += `<div class="cc-dsec">Auto Activity</div>`
+    + `<div class="meta-row"><span class="meta-label">Worker</span><span class="meta-value">${wOn ? '● Online' : '● Dừng'}${w.pid ? ' · PID ' + escapeHtml(String(w.pid)) : ''}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Heartbeat</span><span class="meta-value">${escapeHtml(hb)}${w.last_tick ? ' · tick ' + escapeHtml(String(w.last_tick)) : ''}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Running</span><span class="meta-value">${escapeHtml(String(a.running || 0))}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Waiting</span><span class="meta-value">${escapeHtml(String(a.waiting || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Suspended</span><span class="meta-value">${escapeHtml(String(a.suspended || 0))}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Today</span><span class="meta-value">${escapeHtml(a.today || '0/0')}</span></div>`
     + `<div class="meta-row"><span class="meta-label">Errors</span><span class="meta-value">${escapeHtml(String(a.errors || 0))}</span></div>`;
+}
+function ccRenderUploadWidget(u) {
+  const el = $('cc-res');
+  if (!el || !u) return;
+  el.innerHTML += `<div class="cc-dsec">Video Upload</div>`
+    + `<div class="meta-row"><span class="meta-label">Uploading</span><span class="meta-value">${escapeHtml(String(u.uploading || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Scheduled</span><span class="meta-value">${escapeHtml(String(u.scheduled || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Published</span><span class="meta-value">${escapeHtml(String(u.published || 0))}</span></div>`
+    + `<div class="meta-row"><span class="meta-label">Failed / Low</span><span class="meta-value">${escapeHtml(String(u.failed || 0))} / ${escapeHtml(String(u.low || 0))}</span></div>`;
 }
 function ccRenderActivity(rows) {
   const el = $('cc-activity');

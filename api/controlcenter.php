@@ -79,18 +79,27 @@ try {
             $actWidget = ['running' => 0, 'waiting' => 0, 'today' => '0/0', 'errors' => 0, 'scheduler' => false];
             try {
                 require_once __DIR__ . '/../sync/ActivityScheduler.php';
+                require_once __DIR__ . '/../sync/ActivitySupervisor.php';
                 $ast = ActivityScheduler::status();
                 $actWidget['running'] = $ast['running'] ?? 0;
                 $actWidget['waiting'] = $ast['waiting'] ?? 0;
+                $actWidget['suspended'] = $ast['suspended'] ?? 0;
                 $actWidget['errors'] = $ast['errors'] ?? 0;
                 $td = db()->query("SELECT SUM(status IN ('DONE','FAILED','SKIPPED')) d, COUNT(*) t
                     FROM activity_sessions WHERE plan_date=CURDATE()")->fetch();
                 if ($td) $actWidget['today'] = ((int)($td['d'] ?? 0)) . '/' . ((int)($td['t'] ?? 0));
-                $pf = __DIR__ . '/../bin/.activity_scheduler.pid';
-                if (is_file($pf)) {
-                    $pid = (int)trim((string)@file_get_contents($pf));
-                    $actWidget['scheduler'] = $pid > 0;
-                }
+                $wst = ActivitySupervisor::state();
+                $actWidget['scheduler'] = $wst['state'] === 'RUNNING';
+                $actWidget['worker'] = $wst;
+            } catch (Throwable $e) {
+            }
+            // Upload widget (§71)
+            $upWidget = ['uploading' => 0, 'scheduled' => 0, 'published' => 0, 'failed' => 0, 'low' => 0];
+            try {
+                require_once __DIR__ . '/../sync/PublishScheduler.php';
+                $k = PublishScheduler::kpis();
+                $upWidget = ['uploading' => $k['uploading'], 'scheduled' => $k['scheduled'],
+                    'published' => $k['published_today'], 'failed' => $k['failed'], 'low' => $k['low']];
             } catch (Throwable $e) {
             }
             json_out(['ok' => true, 'data' => [
@@ -106,6 +115,7 @@ try {
                 'resources' => ResourceMonitor::snapshot(),
                 'activity' => $activity,
                 'auto_activity' => $actWidget,
+                'video_upload' => $upWidget,
             ]]);
             break;
         }

@@ -13,69 +13,40 @@ declare(strict_types=1);
  */
 require_once __DIR__ . '/../sync/ActivityManager.php';
 require_once __DIR__ . '/../sync/ActivityScheduler.php';
+require_once __DIR__ . '/../sync/ActivitySupervisor.php';
 
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? 'config';
 
-// Boot ensure (§47, DoD #10): co config enabled ma daemon chet -> tu spawn.
-// Cheap (pid check), khong can mo UI. Throttle 5 phut.
-if (in_array($action, ['status', 'config', 'plan'], true)) {
+// Boot ensure (§47, DoD #10): co config enabled ma worker chet/stale -> tu spawn.
+// Ap dung cho moi action thay doi/doc lich (bulk/save/run/status/config/plan),
+// khong chi 3 action cu — luu bulk khong bao gio khoi dong worker la bug cu.
+if (in_array($action, ['status', 'config', 'plan', 'bulk', 'save', 'run', 'run_now', 'diagnose'], true)) {
     try {
-        $lastEnsure = (int)get_setting('act_ensure_at', '0');
-        if ((time() - $lastEnsure) > 300 && act_monitor_pid() === null) {
-            $n = 0;
-            try {
-                $n = (int)db()->query('SELECT COUNT(*) FROM activity_configs WHERE enabled=1')->fetchColumn();
-            } catch (Throwable $e) {
-            }
-            if ($n > 0 && act_spawn()) {
-                try {
-                    SyncLogger::info('activity', '[Scheduler] auto-started on boot (enabled=' . $n . ')');
-                } catch (Throwable $e) {
-                }
-            }
-            set_setting('act_ensure_at', (string)time());
+        $n = 0;
+        try {
+            $n = (int)db()->query('SELECT COUNT(*) FROM activity_configs WHERE enabled=1')->fetchColumn();
+        } catch (Throwable $e) {
         }
+        if ($n > 0) ActivitySupervisor::ensure();
     } catch (Throwable $e) {
     }
 }
 
 function act_pid_file(): string
 {
-    return __DIR__ . '/../bin/.activity_scheduler.pid';
+    return ActivitySupervisor::pidFile();
 }
 
 function act_monitor_pid(): ?int
 {
-    $f = act_pid_file();
-    if (!is_file($f)) return null;
-    $pid = (int)trim((string)@file_get_contents($f));
-    if ($pid <= 0) return null;
-    $out = [];
-    @exec('tasklist /FI "PID eq ' . $pid . '" /FO CSV /NH 2>NUL', $out);
-    foreach ($out as $line) {
-        if (preg_match('/^"([^"]+)","\s*' . $pid . '\b/', trim($line), $m)
-            && stripos($m[1], 'php') !== false) {
-            return $pid;
-        }
-    }
-    return null;
+    $pid = ActivitySupervisor::pid();
+    return ActivitySupervisor::alive($pid) ? $pid : null;
 }
 
 function act_spawn(): bool
 {
-    $php = php_cli_binary();
-    if ($php === '') return false;
-    $script = __DIR__ . '/../bin/activity_scheduler.php';
-    $log = __DIR__ . '/../bin/activity_scheduler.log';
-    if (is_file($log) && filesize($log) > 2097152) @rename($log, $log . '.1');
-    $cmdline = 'start "" /B "' . $php . '" -f "' . $script . '" >> "' . $log . '" 2>&1';
-    pclose(popen($cmdline, 'r'));
-    for ($i = 0; $i < 10; $i++) {
-        usleep(500000);
-        if (act_monitor_pid() !== null) return true;
-    }
-    return false;
+    return ActivitySupervisor::spawn();
 }
 
 try {
@@ -96,7 +67,9 @@ try {
             $id = (int)($b['id'] ?? 0);
             if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
             $r = ActivityManager::saveConfig($id, $b);
-            json_out(['ok' => $r['ok'], 'data' => ActivityManager::getConfig($id), 'warnings' => $r['errors']]);
+            $cfg = ActivityManager::getConfig($id);
+            json_out(['ok' => $r['ok'], 'data' => $cfg, 'warnings' => $r['errors'],
+                'config_version' => (int)($cfg['config_version'] ?? 1)]);
             break;
         }
 
@@ -154,66 +127,29 @@ try {
             }
             if (!$ids) json_out(['ok' => false, 'message' => 'Chua chon kenh nao'], 400);
             $patch = is_array($b['patch'] ?? null) ? $b['patch'] : [];
-            // Template: bung preset thanh gia tri cu the (§43-45)
-            if (!empty($patch['template']) && in_array(strtoupper((string)$patch['template']), ['LIGHT', 'NORMAL', 'HIGH'], true)) {
-                $patch = array_merge($patch, ActivityManager::applyTemplate((string)$patch['template']));
-            }
-            $res = ['ok' => [], 'failed' => []];
-            $created = 0;
-            $updated = 0;
-            $skipped = 0;
-            foreach ($ids as $pid) {
+            $out = ActivityManager::bulkSave($ids, $patch);
+            // Len lich ngay cho kenh duoc bat (UI hien "Tiep theo" lap tuc §29)
+            foreach ($out['results']['ok'] as $pid) {
                 try {
-                    $exists = db()->prepare('SELECT id FROM profiles WHERE id=?');
-                    $exists->execute([$pid]);
-                    if (!$exists->fetchColumn()) {
-                        $res['failed'][] = ['id' => $pid, 'error' => 'PROFILE_NOT_FOUND'];
-                        continue;
-                    }
-                    $had = db()->prepare('SELECT profile_id FROM activity_configs WHERE profile_id=?');
-                    $had->execute([$pid]);
-                    $isUpdate = (bool)$had->fetchColumn();
-                    $cur = ActivityManager::getConfig($pid);
-                    $merged = array_merge($cur, $patch);
-                    // required_pages/search_queries tu patch thay the han (khong merge)
-                    $r = ActivityManager::saveConfig($pid, $merged);
-                    if (!$r['ok']) {
-                        $res['failed'][] = ['id' => $pid, 'error' => 'SAVE_FAILED'];
-                        continue;
-                    }
-                    if ($isUpdate) $updated++;
-                    else $created++;
-                    $res['ok'][] = $pid;
-                    // Len lich ngay cho kenh duoc bat (UI hien "Tiep theo" lap tuc §29)
-                    if (!empty($merged['enabled'])) {
-                        try {
-                            require_once __DIR__ . '/../sync/ActivityPlanner.php';
-                            ActivityPlanner::ensureTodayPlan($pid);
-                            ActivityPlanner::updateNextRun($pid);
-                        } catch (Throwable $e) {
-                        }
+                    $cfg = ActivityManager::getConfig((int)$pid);
+                    if (!empty($cfg['enabled'])) {
+                        require_once __DIR__ . '/../sync/ActivityPlanner.php';
+                        ActivityPlanner::ensureTodayPlan((int)$pid);
+                        ActivityPlanner::updateNextRun((int)$pid);
                     } else {
                         // Tat: xoa next_run cu (§39, khong xoa config)
-                        try {
-                            db()->prepare('UPDATE activity_configs SET next_run_at=NULL WHERE profile_id=?')
-                                ->execute([$pid]);
-                        } catch (Throwable $e) {
-                        }
+                        db()->prepare('UPDATE activity_configs SET next_run_at=NULL WHERE profile_id=?')
+                            ->execute([(int)$pid]);
                     }
                 } catch (Throwable $e) {
-                    $res['failed'][] = ['id' => $pid, 'error' => 'EXCEPTION'];
                 }
             }
-            $assigned = $created + $updated;
-            try {
-                SyncLogger::info('activity', '[BULK] requested=' . count($ids) . " assigned=$assigned created=$created updated=$updated failed=" . count($res['failed']));
-            } catch (Throwable $e) {
-            }
             json_out(['ok' => true, 'data' => [
-                'requested' => count($ids), 'assigned' => $assigned,
-                'updated' => $updated, 'created' => $created,
-                'skipped' => $skipped, 'failed' => count($res['failed']),
-                'total' => count($ids), 'results' => $res]]);
+                'requested' => $out['requested'], 'assigned' => $out['assigned'],
+                'updated' => $out['updated'], 'created' => $out['created'],
+                'skipped' => 0, 'failed' => $out['failed'],
+                'total' => $out['requested'], 'results' => $out['results'],
+                'config_versions' => $out['config_versions']]]);
             break;
         }
 
@@ -243,17 +179,15 @@ try {
         }
 
         case 'monitor_status': {
-            $pid = act_monitor_pid();
-            json_out(['ok' => true, 'data' => ['running' => $pid !== null, 'pid' => $pid]]);
+            json_out(['ok' => true, 'data' => ActivitySupervisor::state()
+                + ['running' => ActivitySupervisor::state()['state'] === 'RUNNING']]);
             break;
         }
 
         case 'monitor_start': {
-            $pid = act_monitor_pid();
-            if ($pid !== null) json_out(['ok' => true, 'data' => ['running' => true, 'pid' => $pid]]);
-            if (!act_spawn()) json_out(['ok' => false, 'message' => 'Khong spawn duoc scheduler'], 500);
+            $r = ActivitySupervisor::ensure(true);
             SyncLogger::info('activity', '[Scheduler] started via API');
-            json_out(['ok' => true, 'data' => ['running' => true, 'pid' => act_monitor_pid()]]);
+            json_out(['ok' => $r['running'], 'data' => $r]);
             break;
         }
 
@@ -648,7 +582,135 @@ try {
                     $n = ActivityPlanner::runDueSessions($id, 1);
                 }
             }
+            if ($n === 0) {
+                // Van khong co gi due (VD ngay nghi) -> chay legacy cycle 1 lan,
+                // cung executor (khong executor rieng), bao ket qua truc tiep
+                $r = ActivityManager::runCycle($id);
+                json_out(['ok' => true, 'data' => ['ran' => 1, 'fallback' => 'cycle',
+                    'tasks' => $r['tasks'], 'summary' => ActivityPlanner::summary($id)]]);
+            }
             json_out(['ok' => true, 'data' => ['ran' => $n, 'summary' => ActivityPlanner::summary($id)]]);
+            break;
+        }
+
+        case 'run_now': {
+            // Chay thu ngay: bypass schedule timing, dung cung config + tab executor.
+            // Tra ve diagnostics chi tiet (chrome/cdp/mode/tung tab/result).
+            $b = $method === 'GET' ? $_GET : json_body();
+            $id = (int)($b['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            @set_time_limit(180);
+            ActivityManager::ensureTables();
+            $cfg = ActivityManager::getConfig($id);
+            try {
+                $pst = db()->prepare('SELECT status, debug_port, user_data_dir FROM profiles WHERE id=?');
+                $pst->execute([$id]);
+                $prof = $pst->fetch() ?: [];
+            } catch (Throwable $e) {
+                $prof = [];
+            }
+            $chromeRunning = (($prof['status'] ?? '') === 'running');
+            if (!$chromeRunning) {
+                try {
+                    $dir = strtolower(trim((string)($prof['user_data_dir'] ?? '')));
+                    $chromeRunning = $dir !== '' && isset(chrome_running_info()[$dir]);
+                } catch (Throwable $e) {
+                }
+            }
+            $port = (int)($prof['debug_port'] ?? 0);
+            $cdpReady = $port > 0 && cdp_reachable($port);
+            if (empty($cfg['enabled'])) {
+                json_out(['ok' => false, 'message' => 'Auto Activity dang TAT (bat len truoc khi chay thu)'], 400);
+            }
+            if (!$chromeRunning || !$cdpReady) {
+                json_out(['ok' => false, 'message' => 'Chrome chua chay hoac CDP chua san sang (mo kenh truoc)',
+                    'data' => ['chrome_running' => $chromeRunning, 'cdp_ready' => $cdpReady]], 409);
+            }
+            $t0 = microtime(true);
+            $r = ActivityManager::runCycle($id);
+            $tabs = [];
+            foreach ((array)($r['tasks'] ?? []) as $tk) {
+                $res = (string)($tk['result'] ?? '');
+                $tabs[] = ['label' => (string)($tk['label'] ?? '?'),
+                    'result' => in_array($res, ['OPENED'], true) ? 'CREATED'
+                        : (in_array($res, ['REUSED', 'CHECKED', 'SUCCESS'], true) ? 'ALREADY_PRESENT' : $res)];
+            }
+            $okCount = 0;
+            foreach ((array)($r['tasks'] ?? []) as $tk) {
+                if (!empty($tk['ok']) || in_array(($tk['result'] ?? ''), ['REUSED', 'CHECKED', 'SUCCESS'], true)) $okCount++;
+            }
+            json_out(['ok' => true, 'data' => [
+                'profile_id' => $id,
+                'chrome_running' => true, 'cdp_ready' => true,
+                'mode' => (string)($cfg['activity_mode'] ?? 'maintain'),
+                'required' => count(ActivityManager::requiredUrls($cfg)),
+                'tabs' => $tabs,
+                'result' => $okCount > 0 ? 'SUCCESS' : 'FAILED',
+                'ms' => (int)round((microtime(true) - $t0) * 1000),
+                'config_version' => (int)($cfg['config_version'] ?? 1),
+                'next_run_at' => (string)($cfg['next_run_at'] ?? ''),
+            ]]);
+            break;
+        }
+
+        case 'diagnose': {
+            // Diagnostics 1 profile: config vs scheduler vs runtime (khong can mo UI khac)
+            $id = (int)($_GET['id'] ?? 0);
+            if ($id <= 0) json_out(['ok' => false, 'message' => 'Thieu id'], 400);
+            ActivityManager::ensureTables();
+            $cfg = ActivityManager::getConfig($id);
+            try {
+                $pst = db()->prepare('SELECT status, debug_port, user_data_dir FROM profiles WHERE id=?');
+                $pst->execute([$id]);
+                $prof = $pst->fetch() ?: [];
+            } catch (Throwable $e) {
+                $prof = [];
+            }
+            $chromeRunning = (($prof['status'] ?? '') === 'running');
+            if (!$chromeRunning) {
+                try {
+                    $dir = strtolower(trim((string)($prof['user_data_dir'] ?? '')));
+                    $chromeRunning = $dir !== '' && isset(chrome_running_info()[$dir]);
+                } catch (Throwable $e) {
+                }
+            }
+            $port = (int)($prof['debug_port'] ?? 0);
+            $last = null;
+            try {
+                $hst = db()->prepare('SELECT task_type, domain, result, error_code, created_at
+                    FROM activity_history WHERE profile_id=? ORDER BY id DESC LIMIT 1');
+                $hst->execute([$id]);
+                $last = $hst->fetch() ?: null;
+            } catch (Throwable $e) {
+            }
+            $schedPid = act_monitor_pid();
+            $wst = ActivitySupervisor::state();
+            $waitingReason = null;
+            if (empty($cfg['enabled'])) $waitingReason = 'DISABLED';
+            elseif (!empty($cfg['pause_until']) && strtotime((string)$cfg['pause_until']) > time()) $waitingReason = 'PAUSED';
+            elseif (in_array(strtoupper((string)($cfg['runtime_state'] ?? '')), ['SUSPENDED', 'SUSPENDED_ERROR', 'ERROR'], true)) $waitingReason = strtoupper((string)$cfg['runtime_state']);
+            elseif ($schedPid === null) $waitingReason = 'SCHEDULER_NOT_RUNNING';
+            elseif (ActivityScheduler::inHours($cfg) === false) $waitingReason = 'OFF_HOURS';
+            elseif (!$chromeRunning && empty($cfg['auto_start_profile'])) $waitingReason = 'PROFILE_NOT_RUNNING';
+            json_out(['ok' => true, 'data' => [
+                'profile_id' => $id,
+                'config_version' => (int)($cfg['config_version'] ?? 1),
+                'desired_enabled' => !empty($cfg['enabled']),
+                'scheduler_running' => $schedPid !== null,
+                'scheduler_pid' => $schedPid,
+                'worker' => $wst,
+                'config_loaded' => true,
+                'schedule_mode' => (string)($cfg['schedule_mode'] ?? 'WINDOW'),
+                'interval' => ((int)($cfg['interval_minutes'] ?? 0)) . 'm ' . (string)($cfg['interval_mode'] ?? 'FIXED'),
+                'last_run_at' => $cfg['last_run_at'] ?? null,
+                'next_run_at' => $cfg['next_run_at'] ?? null,
+                'runtime_state' => (string)($cfg['runtime_state'] ?? 'WAITING'),
+                'fail_streak' => (int)($cfg['fail_streak'] ?? 0),
+                'last_result' => $last,
+                'chrome_running' => $chromeRunning,
+                'cdp_ready' => $port > 0 && cdp_reachable($port),
+                'waiting_reason' => $waitingReason,
+            ]]);
             break;
         }
 
@@ -661,6 +723,23 @@ try {
             // Bao cao ngay hom nay (UI + Telegram dung chung) §59
             require_once __DIR__ . '/../sync/ActivityPlanner.php';
             json_out(['ok' => true, 'data' => ActivityPlanner::dailySummary()]);
+            break;
+        }
+
+        case 'worker': {
+            // Diagnostics global: supervisor/worker PID, heartbeat, tick, configs, due
+            $st = ActivitySupervisor::state();
+            $cfg = ['enabled' => 0, 'due' => 0, 'next' => null];
+            try {
+                $cfg['enabled'] = (int)db()->query('SELECT COUNT(*) FROM activity_configs WHERE enabled=1')->fetchColumn();
+                $dueRows = db()->query("SELECT profile_id FROM activity_configs WHERE enabled=1
+                    AND (next_run_at IS NULL OR next_run_at<=NOW())")->fetchAll();
+                $cfg['due'] = count($dueRows);
+                $cfg['next'] = db()->query("SELECT MIN(next_run_at) FROM activity_configs
+                    WHERE enabled=1 AND next_run_at IS NOT NULL")->fetchColumn() ?: null;
+            } catch (Throwable $e) {
+            }
+            json_out(['ok' => true, 'data' => ['supervisor' => $st, 'configs' => $cfg]]);
             break;
         }
 

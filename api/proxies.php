@@ -79,6 +79,11 @@ try {
             $id = (int)($_GET['id'] ?? (json_body()['id'] ?? 0));
             $stmt = db()->prepare('DELETE FROM proxies WHERE id = ?');
             $stmt->execute([$id]);
+            // Khong de profiles.proxy_id treo (launch se coi nhu khong proxy)
+            try {
+                db()->prepare('UPDATE profiles SET proxy_id=NULL WHERE proxy_id=?')->execute([$id]);
+            } catch (Throwable $e) {
+            }
             json_out(['ok' => true]);
             break;
 

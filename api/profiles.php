@@ -17,6 +17,19 @@ try {
                 TelegramSupervisor::ensure();
             } catch (Throwable $e) {
             }
+            // Runtime reconciler (throttle 120s ben trong): may moi/reboot ->
+            // runtime cu bi loai, DB status khop OS that
+            try {
+                require_once __DIR__ . '/../sync/RuntimeReconciler.php';
+                RuntimeReconciler::reconcileAll();
+            } catch (Throwable $e) {
+            }
+            // Tab autosave daemon (throttle 60s ben trong): setting bat ma chet -> spawn
+            try {
+                require_once __DIR__ . '/../sync/TabAutosaveCtl.php';
+                TabAutosaveCtl::ensure();
+            } catch (Throwable $e) {
+            }
             $hasPlace = false;
             $hasEval = false;
             try {
@@ -364,7 +377,7 @@ try {
             $monMode = $hasPlace
                 ? (isset($b['monitor_mode']) ? strtoupper(trim((string)$b['monitor_mode'])) : (string)($curRow['monitor_mode'] ?? 'LAST'))
                 : 'LAST';
-            if (!in_array($monMode, ['LAST', 'FIXED', 'AUTO'], true)) $monMode = 'LAST';
+            if (!in_array($monMode, ['LAST', 'FIXED', 'AUTO', 'SECONDARY'], true)) $monMode = 'LAST';
             $fixedMon = $hasPlace
                 ? trim((string)($b['fixed_monitor_device'] ?? ($curRow['fixed_monitor_device'] ?? '')))
                 : '';
@@ -425,9 +438,22 @@ try {
             $newName = $src['name'] . ' (copy)';
             $userDir = unique_user_data_dir($newName);
             if (!is_dir($userDir)) mkdir($userDir, 0777, true);
-            db()->prepare('INSERT INTO profiles (name, platform, channel_handle, user_agent, webrtc_protection, proxy_id, user_data_dir)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)')
-                ->execute([$newName, $src['platform'], $src['channel_handle'], $src['user_agent'], $src['webrtc_protection'] ?? 'default', $src['proxy_id'], $userDir]);
+            $hasPlaceDup = false;
+            try {
+                $hasPlaceDup = (bool)db()->query("SHOW COLUMNS FROM profiles LIKE 'monitor_mode'")->fetch();
+            } catch (Throwable $e) {
+            }
+            if ($hasPlaceDup) {
+                db()->prepare('INSERT INTO profiles (name, platform, channel_handle, user_agent, webrtc_protection, proxy_id, user_data_dir, monitor_mode, fixed_monitor_device)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                    ->execute([$newName, $src['platform'], $src['channel_handle'], $src['user_agent'], $src['webrtc_protection'] ?? 'default', $src['proxy_id'], $userDir,
+                        in_array(strtoupper((string)($src['monitor_mode'] ?? 'LAST')), ['LAST', 'FIXED', 'AUTO', 'SECONDARY'], true) ? strtoupper((string)$src['monitor_mode']) : 'LAST',
+                        (string)($src['fixed_monitor_device'] ?? '')]);
+            } else {
+                db()->prepare('INSERT INTO profiles (name, platform, channel_handle, user_agent, webrtc_protection, proxy_id, user_data_dir)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)')
+                    ->execute([$newName, $src['platform'], $src['channel_handle'], $src['user_agent'], $src['webrtc_protection'] ?? 'default', $src['proxy_id'], $userDir]);
+            }
             json_out(['ok' => true, 'id' => (int)db()->lastInsertId()], 201);
             break;
 

@@ -151,7 +151,9 @@ try {
             require_once __DIR__ . '/../sync/TabSessionManager.php';
             $live = TabSessionStore::readLive($profileId, $port);
             if ($live !== null) {
-                TabSessionStore::save($profileId, TabSessionManager::buildSnapshot($live['tabs'], (int)$live['activeIndex']));
+                require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+                TabSessionStore::save($profileId, TabSessionManager::buildSnapshot($live['tabs'], (int)$live['activeIndex']),
+                    ['generation' => ChromeBatchManager::currentGeneration($profileId), 'phase' => 'RESTORE_VERIFY']);
             }
         } catch (Throwable $e) {
         }

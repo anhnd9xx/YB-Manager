@@ -103,7 +103,9 @@ try {
             // Luu tay: dung true-order (chinh xac ke ca da keo-tha tab)
             $snap = TabSessionStore::snapshotLive($id, (int)($p['debug_port'] ?? 0), true);
             if ($snap === null) json_out(['ok' => false, 'message' => 'Chrome chua san sang (CDP)'], 409);
-            $r = TabSessionStore::save($id, $snap);
+            require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+            $r = TabSessionStore::save($id, $snap,
+                ['generation' => ChromeBatchManager::currentGeneration($id), 'phase' => 'MANUAL']);
             $ms = (int)round((microtime(true) - $t0) * 1000);
             SyncLogger::info('tab_session', "[SESSION] profile=$id port=" . (int)($p['debug_port'] ?? 0)
                 . ' snapshot ' . count($snap['tabs']) . " tabs: {$ms}ms", $id);

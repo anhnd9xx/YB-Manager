@@ -51,11 +51,13 @@ class ActivityScheduler
 
     public static function inHours(array $cfg, ?int $now = null): bool
     {
+        // 24/24: scheduler duoc phep chay bat cu gio nao (van tuan interval/lock/pause)
+        if (strtoupper((string)($cfg['schedule_mode'] ?? 'WINDOW')) === 'ALWAYS') return true;
         $now = $now ?? time();
         $cur = date('H:i', $now);
         $ss = substr((string)($cfg['schedule_start'] ?? '08:00'), 0, 5);
         $se = substr((string)($cfg['schedule_end'] ?? '22:00'), 0, 5);
-        if ($ss === $se) return true; // 24h
+        if ($ss === $se) return true; // 24h (start==end)
         if ($ss < $se) return $cur >= $ss && $cur < $se;
         return $cur >= $ss || $cur < $se; // qua dem
     }
@@ -74,7 +76,7 @@ class ActivityScheduler
             return strtotime((string)$cfg['next_run_at']) <= $now;
         }
         if (empty($cfg['last_run_at'])) return true;
-        $iv = max(15, (int)($cfg['interval_minutes'] ?? 30)) * 60;
+        $iv = max(1, (int)($cfg['interval_minutes'] ?? 30)) * 60;
         return (strtotime((string)$cfg['last_run_at']) + $iv) <= $now;
     }
 
@@ -105,6 +107,10 @@ class ActivityScheduler
     public static function clampWindow(array $cfg, int $cand, ?int $now = null): string
     {
         $now = $now ?? time();
+        // 24/24: khong kep window, next_run = candidate truc tiep
+        if (strtoupper((string)($cfg['schedule_mode'] ?? 'WINDOW')) === 'ALWAYS') {
+            return date('Y-m-d H:i:s', $cand);
+        }
         $ss = substr((string)($cfg['schedule_start'] ?? '08:00'), 0, 5);
         $se = substr((string)($cfg['schedule_end'] ?? '22:00'), 0, 5);
         $days = array_map('intval', explode(',', (string)($cfg['active_days'] ?? '1,2,3,4,5,6,7')));
@@ -135,6 +141,7 @@ class ActivityScheduler
         ActivityManager::ensureTables();
         $max = max(1, min(8, $max));
         $ran = 0;
+        $due = 0;
         $skipped = [];
         $results = [];
         try {
@@ -149,8 +156,18 @@ class ActivityScheduler
             $id = (int)$r['profile_id'];
             $cfg = ActivityManager::getConfig($id);
             if (empty($cfg['enabled'])) continue;
+            // Supervisor-lite: SUSPENDED (circuit breaker) + ERROR + manual pause uu tien scheduler
+            if (in_array((string)($cfg['runtime_state'] ?? ''), ['SUSPENDED', 'SUSPENDED_ERROR', 'ERROR'], true)) {
+                $skipped[] = ['id' => $id, 'reason' => strtolower((string)$cfg['runtime_state'])];
+                continue;
+            }
             if (self::paused($cfg)) {
                 $skipped[] = ['id' => $id, 'reason' => 'paused'];
+                try {
+                    db()->prepare("UPDATE activity_configs SET runtime_state='PAUSED'
+                        WHERE profile_id=? AND runtime_state NOT IN ('RUNNING')")->execute([$id]);
+                } catch (Throwable $e) {
+                }
                 continue;
             }
             if (!self::inHours($cfg)) {
@@ -158,6 +175,7 @@ class ActivityScheduler
                 continue;
             }
             if (!self::due($cfg)) continue; // chua toi chu ky -> bo qua im lang
+            $due++;
             // Priority: lifecycle > evaluation > activity (§10)
             if (ChromeBatchManager::isBusy($id)) {
                 $skipped[] = ['id' => $id, 'reason' => 'lifecycle_busy'];
@@ -189,17 +207,83 @@ class ActivityScheduler
                     // Planner mode: chay sessions due (toi da 2/tick/profile)
                     require_once __DIR__ . '/ActivityPlanner.php';
                     $n = ActivityPlanner::runDueSessions($id, 2);
-                    if ($n > 0) {
+                    $didSession = $n > 0;
+                    // + Legacy cycle (chu ky modal: FIXED/RANDOM) van duoc ton trong:
+                    // due thi chay runCycle (ensure required + scheduled picks).
+                    // Ca hai idempotent (reuse, khong duplicate tab) nen an toan.
+                    $didLegacy = false;
+                    $legacyTasks = [];
+                    $fresh = ActivityManager::getConfig($id);
+                    if (self::due($fresh)) {
+                        try {
+                            db()->prepare("UPDATE activity_configs SET runtime_state='RUNNING'
+                                WHERE profile_id=? AND enabled=1")->execute([$id]);
+                        } catch (Throwable $e) {
+                        }
+                        $res = ActivityManager::runCycle($id);
+                        $didLegacy = true;
+                        $legacyTasks = array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? []);
+                        $hasFail = false;
+                        $lastErr = null;
+                        foreach ((array)($res['tasks'] ?? []) as $t) {
+                            if (empty($t['ok']) && !in_array(($t['result'] ?? ''), ['REUSED', 'CHECKED'], true)) {
+                                $hasFail = true;
+                                $lastErr = (string)($t['error'] ?? $t['result'] ?? 'TASK_FAILED');
+                            }
+                        }
+                        ActivityManager::noteResult($id, !$hasFail, $lastErr);
+                        if (!$hasFail) {
+                            try {
+                                db()->prepare("UPDATE activity_configs SET runtime_state='WAITING'
+                                    WHERE profile_id=? AND runtime_state='RUNNING'")->execute([$id]);
+                            } catch (Throwable $e) {
+                            }
+                        }
+                        // RANDOM: chot next_run_at ngay (§5), khong sleep
+                        if (($fresh['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE') {
+                            try {
+                                db()->prepare('UPDATE activity_configs SET next_run_at=? WHERE profile_id=?')
+                                    ->execute([self::calculateNextRun(ActivityManager::getConfig($id)), $id]);
+                            } catch (Throwable $e) {
+                            }
+                        }
+                    }
+                    if ($didSession || $didLegacy) {
                         $ran++;
+                        $tasks = [];
+                        if ($didSession) $tasks[] = 'sessions:' . $n;
+                        foreach ($legacyTasks as $lt) $tasks[] = 'cycle:' . $lt;
                         $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
-                            'tasks' => ['sessions:' . $n]];
+                            'tasks' => $tasks];
                     }
                 } else {
                     // Legacy interval mode (giu tuong thich config cu)
+                    try {
+                        db()->prepare("UPDATE activity_configs SET runtime_state='RUNNING'
+                            WHERE profile_id=? AND enabled=1")->execute([$id]);
+                    } catch (Throwable $e) {
+                    }
                     $res = ActivityManager::runCycle($id);
                     $ran++;
+                    $taskResults = array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? []);
                     $results[] = ['id' => $id, 'ms' => (int)round((microtime(true) - $t0) * 1000),
-                        'tasks' => array_map(fn($t) => ($t['result'] ?? '?'), $res['tasks'] ?? [])];
+                        'tasks' => $taskResults];
+                    $hasFail = false;
+                    $lastErr = null;
+                    foreach ((array)($res['tasks'] ?? []) as $t) {
+                        if (empty($t['ok']) && !in_array(($t['result'] ?? ''), ['REUSED', 'CHECKED'], true)) {
+                            $hasFail = true;
+                            $lastErr = (string)($t['error'] ?? $t['result'] ?? 'TASK_FAILED');
+                        }
+                    }
+                    ActivityManager::noteResult($id, !$hasFail, $lastErr);
+                    if (!$hasFail) {
+                        try {
+                            db()->prepare("UPDATE activity_configs SET runtime_state='WAITING'
+                                WHERE profile_id=? AND runtime_state='RUNNING'")->execute([$id]);
+                        } catch (Throwable $e) {
+                        }
+                    }
                     // RANDOM: chot next_run_at ngay (§5), khong sleep
                     if (($cfg['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE') {
                         try {
@@ -217,7 +301,6 @@ class ActivityScheduler
             SyncLogger::info('activity', '[SCHEDULER] tick ran=' . $ran . ' skipped=' . count($skipped));
         } catch (Throwable $e) {
         }
-        // Event: AUTO ACTIVITY tick summary (§20) — 1 msg/tick, that qua rules (mac dinh DIGEST)
         if ($ran > 0) {
             try {
                 require_once __DIR__ . '/EventBus.php';
@@ -228,10 +311,12 @@ class ActivityScheduler
                 foreach ($results as $one) {
                     foreach ((array)($one['tasks'] ?? []) as $t) {
                         $tasks++;
-                        if (str_starts_with((string)$t, 'sessions:')) {
-                            $ok += (int)substr((string)$t, 9);
+                        $t = (string)$t;
+                        if (str_starts_with($t, 'sessions:')) {
+                            $ok += (int)substr($t, 9);
                             continue;
                         }
+                        if (str_starts_with($t, 'cycle:')) $t = substr($t, 6);
                         if (in_array($t, ['OPENED', 'REUSED', 'SUCCESS', 'CHECKED', 'CLOSED'], true)) $ok++;
                         elseif (in_array($t, ['BLOCKED', 'MISSING'], true)) $warn++;
                         else $fail++;
@@ -262,7 +347,7 @@ class ActivityScheduler
             }
         } catch (Throwable $e) {
         }
-        return ['ran' => $ran, 'skipped' => $skipped, 'results' => $results];
+        return ['ran' => $ran, 'due' => $due, 'skipped' => $skipped, 'results' => $results];
     }
 
     private static function chromeAlive(int $id): bool
@@ -306,15 +391,18 @@ class ActivityScheduler
         }
     }
 
-    /** Trang thai tong hop cho monitoring (§31). */
+    /** Trang thai tong hop cho monitoring (§31): enabled/running/waiting/paused/suspended/errors + next. */
     public static function status(): array
     {
         ActivityManager::ensureTables();
         $enabled = 0;
         $running = 0;
         $paused = 0;
+        $suspended = 0;
+        $nextAt = null;
         try {
-            $rows = db()->query('SELECT profile_id, pause_until FROM activity_configs WHERE enabled=1')->fetchAll();
+            $rows = db()->query('SELECT profile_id, pause_until, runtime_state, next_run_at
+                FROM activity_configs WHERE enabled=1')->fetchAll();
             $enabled = count($rows);
             foreach ($rows as $r) {
                 $id = (int)$r['profile_id'];
@@ -322,9 +410,22 @@ class ActivityScheduler
                     $paused++;
                     continue;
                 }
+                $rs = strtoupper((string)($r['runtime_state'] ?? 'WAITING'));
+                if (in_array($rs, ['SUSPENDED', 'SUSPENDED_ERROR', 'ERROR'], true)) {
+                    $suspended++;
+                    continue;
+                }
                 $st = ActivityManager::stateGet($id);
                 if (!empty($st['running_task']) && (microtime(true) - (float)($st['running_ts'] ?? 0)) < 300) {
                     $running++;
+                    continue;
+                }
+                if ($rs === 'RUNNING') {
+                    $running++;
+                    continue;
+                }
+                if (!empty($r['next_run_at']) && ($nextAt === null || $r['next_run_at'] < $nextAt)) {
+                    $nextAt = (string)$r['next_run_at'];
                 }
             }
             $errProfiles = (int)db()->query("SELECT COUNT(DISTINCT profile_id) FROM activity_history
@@ -334,7 +435,8 @@ class ActivityScheduler
             $errProfiles = 0;
         }
         return ['enabled' => $enabled, 'running' => $running,
-            'waiting' => max(0, $enabled - $running - $paused),
-            'paused' => $paused, 'errors' => $errProfiles ?? 0];
+            'waiting' => max(0, $enabled - $running - $paused - $suspended),
+            'paused' => $paused, 'suspended' => $suspended,
+            'next_run_at' => $nextAt, 'errors' => $errProfiles ?? 0];
     }
 }

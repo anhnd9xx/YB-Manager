@@ -24,6 +24,8 @@ require_once __DIR__ . '/WindowDiscovery.php';
 require_once __DIR__ . '/WindowPlacementManager.php';
 require_once __DIR__ . '/SettingsService.php';
 require_once __DIR__ . '/TabSessionStore.php';
+require_once __DIR__ . '/StateStore.php';
+require_once __DIR__ . '/MachineContext.php';
 
 class ChromeBatchManager
 {
@@ -44,6 +46,9 @@ class ChromeBatchManager
     public const START_STAGGER_MS = 100;
     public const TAB_SNAPSHOT_CONCURRENCY = 8;
     public const SNAPSHOT_BUDGET_MS = 800;   // per profile trong batch (§25)
+    public const STOP_SNAPSHOT_TOTAL_BUDGET_MS = 4000; // tong snapshot ca batch: qua gio -> dung last-known, van close (§24-§25)
+    public const START_VERIFY_TIMEOUT_SEC = 45; // per-profile: qua gio chua HWND+CDP -> START_FAILED (khong giu STARTING mai)
+    public const START_NO_PROCESS_GRACE_SEC = 12; // launch xong: sau X giay van khong process -> PROCESS_EXITED
     public const GRACE_SAFE_MS = 2500;       // AN TOAN (§33)
     public const GRACE_FAST_MS = 1200;       // NHANH (§33)
     public const POLL_MS = 150;              // shared monitor (§31)
@@ -59,16 +64,19 @@ class ChromeBatchManager
     /** @return array{state:string, batch_id?:string, ts:float}|null (null = khong transitional) */
     public static function lifeGet(int $id): ?array
     {
-        $f = self::lifeFile($id);
-        if (!is_file($f)) return null;
-        $j = json_decode((string)@file_get_contents($f), true);
-        if (!is_array($j) || empty($j['state'])) return null;
+        $j = StateStore::readJson(self::lifeFile($id));
+        if ($j === null || empty($j['state'])) return null;
+        // Runtime may khac (copy %TEMP% / restart): DISCARD, khong tin RUNNING cu
+        if (isset($j['machine']) && !MachineContext::isCurrent($j)) {
+            @unlink(self::lifeFile($id));
+            return null;
+        }
         if (in_array($j['state'], [self::ST_RUNNING, self::ST_STOPPED], true)) {
-            @unlink($f);
+            @unlink(self::lifeFile($id));
             return null;
         }
         if ((microtime(true) - (float)($j['ts'] ?? 0)) > self::LIFE_TTL_SEC) {
-            @unlink($f);
+            @unlink(self::lifeFile($id));
             return null;
         }
         return $j;
@@ -80,9 +88,11 @@ class ChromeBatchManager
             @unlink(self::lifeFile($id));
             return;
         }
-        @file_put_contents(self::lifeFile($id), json_encode(
-            ['state' => $state, 'batch_id' => $batchId, 'ts' => microtime(true)] + $extra,
-            JSON_UNESCAPED_UNICODE));
+        StateStore::withLock('profile-' . $id, function () use ($id, $state, $batchId, $extra) {
+            StateStore::writeJson(self::lifeFile($id),
+                ['state' => $state, 'batch_id' => $batchId, 'ts' => microtime(true),
+                 'machine' => MachineContext::id()] + $extra);
+        }, 1000);
     }
 
     public static function lifeClear(int $id): void
@@ -108,10 +118,14 @@ class ChromeBatchManager
 
     public static function stopActive(): bool
     {
-        $f = self::stopFlagFile();
-        if (!is_file($f)) return false;
-        if ((microtime(true) - (float)((json_decode((string)@file_get_contents($f), true)['ts'] ?? 0))) > 180) {
-            @unlink($f);
+        $j = StateStore::readJson(self::stopFlagFile());
+        if ($j === null) return false;
+        if (isset($j['machine']) && !MachineContext::isCurrent($j)) {
+            @unlink(self::stopFlagFile());
+            return false;
+        }
+        if ((microtime(true) - (float)($j['ts'] ?? 0)) > 180) {
+            @unlink(self::stopFlagFile());
             return false;
         }
         return true;
@@ -120,8 +134,9 @@ class ChromeBatchManager
     public static function setStopActive(bool $on, ?string $batchId = null): void
     {
         if ($on) {
-            @file_put_contents(self::stopFlagFile(), json_encode(
-                ['ts' => microtime(true), 'batch_id' => $batchId], JSON_UNESCAPED_UNICODE));
+            StateStore::writeJson(self::stopFlagFile(),
+                ['ts' => microtime(true), 'batch_id' => $batchId,
+                 'machine' => MachineContext::id()]);
         } else {
             @unlink(self::stopFlagFile());
         }
@@ -141,15 +156,17 @@ class ChromeBatchManager
 
     private static function loadBatch(string $kind, string $batchId): ?array
     {
-        $f = self::batchFile($kind, $batchId);
-        if (!is_file($f)) return null;
-        $j = json_decode((string)@file_get_contents($f), true);
-        return is_array($j) ? $j : null;
+        $j = StateStore::readJson(self::batchFile($kind, $batchId));
+        if ($j !== null && isset($j['machine']) && !MachineContext::isCurrent($j)) {
+            return null; // batch may khac
+        }
+        return $j;
     }
 
     private static function saveBatch(string $kind, string $batchId, array $b): void
     {
-        @file_put_contents(self::batchFile($kind, $batchId), json_encode($b, JSON_UNESCAPED_UNICODE));
+        if (!isset($b['machine'])) $b['machine'] = MachineContext::id();
+        StateStore::writeJson(self::batchFile($kind, $batchId), $b);
     }
 
     private static function gcBatches(): void
@@ -301,11 +318,19 @@ class ChromeBatchManager
             $n++;
             if (!empty($r['ok'])) {
                 $b['states'][$idStr] = self::ST_STARTING;
+                if (!isset($b['launched_at']) || !is_array($b['launched_at'])) $b['launched_at'] = [];
+                $b['launched_at'][$idStr] = microtime(true);
                 $launched[] = ['id' => $id, 'port' => $r['port'] ?? null, 'popen_ms' => $r['popen_ms'] ?? 0];
             } else {
                 $b['states'][$idStr] = self::ST_ERROR;
-                $errors[] = ['id' => $id, 'error' => $r['error'] ?? 'launch_failed'];
+                if (!isset($b['errors']) || !is_array($b['errors'])) $b['errors'] = [];
+                $b['errors'][$idStr] = (string)($r['error'] ?? 'launch_failed');
+                $errors[] = ['id' => $id, 'error' => $r['error'] ?? 'launch_failed']; // error code (PORT_CONFLICT/PROXY/...)
                 self::lifeSet($id, self::ST_ERROR, $batchId);
+                try {
+                    db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $id]);
+                } catch (Throwable $e) {
+                }
             }
         }
         $remaining = 0;
@@ -318,21 +343,55 @@ class ChromeBatchManager
             'errors' => $errors, 'remaining' => $remaining, 'done' => $remaining <= 0];
     }
 
-    /** Generation token (§28): moi start tang 1; callback cu mang gen cu -> discard. */
+    /** Chuan hoa user-data-dir de so sanh DB vs WMI (case/slash/trailing). */
+    public static function normDir(string $d): string
+    {
+        $d = strtolower(trim($d));
+        $d = str_replace('/', '\\', $d);
+        return rtrim($d, '\\');
+    }
+
+    /** Dispatch WM_CLOSE cho danh sach HWND (PostMessage, fire-and-forget). Tra ve so ok. */
+    private static function dispatchWmClose(array $hwnds): int
+    {
+        $hwnds = array_values(array_unique(array_map('intval', array_filter($hwnds))));
+        if (!$hwnds) return 0;
+        try {
+            $script = __DIR__ . '/win32_close.ps1';
+            $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"'
+                . ' -Hwnd "' . implode(',', $hwnds) . '"';
+            $out = @shell_exec($cmd);
+            $j = is_string($out) ? json_decode(trim($out), true) : null;
+            if (is_array($j) && isset($j['results'])) {
+                $ok = 0;
+                foreach ((array)$j['results'] as $r) {
+                    if (!empty($r['ok'])) $ok++;
+                }
+                return $ok;
+            }
+            return count($hwnds);
+        } catch (Throwable $e) {
+            return 0;
+        }
+    }
+
+    /** Generation token (§28): moi start tang 1; callback cu mang gen cu -> discard.
+     * Gen song restart/copy (khong stamp machine) — callback cu van bi discard
+     * nho so tang don dieu. Doc hien tai (khong tang): currentGeneration(). */
     public static function nextGeneration(int $id): int
     {
         $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_gen_' . $id . '.json';
-        $gen = 0;
-        try {
-            if (is_file($f)) {
-                $j = json_decode((string)@file_get_contents($f), true);
-                $gen = (int)(is_array($j) ? ($j['gen'] ?? 0) : 0);
-            }
-        } catch (Throwable $e) {
-        }
+        $gen = self::currentGeneration($id);
         $gen++;
-        @file_put_contents($f, json_encode(['gen' => $gen], JSON_UNESCAPED_UNICODE));
+        StateStore::writeJson($f, ['gen' => $gen]);
         return $gen;
+    }
+
+    public static function currentGeneration(int $id): int
+    {
+        $f = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytm_gen_' . $id . '.json';
+        $j = StateStore::readJson($f);
+        return (int)(is_array($j) ? ($j['gen'] ?? 0) : 0);
     }
 
     /** Launch 1 profile: checks -> port -> Popen (reuse launch_chrome) -> DB running. */
@@ -348,8 +407,20 @@ class ChromeBatchManager
                 return ['ok' => false, 'error' => 'busy_' . $life['state']];
             }
             self::lifeSet($id, self::ST_PREPARING, $batchId);
-            if (!file_exists(chrome_path())) {
+            if (!chrome_available()) {
+                self::lifeSet($id, self::ST_ERROR, $batchId);
                 return ['ok' => false, 'error' => 'chrome_not_found'];
+            }
+            // Portable profile dir (PC khac co the o dia khac): resolve + migrate
+            try {
+                require_once __DIR__ . '/ProfilePathResolver.php';
+                $pr = ProfilePathResolver::resolve($p);
+                if (!$pr['exists']) {
+                    self::lifeSet($id, self::ST_ERROR, $batchId);
+                    return ['ok' => false, 'error' => 'INVALID_PROFILE_DIR'];
+                }
+                if ($pr['migrated']) $p['user_data_dir'] = $pr['path'];
+            } catch (Throwable $e) {
             }
             // Cu chay sai config -> dong nhe truoc relaunch (snapshot nhanh, khong wait)
             try {
@@ -367,7 +438,8 @@ class ChromeBatchManager
                     $oldPort = (int)($p['debug_port'] ?? 0);
                     if ($oldPort > 0 && cdp_reachable($oldPort)) {
                         $snap = TabSessionStore::snapshotLive($id, $oldPort, false, self::SNAPSHOT_BUDGET_MS);
-                        if ($snap !== null) TabSessionStore::save($id, $snap);
+                        if ($snap !== null) TabSessionStore::save($id, $snap,
+                            ['generation' => self::currentGeneration($id), 'phase' => 'PRE_CLOSE']);
                     }
                     kill_chrome_processes($p);
                 }
@@ -394,6 +466,23 @@ class ChromeBatchManager
             }
             $port = allocate_debug_port($p);
             if (!$port) return ['ok' => false, 'error' => 'no_debug_port'];
+            // §5 PORT collision trong batch: port vua cap khong duoc trung port
+            // cua profile khac trong cung batch (DB check co the miss khi 2 chunk
+            // chay sat nhau). Trung -> coi nhu PORT_CONFLICT, khong launch.
+            try {
+                $bNow = self::loadBatch('open', $batchId);
+                if (is_array($bNow)) {
+                    foreach ((array)($bNow['states'] ?? []) as $oStr => $oSt) {
+                        if ((int)$oStr === $id) continue;
+                        if (!in_array($oSt, [self::ST_STARTING, self::ST_WINDOW_READY, self::ST_VERIFYING], true)) continue;
+                        $ol = self::lifeGet((int)$oStr);
+                        if ($ol !== null && (int)($ol['port'] ?? 0) === (int)$port) {
+                            return ['ok' => false, 'error' => 'PORT_CONFLICT'];
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+            }
             $url = get_setting('home_url', 'https://www.google.com/');
             $tp = microtime(true);
             try {
@@ -422,12 +511,15 @@ class ChromeBatchManager
                 return ['ok' => false, 'error' => mb_substr($e->getMessage(), 0, 200), 'proxy_dead' => true];
             }
             $popenMs = (int)round((microtime(true) - $tp) * 1000);
+            // Popen/dispatched != RUNNING: chi luu debug_port, GIU status='stopped'
+            // cho den khi startPoll verify du (process + HWND + CDP) moi set
+            // status='running'. Nhu vay UI dem tu DB khong bao gio thay 32/32 gia.
             try {
-                db()->prepare('UPDATE profiles SET status=?, last_opened=NOW(), debug_port=? WHERE id=?')
-                    ->execute(['running', $port, $id]);
+                db()->prepare('UPDATE profiles SET debug_port=? WHERE id=?')
+                    ->execute([$port, $id]);
             } catch (Throwable $e) {
             }
-            self::lifeSet($id, self::ST_STARTING, $batchId, ['port' => $port]);
+            self::lifeSet($id, self::ST_STARTING, $batchId, ['port' => $port, 'launched_at' => microtime(true)]);
             try {
                 SyncLogger::info('start_batch', '[START] profile=' . $id . ' popen=' . $popenMs . 'ms port=' . $port, $id);
             } catch (Throwable $e) {
@@ -441,14 +533,22 @@ class ChromeBatchManager
 
     /**
      * POLL: 1 discovery scan -> per-profile WINDOW_READY/RUNNING.
-     * stable = guard cleared (placement verify xong) + CDP reachable.
+     * RUNNING chi khi: process con song + HWND + CDP reachable (verified).
+     * Qua START_VERIFY_TIMEOUT_SEC van chua du -> START_FAILED (window_timeout/
+     * cdp_timeout/process_exited), DB ve 'stopped'. DB status='running' chi set
+     * TAI DAY (verified), khong set luc Popen.
      */
     public static function startPoll(string $batchId): array
     {
         $b = self::loadBatch('open', $batchId);
         if (!$b) return ['ok' => false, 'message' => 'Batch khong ton tai'];
+        $now = microtime(true);
         $counts = ['queued' => 0, 'starting' => 0, 'windows' => 0, 'stable' => 0,
             'running' => 0, 'errors' => 0, 'total' => count((array)($b['states'] ?? []))];
+        $failedIds = [];
+        foreach ((array)($b['errors'] ?? []) as $eId => $eReason) {
+            $failedIds[] = ['id' => (int)$eId, 'error' => (string)$eReason];
+        }
         try {
             $disc = SyncWindowDiscovery::discover(false);
             $hwndByPid = [];
@@ -460,6 +560,28 @@ class ChromeBatchManager
         } catch (Throwable $e) {
             $hwndByPid = [];
         }
+        // 1 process scan cho ca batch (phat hien PROCESS_EXITED som)
+        try {
+            $aliveMap = chrome_running_info();
+            $aliveNorm = [];
+            foreach ($aliveMap as $d => $v) $aliveNorm[self::normDir((string)$d)] = true;
+        } catch (Throwable $e) {
+            $aliveNorm = [];
+        }
+        $dirById = [];
+        try {
+            $idsAll = array_map('intval', array_keys((array)($b['states'] ?? [])));
+            if ($idsAll) {
+                $in = implode(',', array_fill(0, count($idsAll), '?'));
+                $st = db()->prepare("SELECT id, user_data_dir FROM profiles WHERE id IN ($in)");
+                $st->execute($idsAll);
+                foreach ($st->fetchAll() as $r) {
+                    $dirById[(int)$r['id']] = (string)($r['user_data_dir'] ?? '');
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        if (!isset($b['errors']) || !is_array($b['errors'])) $b['errors'] = [];
         foreach ((array)($b['states'] ?? []) as $idStr => $st) {
             $id = (int)$idStr;
             if ($st === self::ST_QUEUED) {
@@ -488,11 +610,15 @@ class ChromeBatchManager
                 }
             }
             $cdpOk = $port > 0 && cdp_reachable($port);
+            $launchAt = (float)(($b['launched_at'] ?? [])[$idStr] ?? ($life['launched_at'] ?? ($b['t0'] ?? $now)));
+            $age = $now - $launchAt;
+            $dir = $dirById[$id] ?? '';
+            $procAlive = $dir !== '' && isset($aliveNorm[self::normDir($dir)]);
             if ($hasHwnd) {
                 $counts['windows']++;
                 if ($b['states'][$idStr] === self::ST_STARTING) {
                     $b['states'][$idStr] = self::ST_WINDOW_READY;
-                    self::lifeSet($id, self::ST_WINDOW_READY, $batchId, ['port' => $port]);
+                    self::lifeSet($id, self::ST_WINDOW_READY, $batchId, ['port' => $port, 'launched_at' => $launchAt]);
                     try {
                         SyncLogger::info('start_batch', '[HWND] profile=' . $id . ' hwnd=' . $hwndByPid[$id], $id);
                     } catch (Throwable $e) {
@@ -506,15 +632,73 @@ class ChromeBatchManager
                 if ($b['states'][$idStr] !== self::ST_RUNNING) {
                     $b['states'][$idStr] = self::ST_RUNNING;
                     self::lifeClear($id);
+                    try {
+                        db()->prepare('UPDATE profiles SET status=?, last_opened=NOW() WHERE id=?')
+                            ->execute(['running', $id]);
+                    } catch (Throwable $e) {
+                    }
+                    try {
+                        SyncLogger::info('start_batch', '[VERIFIED] profile=' . $id . ' port=' . $port, $id);
+                    } catch (Throwable $e) {
+                    }
                 }
                 $counts['running']++;
             } elseif ($hasHwnd) {
                 if ($b['states'][$idStr] === self::ST_WINDOW_READY) {
                     $b['states'][$idStr] = self::ST_VERIFYING;
-                    self::lifeSet($id, self::ST_VERIFYING, $batchId, ['port' => $port]);
+                    self::lifeSet($id, self::ST_VERIFYING, $batchId, ['port' => $port, 'launched_at' => $launchAt]);
+                }
+                // Qua timeout van HWND nhung thieu CDP/guard -> CDP_TIMEOUT
+                if ($age >= self::START_VERIFY_TIMEOUT_SEC && !$cdpOk) {
+                    $b['states'][$idStr] = self::ST_ERROR;
+                    $b['errors'][$idStr] = 'CDP_TIMEOUT';
+                    $failedIds[] = ['id' => $id, 'error' => 'CDP_TIMEOUT'];
+                    self::lifeSet($id, self::ST_ERROR, $batchId);
+                    try {
+                        db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $id]);
+                        SyncLogger::info('start_batch', '[START FAILED] profile=' . $id . ' reason=CDP_TIMEOUT', $id);
+                    } catch (Throwable $e) {
+                    }
+                    $counts['errors']++;
+                    $counts['windows']--; // khong con pending verify -> done khong ket
+                }
+            } else {
+                // Chua HWND: process chet som (sau grace ngan) -> PROCESS_EXITED
+                if (!$procAlive && $age >= self::START_NO_PROCESS_GRACE_SEC) {
+                    $b['states'][$idStr] = self::ST_ERROR;
+                    $b['errors'][$idStr] = 'PROCESS_EXITED';
+                    $failedIds[] = ['id' => $id, 'error' => 'PROCESS_EXITED'];
+                    self::lifeSet($id, self::ST_ERROR, $batchId);
+                    try {
+                        db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $id]);
+                        SyncLogger::info('start_batch', '[START FAILED] profile=' . $id . ' reason=PROCESS_EXITED', $id);
+                    } catch (Throwable $e) {
+                    }
+                    $counts['errors']++;
+                    $counts['starting']--;
+                } elseif ($age >= self::START_VERIFY_TIMEOUT_SEC) {
+                    // Qua timeout van khong HWND -> WINDOW_TIMEOUT
+                    $b['states'][$idStr] = self::ST_ERROR;
+                    $b['errors'][$idStr] = 'WINDOW_TIMEOUT';
+                    $failedIds[] = ['id' => $id, 'error' => 'WINDOW_TIMEOUT'];
+                    self::lifeSet($id, self::ST_ERROR, $batchId);
+                    try {
+                        db()->prepare('UPDATE profiles SET status=? WHERE id=?')->execute(['stopped', $id]);
+                        SyncLogger::info('start_batch', '[START FAILED] profile=' . $id . ' reason=WINDOW_TIMEOUT', $id);
+                    } catch (Throwable $e) {
+                    }
+                    $counts['errors']++;
+                    $counts['starting']--;
                 }
             }
         }
+        if ($counts['starting'] < 0) $counts['starting'] = 0;
+        if ($counts['windows'] < 0) $counts['windows'] = 0;
+        // Batch result semantics (§15): requested/total, verified_running,
+        // failed — UI chi hien verified, khong hien dispatched.
+        $counts['verified_running'] = $counts['running'];
+        $counts['failed'] = $counts['errors'];
+        $counts['requested'] = $counts['total'];
         $done = ($counts['queued'] === 0 && ($counts['starting'] === 0)
             && ($counts['windows'] === $counts['stable']));
         if ($done && empty($b['notified'])) {
@@ -551,7 +735,8 @@ class ChromeBatchManager
         }
         self::saveBatch('open', $batchId, $b);
         $counts['done'] = $done;
-        return ['ok' => true, 'batch_id' => $batchId, 'counts' => $counts, 'done' => $done];
+        return ['ok' => true, 'batch_id' => $batchId, 'counts' => $counts, 'done' => $done,
+            'failed_ids' => array_values($failedIds)];
     }
 
     public static function placementLocked(int $id): bool
@@ -563,6 +748,19 @@ class ChromeBatchManager
             @unlink($f);
             return false;
         }
+        // USER_LAYOUT lock (sau Arrange) khong phai transitional startup:
+        // cho phep save placement + khong chan poll verified.
+        // Guard may khac: khong lock.
+        $g = StateStore::readJson($f);
+        if (!is_array($g)) {
+            @unlink($f);
+            return false;
+        }
+        if (isset($g['machine']) && !MachineContext::isCurrent($g)) {
+            @unlink($f);
+            return false;
+        }
+        if (($g['owner'] ?? '') === 'USER_LAYOUT') return false;
         return true;
     }
 
@@ -613,7 +811,9 @@ class ChromeBatchManager
         }
         $hwndByPid = [];
         foreach ($windows as $w) {
-            if ($w->profileId !== null && $w->class === 'Chrome_WidgetWin_1' && $w->visible && !$w->minimized) {
+            // Bao gom ca window minimized: van la top-level Chrome can WM_CLOSE.
+            // (Bo loc !$w->minimized — day la 1 root cause click-1 sot window.)
+            if ($w->profileId !== null && $w->class === 'Chrome_WidgetWin_1' && $w->visible) {
                 $pid = (int)$w->profileId;
                 if (!isset($hwndByPid[$pid]) || $w->area() > 0) $hwndByPid[$pid] = $w->hwnd;
             }
@@ -627,6 +827,7 @@ class ChromeBatchManager
         }
         $states = [];
         $ports = [];
+        $snapSkipped = 0; // qua tong budget -> dung last-known, van close (§24-§25)
         foreach ($ids as $id) {
             // Restart intent cho STARTING bi Stop chen ngang (§39): huy start, se CLOSING
             $life = self::lifeGet($id);
@@ -647,10 +848,15 @@ class ChromeBatchManager
             $port = (int)($p['debug_port'] ?? 0);
             if ($port > 0) $ports[$id] = $port;
             // Quick final snapshot (khong precise-rotate; dung autosave fallback) (§24-§26)
-            try {
+            // Best-effort + TONG BUDGET cho ca batch: het gio -> skip, dung last-known.
+            $snapBudgetLeft = self::STOP_SNAPSHOT_TOTAL_BUDGET_MS - (int)round((microtime(true) - $tSnap) * 1000);
+            if ($snapBudgetLeft <= 0) {
+                $snapSkipped++;
+            } else try {
                 if ($port > 0 && cdp_reachable($port)) {
-                    $snap = TabSessionStore::snapshotLive($id, $port, false, self::SNAPSHOT_BUDGET_MS);
-                    if ($snap !== null) TabSessionStore::save($id, $snap);
+                    $snap = TabSessionStore::snapshotLive($id, $port, false, min(self::SNAPSHOT_BUDGET_MS, $snapBudgetLeft));
+                    if ($snap !== null) TabSessionStore::save($id, $snap,
+                        ['generation' => self::currentGeneration($id), 'phase' => 'PRE_CLOSE']);
                 }
             } catch (Throwable $e) {
             }
@@ -664,39 +870,23 @@ class ChromeBatchManager
             $states[$id] = self::ST_CLOSING;
         }
         $snapshotMs = (int)round((microtime(true) - $tSnap) * 1000);
-        // Phase B: dispatch WM_CLOSE 1 lan cho TAT CA (§27-§28)
+        // Phase B: dispatch WM_CLOSE gan nhu dong thoi cho TAT CA (§27-§28)
         $tDisp = microtime(true);
         $hwnds = array_values(array_filter($hwndByPid, fn($h, $id) => in_array($id, $ids, true), ARRAY_FILTER_USE_BOTH));
-        $hwnds = array_values(array_unique(array_map('intval', $hwnds)));
-        $dispatched = 0;
-        if ($hwnds) {
-            try {
-                $script = __DIR__ . '/win32_close.ps1';
-                $cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' . $script . '"'
-                    . ' -Hwnd "' . implode(',', $hwnds) . '"';
-                $out = @shell_exec($cmd);
-                $j = is_string($out) ? json_decode(trim($out), true) : null;
-                if (is_array($j) && isset($j['results'])) {
-                    foreach ((array)$j['results'] as $r) {
-                        if (!empty($r['ok'])) $dispatched++;
-                    }
-                } else {
-                    $dispatched = count($hwnds); // post fire-and-forget, gia dinh ok
-                }
-            } catch (Throwable $e) {
-            }
-        }
+        $dispatched = self::dispatchWmClose($hwnds);
         $dispatchMs = (int)round((microtime(true) - $tDisp) * 1000);
         // Don keepers 1 lan (tat ca ports)
         self::batchKillKeepers(array_values($ports));
         self::saveBatch('close', $batchId, ['batch_id' => $batchId, 'ids' => $ids,
             'states' => $states, 't0' => $tAll, 'grace_ms' => $grace, 'mode' => $mode,
             'status' => 'closing', 'snapshot_ms' => $snapshotMs, 'dispatch_ms' => $dispatchMs,
-            'dispatched' => $dispatched, 'hwnds' => $hwnds]);
+            'dispatched' => $dispatched, 'hwnds' => $hwnds, 'forced_total' => 0,
+            'redispatched' => false, 'snap_skipped' => $snapSkipped]);
         try {
             SyncLogger::info('stop_batch', '[STOP BATCH] id=' . $batchId . ' profiles=' . count($ids)
                 . ' mode=' . $mode);
-            SyncLogger::info('stop_batch', '[SNAPSHOT] ' . count($ids) . ' profiles duration=' . $snapshotMs . 'ms');
+            SyncLogger::info('stop_batch', '[SNAPSHOT] ' . count($ids) . ' profiles duration=' . $snapshotMs
+                . 'ms skipped=' . $snapSkipped);
             SyncLogger::info('stop_batch', '[WM_CLOSE] dispatched=' . $dispatched . '/' . count($hwnds)
                 . ' duration=' . $dispatchMs . 'ms');
         } catch (Throwable $e) {
@@ -717,11 +907,23 @@ class ChromeBatchManager
         $t0 = (float)($b['t0'] ?? microtime(true));
         $grace = (int)($b['grace_ms'] ?? self::GRACE_SAFE_MS);
         $pastGrace = ((microtime(true) - $t0) * 1000) >= $grace;
-        // 1 scan duy nhat
+        // 1 scan duy nhat: process + HWND (cho redispatch tu dong)
+        $aliveNorm = [];
         try {
             $aliveMap = chrome_running_info();
+            foreach ($aliveMap as $d => $v) $aliveNorm[self::normDir((string)$d)] = true;
         } catch (Throwable $e) {
-            $aliveMap = [];
+            $aliveNorm = [];
+        }
+        $stuckHwnds = [];
+        try {
+            $disc2 = SyncWindowDiscovery::discover(false);
+            foreach ($disc2['windows'] as $w) {
+                if ($w->profileId !== null && $w->class === 'Chrome_WidgetWin_1' && $w->visible) {
+                    $stuckHwnds[(int)$w->profileId] = $w->hwnd;
+                }
+            }
+        } catch (Throwable $e) {
         }
         $dirById = [];
         try {
@@ -730,7 +932,7 @@ class ChromeBatchManager
                 $st = db()->prepare("SELECT id, user_data_dir FROM profiles WHERE id IN ($in)");
                 $st->execute($ids);
                 foreach ($st->fetchAll() as $r) {
-                    $dirById[(int)$r['id']] = strtolower(trim((string)$r['user_data_dir']));
+                    $dirById[(int)$r['id']] = (string)($r['user_data_dir'] ?? '');
                 }
             }
         } catch (Throwable $e) {
@@ -745,7 +947,7 @@ class ChromeBatchManager
                 continue;
             }
             $dir = $dirById[$id] ?? '';
-            $alive = $dir !== '' && isset($aliveMap[$dir]);
+            $alive = $dir !== '' && isset($aliveNorm[self::normDir($dir)]);
             if (!$alive) {
                 $b['states'][$id] = self::ST_STOPPED;
                 $closed++;
@@ -768,10 +970,27 @@ class ChromeBatchManager
             // Con song: qua grace -> stuck (fallback o duoi)
             if ($pastGrace) $stuck[] = $id;
         }
-        // Fallback: terminate CHI root tree cua stuck profiles (khong /IM chrome.exe) (§32)
+        // Fallback tu dong trong CUNG 1 click (§30-§32):
+        // 1) re-dispatch WM_CLOSE cho stuck profiles co HWND (stale HWND / window
+        //    xuat hien muon — truoc day phai click lan 2 moi gui lai).
+        // 2) force-kill targeted theo user-data-dir (khong taskkill /IM).
         $fallback = 0;
         if ($stuck) {
+            $reHwnds = [];
+            foreach ($stuck as $sid) {
+                if (isset($stuckHwnds[$sid])) $reHwnds[] = (int)$stuckHwnds[$sid];
+            }
+            if ($reHwnds && empty($b['redispatched'])) {
+                $reOk = self::dispatchWmClose($reHwnds);
+                $b['redispatched'] = true;
+                try {
+                    SyncLogger::info('stop_batch', '[RE-DISPATCH] batch=' . $batchId
+                        . ' hwnds=' . count($reHwnds) . ' ok=' . $reOk);
+                } catch (Throwable $e) {
+                }
+            }
             $fallback = self::forceKillDirs($stuck, $dirById);
+            $b['forced_total'] = (int)($b['forced_total'] ?? 0) + max(0, $fallback);
             try {
                 SyncLogger::info('stop_batch', '[FALLBACK] batch=' . $batchId . ' stuck=' . count($stuck)
                     . ' killed_dirs=' . $fallback);
@@ -801,8 +1020,7 @@ class ChromeBatchManager
             // Event: ĐÓNG PROFILE HOÀN TẤT (§21) — 1 summary (graceful/forced/duration)
             try {
                 require_once __DIR__ . '/EventBus.php';
-                // Forced fallback: stuck da force-kill trong cac poll truoc
-                $forced = max(0, $total - $closed);
+                $forced = (int)($b['forced_total'] ?? 0);
                 EventBus::emit(AppEvent::BATCH_COMPLETED, AppEvent::MOD_BROWSER, AppEvent::SEV_SUCCESS,
                     'ĐÓNG PROFILE HOÀN TẤT',
                     "Total: $total\nGraceful: $closed\nForced fallback: $forced\nDuration: " . round($ms / 1000, 1) . 's',
@@ -824,6 +1042,7 @@ class ChromeBatchManager
         self::saveBatch('close', $batchId, $b);
         return ['ok' => true, 'batch_id' => $batchId, 'closed' => $closed, 'total' => $total,
             'stuck' => $stuck, 'fallback_killed' => $fallback, 'restarted' => $restarted,
+            'forced_total' => (int)($b['forced_total'] ?? 0),
             'dispatched' => (int)($b['dispatched'] ?? 0), 'snapshot_ms' => (int)($b['snapshot_ms'] ?? 0),
             'dispatch_ms' => (int)($b['dispatch_ms'] ?? 0), 'done' => $done];
     }
@@ -844,9 +1063,9 @@ class ChromeBatchManager
     {
         $likes = [];
         foreach ($ids as $id) {
-            $d = $dirById[$id] ?? '';
+            $d = trim((string)($dirById[$id] ?? ''));
             if ($d === '') continue;
-            $likes[] = $d;
+            $likes[] = rtrim($d, '/\\');
         }
         if (!$likes) return 0;
         try {

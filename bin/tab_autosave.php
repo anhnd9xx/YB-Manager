@@ -16,6 +16,7 @@ if (!$lock) exit(0);
 if (!flock($lock, LOCK_EX | LOCK_NB)) exit(0);
 fwrite($lock, (string)getmypid());
 fflush($lock);
+@file_put_contents(__DIR__ . '/.tab_autosave.pid', (string)getmypid());
 
 fwrite(STDOUT, "tab_autosave started pid=" . getmypid() . "\n");
 fflush(STDOUT);
@@ -66,7 +67,9 @@ while (true) {
                 $live = TabSessionStore::readLive($pid, $port);
                 if ($live === null) continue;
                 $snap = TabSessionManager::buildSnapshot($live['tabs'], (int)$live['activeIndex']);
-                $r = TabSessionStore::save($pid, $snap);
+                require_once __DIR__ . '/../sync/ChromeBatchManager.php';
+                $r = TabSessionStore::save($pid, $snap,
+                    ['generation' => ChromeBatchManager::currentGeneration($pid), 'phase' => 'AUTOSAVE']);
                 if ($r['savedCurrent'] || $r['savedGood']) {
                     fwrite(STDOUT, date('H:i:s') . " #$pid autosaved " . count($snap['tabs']) . " tabs\n");
                     fflush(STDOUT);

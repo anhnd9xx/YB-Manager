@@ -83,6 +83,7 @@ class SyncLayoutManager
 
     /**
      * Xep grid (tile): chia deu working area, dua moi window vao 1 o.
+     * Apply 1 BATCH duy nhat (DeferWindowPos, khong cuop focus) — single owner.
      * Tra ve ['ok','monitor'=>, 'rows','cols','results'=>[{hwnd,profileId,ok,rect?,error?}]].
      */
     public static function tile(array $hwnds = [], array $profileIds = [], ?int $monitorId = null, int $margin = 8, int $gapX = 8, int $gapY = 8): array
@@ -92,13 +93,18 @@ class SyncLayoutManager
         $wa = self::workArea($monitorId);
         if ($wa === null) return ['ok' => false, 'message' => 'Khong lay duoc working area monitor'];
         $g = self::computeGrid(count($wins), $wa, $margin, $gapX, $gapY);
-        $results = [];
+        $batchIn = [];
         foreach ($wins as $i => $w) {
             $rc = $g['rects'][$i];
-            $r = SyncWindowManager::moveResize($w->hwnd, $rc['x'], $rc['y'], $rc['w'], $rc['h']);
+            $batchIn[] = ['hwnd' => $w->hwnd, 'x' => $rc['x'], 'y' => $rc['y'], 'w' => $rc['w'], 'h' => $rc['h']];
+        }
+        $out = SyncWindowManager::applyLayoutBatch($batchIn, true, ['reason' => 'legacy_tile']);
+        $results = [];
+        foreach ($wins as $w) {
+            $one = $out[(string)(int)$w->hwnd] ?? null;
             $results[] = ['hwnd' => $w->hwnd, 'profileId' => $w->profileId, 'profileName' => $w->profileName,
-                          'ok' => $r['ok'], 'rect' => $r['rect'] ?? null, 'error' => $r['error'] ?? null];
-            if (!$r['ok']) SyncLogger::warn('layout_tile', "Tile hwnd={$w->hwnd} that bai: " . ($r['error'] ?? ''), $w->profileId);
+                          'ok' => !empty($one['ok']), 'rect' => $one['rect'] ?? null, 'error' => $one['error'] ?? null];
+            if (empty($one['ok'])) SyncLogger::warn('layout_tile', "Tile hwnd={$w->hwnd} that bai: " . ($one['error'] ?? ''), $w->profileId);
         }
         SyncLogger::info('layout_tile', count($wins) . ' window -> grid ' . $g['rows'] . 'x' . $g['cols'] . ' monitor ' . $wa['monitorId']);
         return ['ok' => true, 'monitor' => $wa, 'rows' => $g['rows'], 'cols' => $g['cols'], 'results' => $results];
@@ -114,7 +120,7 @@ class SyncLayoutManager
         if ($w > 7680 || $h > 4320) return ['ok' => false, 'message' => 'Kich thuoc qua lon'];
         $wins = self::targets($hwnds, $profileIds);
         if (!$wins) return ['ok' => false, 'message' => 'Khong co window nao de resize'];
-        $results = [];
+        $batchIn = [];
         foreach ($wins as $wd) {
             // Kep vi tri hien tai vao work area monitor cua window (khong day ra ngoai man hinh)
             $x = $wd->rect['x'] ?? 0;
@@ -124,10 +130,15 @@ class SyncLayoutManager
                 $x = max($wa['x'], min($x, $wa['x'] + $wa['w'] - min($w, $wa['w'])));
                 $y = max($wa['y'], min($y, $wa['y'] + $wa['h'] - min($h, $wa['h'])));
             }
-            $r = SyncWindowManager::moveResize($wd->hwnd, $x, $y, $w, $h);
+            $batchIn[] = ['hwnd' => $wd->hwnd, 'x' => $x, 'y' => $y, 'w' => $w, 'h' => $h];
+        }
+        $out = SyncWindowManager::applyLayoutBatch($batchIn, true, ['reason' => 'legacy_uniform']);
+        $results = [];
+        foreach ($wins as $wd) {
+            $one = $out[(string)(int)$wd->hwnd] ?? null;
             $results[] = ['hwnd' => $wd->hwnd, 'profileId' => $wd->profileId, 'profileName' => $wd->profileName,
-                          'ok' => $r['ok'], 'rect' => $r['rect'] ?? null, 'error' => $r['error'] ?? null];
-            if (!$r['ok']) SyncLogger::warn('layout_uniform', "Uniform hwnd={$wd->hwnd} that bai", $wd->profileId);
+                          'ok' => !empty($one['ok']), 'rect' => $one['rect'] ?? null, 'error' => $one['error'] ?? null];
+            if (empty($one['ok'])) SyncLogger::warn('layout_uniform', "Uniform hwnd={$wd->hwnd} that bai", $wd->profileId);
         }
         SyncLogger::info('layout_uniform', count($wins) . " window -> {$w}x{$h}");
         return ['ok' => true, 'results' => $results];
@@ -151,17 +162,22 @@ class SyncLayoutManager
         $w = min($w, $wa['w']);
         $h = min($h, $wa['h']);
         $offset = max(0, min(200, $offset));
-        $results = [];
+        $batchIn = [];
         foreach ($wins as $i => $wd) {
             // Kep trong work area ke ca khi cascade nhieu tang
             $maxDx = max(0, $wa['w'] - $w);
             $maxDy = max(0, $wa['h'] - $h);
             $dx = $offset > 0 ? (($i * $offset) % (max(1, $maxDx + 1))) : 0;
             $dy = $offset > 0 ? (($i * $offset) % (max(1, $maxDy + 1))) : 0;
-            $r = SyncWindowManager::moveResize($wd->hwnd, $wa['x'] + $dx, $wa['y'] + $dy, $w, $h);
+            $batchIn[] = ['hwnd' => $wd->hwnd, 'x' => $wa['x'] + $dx, 'y' => $wa['y'] + $dy, 'w' => $w, 'h' => $h];
+        }
+        $out = SyncWindowManager::applyLayoutBatch($batchIn, true, ['reason' => 'legacy_overlap']);
+        $results = [];
+        foreach ($wins as $wd) {
+            $one = $out[(string)(int)$wd->hwnd] ?? null;
             $results[] = ['hwnd' => $wd->hwnd, 'profileId' => $wd->profileId, 'profileName' => $wd->profileName,
-                          'ok' => $r['ok'], 'rect' => $r['rect'] ?? null, 'error' => $r['error'] ?? null];
-            if (!$r['ok']) SyncLogger::warn('layout_overlap', "Overlap hwnd={$wd->hwnd} that bai", $wd->profileId);
+                          'ok' => !empty($one['ok']), 'rect' => $one['rect'] ?? null, 'error' => $one['error'] ?? null];
+            if (empty($one['ok'])) SyncLogger::warn('layout_overlap', "Overlap hwnd={$wd->hwnd} that bai", $wd->profileId);
         }
         SyncLogger::info('layout_overlap', count($wins) . " window cascade offset=$offset monitor " . $wa['monitorId']);
         return ['ok' => true, 'monitor' => $wa, 'results' => $results];

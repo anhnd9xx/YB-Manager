@@ -13,17 +13,33 @@ class SyncWindowDiscovery
     /** @var array|null cache theo request */
     private static ?array $cache = null;
 
+    /** Xoa cache request (dung truoc arrange / rescan de lay topology tuoi). */
+    public static function clearCache(): void
+    {
+        self::$cache = null;
+    }
+
+    /** Thong tin session/method cua lan discover gan nhat (diagnostics). */
+    public static function lastMeta(): array
+    {
+        $c = self::$cache;
+        if (!is_array($c)) return ['monitorEnumMethod' => null, 'session' => null];
+        return ['monitorEnumMethod' => $c['monitorEnumMethod'] ?? null,
+            'session' => $c['session'] ?? null];
+    }
+
     /** Chuan hoa duong dan profile de so khop (lowercase, / -> \, bo /\ " cuoi). */
     public static function normDir(string $d): string
     {
         return rtrim(strtolower(str_replace('/', '\\', trim($d, " \t\n\r\0\x0B\""))), '\\');
     }
 
-    /** Chay script discovery, tra ve ['processes'=>[], 'windows'=>[SyncWindowInfo], 'monitors'=>[], 'foregroundHwnd'=>int]. */
+    /** Chay script discovery, tra ve ['processes'=>[], 'windows'=>[SyncWindowInfo], 'monitors'=>[], 'foregroundHwnd'=>int, 'monitorEnumMethod'=>string, 'session'=>[]]. */
     public static function discover(bool $useCache = true): array
     {
         if ($useCache && self::$cache !== null) return self::$cache;
-        $out = ['processes' => [], 'windows' => [], 'monitors' => [], 'foregroundHwnd' => 0];
+        $out = ['processes' => [], 'windows' => [], 'monitors' => [], 'foregroundHwnd' => 0,
+            'monitorEnumMethod' => null, 'session' => null];
         try {
             $script = __DIR__ . '/win32_discover.ps1';
             if (!is_file($script)) {
@@ -50,6 +66,13 @@ class SyncWindowDiscovery
             $out['processes'] = $data['processes'] ?? [];
             $out['monitors'] = $data['monitors'] ?? [];
             $out['foregroundHwnd'] = (int)($data['foregroundHwnd'] ?? 0);
+            $out['monitorEnumMethod'] = $data['monitorEnumMethod'] ?? null;
+            $out['session'] = $data['session'] ?? null;
+            if (empty($out['monitors'])) {
+                SyncLogger::warn('discovery', '[MONITOR] enumeration tra ve 0 monitor'
+                    . ' method=' . ($out['monitorEnumMethod'] ?? '?')
+                    . ' session=' . json_encode($out['session'] ?? null, JSON_UNESCAPED_UNICODE));
+            }
 
             // Map user-data-dir -> profile. CHUAN HOA 2 phia (lowercase + bo /\ cuoi)
             // vi Chrome quote arg kieu --user-data-dir="C:\...\K__nh_1\" (du backslash).

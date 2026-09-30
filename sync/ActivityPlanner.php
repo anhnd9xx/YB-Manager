@@ -77,8 +77,13 @@ class ActivityPlanner
         $days = array_map('intval', explode(',', (string)($cfg['active_days'] ?? '1,2,3,4,5,6,7')));
         if (!in_array($dow, $days, true)) return [];
         $n = mt_rand((int)$cfg['sessions_min'], (int)$cfg['sessions_max']);
+        // 24/24: full-day window; WINDOW: gio cau hinh
         $ss = (string)($cfg['schedule_start'] ?? '08:00');
         $se = (string)($cfg['schedule_end'] ?? '22:00');
+        if (strtoupper((string)($cfg['schedule_mode'] ?? 'WINDOW')) === 'ALWAYS') {
+            $ss = '00:00';
+            $se = '23:59';
+        }
         $winStart = strtotime("$today $ss") + 900;
         $winEnd = strtotime("$today $se") - 900;
         if ($winEnd <= $winStart) $winEnd = $winStart + 3600;
@@ -386,6 +391,11 @@ class ActivityPlanner
         } catch (Throwable $e) {
         }
         self::setStatus($sid, self::ST_RUNNING);
+        try {
+            db()->prepare("UPDATE activity_configs SET runtime_state='RUNNING' WHERE profile_id=? AND enabled=1")
+                ->execute([$profileId]);
+        } catch (Throwable $e) {
+        }
         $t0 = microtime(true);
         $tasks = json_decode((string)($row['tasks_json'] ?? ''), true);
         if (!is_array($tasks)) $tasks = [];
@@ -413,12 +423,22 @@ class ActivityPlanner
             }
         }
         $ms = (int)round((microtime(true) - $t0) * 1000);
+        $sessionFailed = ($fail > 0 && $ok === 0);
         try {
             db()->prepare('UPDATE activity_sessions SET status=?, success_count=?, failed_count=?,
                     completed_at=NOW() WHERE id=?')
-                ->execute([$fail > 0 && $ok === 0 ? self::ST_FAILED : self::ST_DONE, $ok, $fail, $sid]);
+                ->execute([$sessionFailed ? self::ST_FAILED : self::ST_DONE, $ok, $fail, $sid]);
             db()->prepare('UPDATE activity_configs SET last_run_at=NOW() WHERE profile_id=?')
                 ->execute([$profileId]);
+        } catch (Throwable $e) {
+        }
+        // Supervisor-lite: session fail hoan toan -> streak; success -> reset
+        try {
+            ActivityManager::noteResult($profileId, !$sessionFailed, $sessionFailed ? 'SESSION_FAILED' : null);
+            if (!$sessionFailed) {
+                db()->prepare("UPDATE activity_configs SET runtime_state='WAITING'
+                    WHERE profile_id=? AND runtime_state='RUNNING'")->execute([$profileId]);
+            }
         } catch (Throwable $e) {
         }
         try {
@@ -494,14 +514,35 @@ class ActivityPlanner
         }
     }
 
-    /** next_run_at = PLANNED future som nhat (cho card "Tiep theo"). */
+    /** next_run_at = min(session PLANNED future, legacy cycle) — UI countdown dung nhat. */
     public static function updateNextRun(int $profileId): void
     {
         try {
             $st = db()->prepare("SELECT MIN(run_at) FROM activity_sessions WHERE profile_id=?
                 AND plan_date=CURDATE() AND status='PLANNED' AND run_at>NOW()");
             $st->execute([$profileId]);
-            $next = $st->fetchColumn();
+            $next = $st->fetchColumn() ?: null;
+            // Legacy cycle (chu ky modal) cung chay o planner mode -> lay min.
+            // RANDOM: ton trong countdown hien tai (khong reset lien tuc gay doi vo han).
+            try {
+                require_once __DIR__ . '/ActivityScheduler.php';
+                $cfg = ActivityManager::getConfig($profileId);
+                if (!empty($cfg['enabled'])) {
+                    $leg = null;
+                    if (($cfg['interval_mode'] ?? 'FIXED') === 'RANDOM_RANGE') {
+                        $stored = (string)($cfg['next_run_at'] ?? '');
+                        if ($stored !== '' && strtotime($stored) > time()) {
+                            $leg = $stored;
+                        } else {
+                            $leg = ActivityScheduler::calculateNextRun($cfg);
+                        }
+                    } else {
+                        $leg = ActivityScheduler::calculateNextRun($cfg);
+                    }
+                    if ($next === null || $leg < (string)$next) $next = $leg;
+                }
+            } catch (Throwable $e) {
+            }
             db()->prepare('UPDATE activity_configs SET next_run_at=? WHERE profile_id=?')
                 ->execute([$next ?: null, $profileId]);
         } catch (Throwable $e) {
